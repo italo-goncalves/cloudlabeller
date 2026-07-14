@@ -1,0 +1,146 @@
+# CloudLabeller — photogrammetric reconstruction and bidirectional 2D <-> 3D
+# point-cloud labelling with U-Net label propagation.
+# Copyright (C) 2026 Ítalo Gomes Gonçalves
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+# Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Commercial licensing: this program is also available under a separate
+# commercial license from the author — see README.md.
+
+"""Assemble (image, mask) training pairs from labels.
+
+Training data comes from two sources, unified here:
+  1. Images the user labelled directly in 2D.
+  2. Masks synthesised by projecting 3D cloud labels into images
+     (``transfer.cloud_to_image``) — so labelling in 3D trains the 2D model too.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import skimage.exposure as ske
+import cv2
+
+
+@dataclass
+class Sample:
+    name: str
+    image: np.ndarray          # (H, W, C)
+    mask: np.ndarray           # (H, W) int32 class ids
+    weight: float = 1.0        # e.g. down-weight projection-derived masks
+
+
+class TrainingSet:
+    """A lazily-iterable collection of :class:`Sample`s with a train/val split."""
+
+    def __init__(self, samples: list[Sample]) -> None:
+        self.samples = samples
+
+    def split(self, val_fraction: float = 0.2, seed: int = 0) -> tuple["TrainingSet", "TrainingSet"]:
+        rng = np.random.default_rng(seed)
+        idx = rng.permutation(len(self.samples))
+        cut = int(len(idx) * (1 - val_fraction))
+        train = [self.samples[i] for i in idx[:cut]]
+        val = [self.samples[i] for i in idx[cut:]]
+        return TrainingSet(train), TrainingSet(val)
+
+    # Augmentation = mirroring + sliding + gamma correction. Each image is
+    # concatenated with its mirror to form a seamless double-width panorama,
+    # then a full-width window is slid across it (2*n_rolls positions); the
+    # image (only) gets a random gamma tweak. Masks follow the same geometry.
+    def augment_data(self, n_rolls=5):
+
+        photos = [sample.image for sample in self.samples]
+        labels = [sample.mask for sample in self.samples]
+        names = [sample.name for sample in self.samples]
+        weights = [sample.weight for sample in self.samples]
+
+        resolution = photos[0].shape
+        width = resolution[1]
+
+        pixels_rolled = int(resolution[1] / n_rolls)
+        aug_x, aug_y, aug_names, aug_w = [], [], [], []
+        for tx, ty, name, w in zip(photos, labels, names, weights):
+            flipped_x = np.flip(tx, axis=1)
+            flipped_y = np.flip(ty, axis=1)
+
+            tx = np.concatenate([tx, flipped_x], axis=1)
+            ty = np.concatenate([ty, flipped_y], axis=1)
+
+            for r in range(n_rolls * 2):
+                tx = np.roll(tx, pixels_rolled, axis=1)
+                ty = np.roll(ty, pixels_rolled, axis=1)
+
+                tx_gamma = ske.adjust_gamma(tx[:, :width], np.exp(np.random.uniform(-0.4, 0.4)))
+
+                aug_x.append(tx_gamma)
+                aug_y.append(ty[:, :width])         # mask is (H, W): no channel axis
+                aug_names.append(f'{name}_aug_{r}')
+                aug_w.append(w)
+
+        augmented_dataset = [Sample(name, image, mask, weight)
+                             for name, image, mask, weight
+                             in zip(aug_names, aug_x, aug_y, aug_w)]
+        return TrainingSet(augmented_dataset)
+
+
+def resize_pair(image: np.ndarray, mask: np.ndarray, size: tuple[int, int]
+                ) -> tuple[np.ndarray, np.ndarray]:
+    """Resize an (image, mask) pair to ``size`` = (width, height).
+
+    The image uses area averaging (best for downscaling); the mask uses
+    nearest-neighbour so class ids — including -1 (unlabelled) — are preserved
+    exactly. cv2 can't resize int32 directly, so the mask round-trips via
+    float32. The target usually stretches the aspect ratio slightly (it is the
+    snapped U-Net-compatible size from ``ModelSpec.training_size``).
+    """
+    import cv2
+
+    image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    mask = cv2.resize(mask.astype(np.float32), size,
+                      interpolation=cv2.INTER_NEAREST).astype(mask.dtype)
+    return image, mask
+
+
+def build_training_set(
+    labelled_image_names: list[str],
+    image_loader,                       # name -> (H, W, C)
+    mask_loader,                        # name -> (H, W) int32 (user + projected)
+    projected_weight: float = 0.5,
+    projected_names: set[str] | None = None,
+    target_size: tuple[int, int] | None = None,   # (width, height) from ModelSpec.training_size
+) -> TrainingSet:
+    """Collect samples from labelled + projection-derived masks.
+
+    With ``target_size`` set, every sample is resized to it on load, so the
+    dataset lives in memory at the (U-Net-compatible) size the model trains on.
+    """
+    projected_names = projected_names or set()
+    samples: list[Sample] = []
+    for name in labelled_image_names:
+        image = image_loader(name)
+        mask = mask_loader(name)
+        if target_size is not None and tuple(target_size) != (image.shape[1], image.shape[0]):
+            image, mask = resize_pair(image, mask, tuple(target_size))
+        samples.append(
+            Sample(
+                name=name,
+                image=image,
+                mask=mask,
+                weight=projected_weight if name in projected_names else 1.0,
+            )
+        )
+    return TrainingSet(samples)

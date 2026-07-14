@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "CloudLabeller: photogrammetric reconstruction and bidirectional 2D-3D labelling with U-Net label propagation"
+authors:
+  - family-names: "Gomes Gonçalves"
+    given-names: "Ítalo"
+    orcid: "https://orcid.org/0000-0002-5546-6102"
+license: GPL-3.0-or-later
+version: 0.1.0
+date-released: "2026-07-14"
+keywords:
+  - photogrammetry
+  - point cloud
+  - semantic segmentation
+  - labelling
+  - structure from motion
+  - geology
+repository-code: "https://github.com/italo-goncalves/cloudlabeller"
+# Once released publicly, add:  doi: <Zenodo release DOI>
+# Once the paper is published, add a preferred-citation block pointing to it.

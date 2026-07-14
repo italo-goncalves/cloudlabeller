@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudlabeller"
+version = "0.1.0"
+description = "Photogrammetry + bidirectional 2D/3D labelling with hylite transfer and U-Net propagation."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Italo Goncalves", email = "italogoncalves.igg@gmail.com" }]
+# Dual-licensed: GPL-3.0-or-later, or a commercial license from the author
+# (see README.md § License).
+license = { text = "GPL-3.0-or-later" }
+
+# Mirror of requirements.txt (the authoritative, commented list).
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "opencv-python>=4.8",
+    "pillow>=10",
+    "PySide6==6.7.3",  # 6.8+ links ICU (icuuc.dll) -> WinError 127 with Anaconda/Windows ICU
+    "pyvista>=0.43",
+    "pyvistaqt>=0.11",
+    "trimesh>=4.0",
+    "laspy>=2.5",
+    "pycolmap>=4,<5",
+    "hylite>=1.36",
+    "tensorflow==2.19.*",
+    "scikit-image>=0.22",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "black>=24.0",
+]
+
+[project.scripts]
+cloudlabeller = "cloudlabeller.app:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]

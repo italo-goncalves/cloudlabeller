@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Project data / outputs (large binaries)
+*.clproj/reconstruction/
+*.clproj/products/
+*.clproj/ml/checkpoints/
+*.clproj/ml/predictions/
+*.ply
+*.las
+*.laz
+*.npy
+# (reconstruction_preview.png is committed — the README embeds it)
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Claude Code (skills are committed; local settings are per-machine)
+.claude/settings.local.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

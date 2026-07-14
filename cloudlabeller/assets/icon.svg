@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- CloudLabeller app icon: a camera frustum (yellow, as in the 3D pane)
+       looking at cloud points coloured by label class. -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#1e1e1e"/>
+  <g stroke="#ffcc00" stroke-width="6" fill="none" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M26 26 L74 44 L74 96 Z"/>
+    <path d="M74 44 L74 96"/>
+  </g>
+  <circle cx="26" cy="26" r="9" fill="#ffcc00"/>
+  <g>
+    <circle cx="93" cy="40" r="7" fill="#e64a3c"/>
+    <circle cx="108" cy="52" r="7" fill="#e64a3c"/>
+    <circle cx="91" cy="66" r="7" fill="#ffd400"/>
+    <circle cx="106" cy="78" r="7" fill="#ffd400"/>
+    <circle cx="89" cy="92" r="7" fill="#33cc33"/>
+    <circle cx="103" cy="104" r="7" fill="#33cc33"/>
+  </g>
+</svg>

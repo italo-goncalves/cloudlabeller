@@ -1,0 +1,9 @@
+# Normalize text files; store LF in the repo.
+* text=auto
+
+# Shell scripts must check out with LF — bash chokes on CRLF.
+*.sh text eol=lf
+
+# Binary assets
+*.png binary
+*.ico binary
