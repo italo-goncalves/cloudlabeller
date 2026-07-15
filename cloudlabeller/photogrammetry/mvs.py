@@ -24,7 +24,7 @@ COLMAP's patch-match stereo is **CUDA-only**. Since the PyPI ``pycolmap`` wheel 
 CPU-only (``has_cuda == False``), dense MVS is driven by the **COLMAP CUDA
 executable** (``colmap.exe``) when available — undistort -> patch-match stereo ->
 stereo fusion -> (optional) Poisson meshing. If no CUDA path exists at all, a
-clear error tells the user to install CUDA COLMAP or import a dense cloud.
+clear error points the user to Photogrammetry -> Download COLMAP.
 """
 
 from __future__ import annotations

@@ -910,7 +910,8 @@ class MainWindow(QMainWindow):
                 self._pipeline_end("complete (mesh skipped: no dense cloud)")
             else:
                 QMessageBox.information(self, "No dense cloud",
-                                        "Run Dense (MVS) or import a dense cloud first.")
+                                        "Run Dense (MVS) first — meshing "
+                                        "needs the dense cloud.")
             return
 
         from cloudlabeller.photogrammetry.mvs import find_colmap_binary

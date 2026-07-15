@@ -45,8 +45,8 @@ class RunMvsDialog(QDialog):
         if colmap_binary:
             engine = f"Using CUDA COLMAP:<br><code>{colmap_binary}</code>"
         else:
-            engine = ("<b>No CUDA COLMAP found.</b> Dense MVS needs CUDA — install "
-                      "COLMAP or import a dense cloud instead.")
+            engine = ("<b>No CUDA COLMAP found.</b> Dense MVS needs CUDA — get "
+                      "it via Photogrammetry → Download COLMAP…")
         note = QLabel("Dense reconstruction (patch-match stereo) on the current "
                       f"SfM model.<br>{engine}")
         note.setWordWrap(True)

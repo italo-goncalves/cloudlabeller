@@ -47,24 +47,40 @@ survey where per-point classes matter.
   annotate the entire survey.
 
 **Data interchange**
-- Import existing point clouds (`.las`/`.laz`, `.ply`, `.vtk`) and meshes
-  (`.ply`, `.obj`, `.stl`).
 - Export labelled clouds to `.las`, `.ply` or `.csv` and meshes to `.ply`,
   `.obj` or `.stl` for GIS and geomodelling tools.
 - Projects are plain folders — copy them between machines as-is.
 
 ## Getting started
 
-**Portable distribution (Windows):** unzip, then double-click
-`CloudLabeller.vbs`. No installation; an NVIDIA GPU is recommended (dense
-MVS requires CUDA — the app offers the COLMAP download on first use).
+CloudLabeller is not published on PyPI — install it from this repository.
 
-**From source** (Python 3.10, Windows-tested):
+**Run from source** (Python 3.10; developed and tested on Windows):
 
 ```bash
-pip install -r requirements.txt   # pinned versions — see notes inside
+git clone https://github.com/italo-goncalves/cloudlabeller.git
+cd cloudlabeller
+pip install -r requirements.txt   # dependencies only, pinned — see notes inside
 python -m cloudlabeller
 ```
+
+**Build the portable Windows distribution** — a self-contained folder with
+its own embedded Python that runs on machines with no Python installed:
+
+```bash
+python scripts/build_portable.py --out C:/Temp/cl_build
+```
+
+The script downloads the embeddable Python 3.10, installs the requirements
+into it (~2 GB — be patient), copies the app and writes the launchers
+(`CloudLabeller.vbs` / `.bat`); zip the resulting `CloudLabeller` folder to
+distribute it. By default your local COLMAP bundle (`~/.cloudlabeller/colmap`,
+if present) is included; pass `--skip-colmap` for a much smaller archive —
+recipients can then fetch COLMAP in-app via *Photogrammetry → Download
+COLMAP…*.
+
+An NVIDIA GPU is required for dense MVS (CUDA); everything else — SfM,
+labelling, training, prediction — runs on the CPU.
 
 Development: architecture in [DESIGN.md](DESIGN.md); tests with
 `QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true pytest tests/ -q`.

@@ -27,9 +27,9 @@ launchers + README. The result runs from any location on a 64-bit Windows
 machine — including the app's subprocess architecture (``python -m …``), which
 a frozen (PyInstaller-style) build would break.
 
-Usage (from the dev venv):
+Usage (any Python 3.10+ can drive the build):
 
-    .venv/Scripts/python scripts/build_portable.py [--out C:/Temp/cl_build]
+    python scripts/build_portable.py [--out C:/Temp/cl_build] [--skip-colmap]
 
 Then zip the resulting ``CloudLabeller`` folder and ship it.
 """
@@ -75,8 +75,10 @@ Requirements on the target machine
   if the app fails to start, install it from:
   https://aka.ms/vs/17/release/vc_redist.x64.exe
 * Dense reconstruction (MVS) additionally needs an NVIDIA GPU with a current
-  driver (the bundled COLMAP is a CUDA build). Everything else — SfM,
-  labelling, training, prediction — runs on the CPU.
+  driver (COLMAP is a CUDA build). Everything else — SfM, labelling,
+  training, prediction — runs on the CPU.
+* If no colmap/ folder is bundled, the app offers to download COLMAP on
+  first use (Photogrammetry -> Download COLMAP...).
 
 Notes
 -----
