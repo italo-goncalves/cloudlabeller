@@ -148,14 +148,25 @@ def main() -> int:
         print(f"  WARNING: {COLMAP_SRC} not found — dense MVS will be "
               "unavailable on target machines")
 
-    print("[6/6] launchers + README")
+    print("[6/6] launchers, README + licenses")
     (dist / "CloudLabeller.bat").write_text(LAUNCHER_BAT, encoding="utf-8")
     (dist / "CloudLabeller.vbs").write_text(LAUNCHER_VBS, encoding="utf-8")
     (dist / "README.txt").write_text(README, encoding="utf-8")
+    # GPL obligation: the license (and the third-party notices) travel with
+    # every binary distribution. The generator runs on the freshly built
+    # interpreter so the notices match exactly what was just installed.
+    for f in ("LICENSE", "README.md", "CITATION.cff"):
+        shutil.copy2(PROJECT / f, dist / f)
+    run([py, PROJECT / "tools" / "gen_third_party_licenses.py",
+         "--out", dist / "THIRD_PARTY_LICENSES.txt"])
 
     print("smoke test: importing the app (offscreen) in the new distribution…")
+    # Minimal env so nothing leaks in from the build machine — but HOME vars
+    # must exist: mvs.py resolves Path.home() at import (COLMAP download dir).
     env = {"QT_QPA_PLATFORM": "offscreen", "PYVISTA_OFF_SCREEN": "true",
-           "SYSTEMROOT": r"C:\Windows", "PATH": r"C:\Windows\System32"}
+           "SYSTEMROOT": r"C:\Windows", "PATH": r"C:\Windows\System32",
+           "USERPROFILE": str(Path.home()),
+           "TEMP": str(out), "TMP": str(out)}
     run([py, "-c",
          "import cloudlabeller.ui.main_window, tensorflow, pycolmap, pyvista; "
          "from cloudlabeller.photogrammetry.mvs import find_colmap_binary; "
