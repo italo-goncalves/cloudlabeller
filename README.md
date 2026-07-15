@@ -114,8 +114,9 @@ CloudLabeller is **dual-licensed**:
   under the GPL.
 - **Commercial license** — for use in closed-source products or
   redistribution outside the GPL's terms, a separate commercial license is
-  available from the author: Ítalo Gomes Gonçalves
-  <italogoncalves.igg@gmail.com>.
+  available from the author: contact
+  [Ítalo Gomes Gonçalves](https://www.linkedin.com/in/%C3%ADtalo-gon%C3%A7alves-7b32692b/)
+  on LinkedIn.
 
 Third-party components keep their own licenses; binary distributions include
 the full collection in `THIRD_PARTY_LICENSES.txt`. COLMAP is **not** shipped
@@ -126,7 +127,7 @@ with CloudLabeller — the app downloads the official release on demand
 
 To keep the dual-licensing model possible, external contributions can only
 be accepted with a copyright assignment (CLA) — please contact the author
-before opening a pull request.
+(via LinkedIn above) before opening a pull request.
 
 ## Citing
 
