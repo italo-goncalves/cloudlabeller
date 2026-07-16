@@ -1,5 +1,7 @@
 # CloudLabeller
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21393023.svg)](https://doi.org/10.5281/zenodo.21393023)
+
 **CloudLabeller streamlines object annotation in 3D point clouds.** It takes
 you from a folder of photos to a dense, fully labelled point cloud in one
 desktop app: reconstruct the scene photogrammetrically, label a handful of

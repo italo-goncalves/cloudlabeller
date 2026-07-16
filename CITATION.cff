@@ -17,5 +17,6 @@ keywords:
   - structure from motion
   - geology
 repository-code: "https://github.com/italo-goncalves/cloudlabeller"
-# Once released publicly, add:  doi: <Zenodo release DOI>
+# Concept DOI — always resolves to the latest Zenodo-archived release.
+doi: 10.5281/zenodo.21393023
 # Once the paper is published, add a preferred-citation block pointing to it.
