@@ -42,6 +42,9 @@ from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 
 class ProcessJob(QObject):
+    """One ``python -m <module> <args>`` child process wired to Qt signals
+    (see module docstring for the stdout/stderr protocol)."""
+
     progress = Signal(float, str)
     log_line = Signal(str)
     finished = Signal()              # exit code 0
@@ -77,6 +80,7 @@ class ProcessJob(QObject):
         self.proc.errorOccurred.connect(self._on_error)
 
     def start(self) -> None:
+        """Open the stage log and launch the child interpreter."""
         if self._log_path is not None:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_fh = open(self._log_path, "w", encoding="utf-8")
@@ -89,6 +93,7 @@ class ProcessJob(QObject):
         self.proc.start(sys.executable, ["-m", *cmd])
 
     def _on_heartbeat(self) -> None:
+        """Reassure the user during long silent native stages (see HEARTBEAT_S)."""
         if self.proc.state() == QProcess.NotRunning:
             return
         now = time.monotonic()

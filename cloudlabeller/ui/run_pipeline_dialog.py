@@ -45,6 +45,8 @@ from cloudlabeller.ui.detail_level import MVS_LEVELS, DetailControl
 
 
 class RunPipelineDialog(QDialog):
+    """All options for the unattended SfM → georef → MVS → mesh chain."""
+
     def __init__(self, image_count: int,
                  source_resolution: tuple[int, int] | None = None,
                  gpu_available: bool = False,

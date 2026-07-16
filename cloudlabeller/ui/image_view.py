@@ -159,6 +159,10 @@ def _load_payload(project, name: str, record, seq: int) -> dict:
 
 
 class ImageView(QWidget):
+    """The Image pane: canvas + toolbar. Shows the selected image with its
+    label overlay, drives polygon drawing (draw/finish/done/cancel), and
+    offers per-image propagation to the cloud and mask regeneration."""
+
     propagate_requested = Signal(str)   # ask to spread this image's labels to neighbours
 
     def __init__(self, bus: EventBus) -> None:
@@ -267,6 +271,8 @@ class ImageView(QWidget):
     # (decode + auto-mask render + RGBA overlay) now runs on a worker thread; a
     # sequence number discards results superseded by a newer click.
     def show_image(self, name: str) -> None:
+        """Load ``name`` on a worker thread and present it when ready (see
+        the note above on why loading is asynchronous)."""
         if not self.project:
             return
         record = self.project.dataset.image_by_name(name)

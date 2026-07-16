@@ -45,6 +45,8 @@ from cloudlabeller.core.project import MANIFEST, Project
 
 
 class WelcomeDialog(QDialog):
+    """New / Open / recent-projects chooser shown before the main window."""
+
     def __init__(self, recent_projects: list[str] | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Welcome to CloudLabeller")

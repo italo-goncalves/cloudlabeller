@@ -216,6 +216,7 @@ class LabelStore:
         return int(idx.size)
 
     def _run(self, cmd: _PaintCommand) -> None:
+        """Apply a paint command and record it for undo (clears redo)."""
         cmd.apply()
         self._undo_stack.append(cmd)
         self._redo_stack.clear()

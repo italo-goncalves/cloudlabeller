@@ -43,6 +43,8 @@ from PySide6.QtWidgets import (
 
 
 class CleanCloudDialog(QDialog):
+    """Threshold pickers for the confidence clean, with a live keep-count."""
+
     #: keep-mask for the current thresholds; emitted on every change so the 3D
     #: pane can tint the points that would be removed (dialog is non-modal).
     mask_changed = Signal(object)

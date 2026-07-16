@@ -37,6 +37,11 @@ from cloudlabeller.core.dataset import Mesh, PointCloud
 
 # -- RGB / normal extraction from a PyVista dataset -----------------------
 def _extract_rgb(ds) -> np.ndarray | None:
+    """Point colours from a PyVista dataset as (N, 3) uint8, or None.
+
+    Checks the common conventions in turn: a packed RGB array under one of
+    the usual names, separate red/green/blue scalars, then a 3+-component
+    active-scalars array."""
     pd = ds.point_data
     for key in ("RGB", "rgb", "Colors", "colors", "diffuse_color"):
         arr = pd.get(key)
@@ -72,6 +77,7 @@ def load_cloud(path: str | Path) -> PointCloud:
 
 
 def _load_las(path: Path) -> PointCloud:
+    """Read a .las/.laz cloud via laspy (16-bit colours scaled to 8-bit)."""
     import laspy
 
     las = laspy.read(str(path))

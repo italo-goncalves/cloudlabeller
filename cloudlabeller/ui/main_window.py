@@ -48,6 +48,12 @@ from cloudlabeller.ui.viewer3d import Viewer3D
 
 
 class MainWindow(QMainWindow):
+    """The application shell: builds the docks, menus and status bar, owns
+    the open :class:`~cloudlabeller.core.project.Project`, and orchestrates
+    every long-running job (reconstruction subprocesses via ProcessJob,
+    in-thread transfers/exports via Job) — all cross-pane communication
+    flows through the :class:`~cloudlabeller.core.events.EventBus`."""
+
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self.config = config
@@ -605,6 +611,8 @@ class MainWindow(QMainWindow):
         self._apply_sparse_clean(keep)
 
     def _apply_sparse_clean(self, keep) -> None:
+        """Drop the sparse points where ``keep`` is False — persist the
+        filtered cloud, let the labels follow, keep the camera in place."""
         import numpy as np
 
         from cloudlabeller.core.dataset import PointCloud
@@ -685,6 +693,8 @@ class MainWindow(QMainWindow):
         job.start()
 
     def _on_georef_done(self, job) -> None:
+        """Persist the new ENU frame, refresh every view, report the fit —
+        and continue the pipeline (dense MVS) when one is running."""
         out = self._job_result(job) or {}
         self.project.load_products()               # reload transformed products
         self.project.settings["georeferenced"] = {
@@ -767,6 +777,8 @@ class MainWindow(QMainWindow):
         job.start()
 
     def _on_reproject_done(self, job) -> None:
+        """Record the new CRS frame (epsg/name/offset) in the project
+        settings and refresh everything that displays coordinates."""
         out = self._job_result(job) or {}
         self.project.load_products()               # reload transformed products
         self.project.settings["georeferenced"]["crs"] = {
@@ -1307,6 +1319,8 @@ class MainWindow(QMainWindow):
 
     # -- transfer job plumbing (in-thread; logs steps to the Log pane) -----
     def _start_transfer_job(self, desc, work, on_done, cancellable: bool = False) -> None:
+        """Run ``work`` on the thread pool with standard progress/log/error
+        plumbing — used by transfers, exports and other in-process jobs."""
         from cloudlabeller.workers.job import Job
 
         job = Job(work)
@@ -1443,9 +1457,12 @@ class MainWindow(QMainWindow):
         self._start_transfer_job("Images → cloud", work, self._on_images_to_cloud_done)
 
     def _on_images_to_cloud_done(self, out) -> None:
-        # MERGE the transfer into the existing labels: points without image
-        # votes keep whatever they had (e.g. lasso-assigned labels). A wholesale
-        # replace here used to wipe lasso work.
+        """Fold the projected labels into the cloud's label arrays.
+
+        MERGE, not replace: points without image votes keep whatever they
+        had (e.g. lasso-assigned labels) — a wholesale replace here used to
+        wipe lasso work.
+        """
         labels = self.project.labels
         ns = labels.merge_cloud_labels(out["sparse"])
         msg = f"Updated {ns:,} sparse points"
@@ -1701,6 +1718,7 @@ class MainWindow(QMainWindow):
         job.start()
 
     def _on_train_done(self, job, stop_file) -> None:
+        """Clean up the stop-file plumbing and report the training summary."""
         self._end_cancellable(job)
         stop_file.unlink(missing_ok=True)
         self.bus.job_finished.emit("Train U-Net", True)
@@ -1793,6 +1811,8 @@ class MainWindow(QMainWindow):
         job.start()
 
     def _on_predict_done(self, job) -> None:
+        """Mark the predicted images as auto-labelled (yellow dots) and
+        refresh their overlays; user-drawn masks were preserved by the CLI."""
         out = self._job_result(job) or {}
         predicted_names = out.get("predicted", [])
         labels = self.project.labels

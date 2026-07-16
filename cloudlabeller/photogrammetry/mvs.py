@@ -219,6 +219,9 @@ def _colmap(exe: str, args: list[str], progress: ProgressFn | None = None,
 
 def _run_mvs_cli(exe, images, sparse, dense, max_image_size, build_mesh,
                  quality, kept, progress):
+    """Dense MVS through the COLMAP executable: undistort (skipped on a
+    same-settings resume) -> patch-match stereo -> fusion [-> Poisson mesh].
+    Returns ``(cloud, mesh_or_None)``."""
     # Cap every CPU-bound stage at cores-1 so the OS/UI stays responsive
     # (flags verified against the bundled colmap.exe --help).
     from cloudlabeller.workers.resources import worker_threads
@@ -285,6 +288,8 @@ def _run_mvs_cli(exe, images, sparse, dense, max_image_size, build_mesh,
 
 # -- in-process pycolmap backend (only if it ever ships with CUDA) --------
 def _run_mvs_pycolmap(pycolmap, images, sparse, dense, max_image_size, build_mesh, progress):
+    """Same MVS chain through pycolmap's in-process bindings (used only when
+    no CUDA executable is available AND pycolmap ships CUDA support)."""
     progress(0.05, "Undistorting images…")
     pycolmap.undistort_images(dense, sparse, images)
     progress(0.30, "Patch-match stereo (GPU)…")

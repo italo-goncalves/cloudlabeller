@@ -47,6 +47,9 @@ _REPRESENTATIONS = [("sparse", "Sparse cloud"), ("dense", "Dense cloud"), ("mesh
 
 
 class ViewPanel(QWidget):
+    """The View pane: representation switch, camera/frustum controls, point
+    size, label opacity and the selection/paint tool buttons."""
+
     representation_changed = Signal(str)     # "sparse" | "dense" | "mesh"
     cameras_toggled = Signal(bool)
     frustum_scale_changed = Signal(float)    # multiplier on the auto base size

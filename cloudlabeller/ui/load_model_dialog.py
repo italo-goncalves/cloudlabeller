@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
 
 
 class LoadModelDialog(QDialog):
+    """Table of saved models (one row per manifest) with load and delete."""
+
     COLUMNS = ("Name", "Created", "Input size", "Classes",
                "Channels", "Blocks", "Dropout", "Filter", "Final metrics")
 

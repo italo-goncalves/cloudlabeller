@@ -54,6 +54,8 @@ def list_image_files(image_dir: str | Path) -> list[str]:
 
 @dataclass
 class IngestResult:
+    """Outcome of copying a folder of images into the project store."""
+
     copied: list[str] = field(default_factory=list)       # new files
     overwritten: list[str] = field(default_factory=list)  # replaced existing
     skipped: list[str] = field(default_factory=list)      # kept existing / dupes

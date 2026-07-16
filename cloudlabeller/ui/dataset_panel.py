@@ -39,6 +39,8 @@ from cloudlabeller.ui.status import status_icon
 
 
 class DatasetPanel(QWidget):
+    """The Dataset pane widget (see module docstring for the row format)."""
+
     def __init__(self, bus: EventBus) -> None:
         super().__init__()
         self.bus = bus
@@ -68,6 +70,7 @@ class DatasetPanel(QWidget):
         return np.asarray(crs_info.get("offset") or (0.0, 0.0, 0.0), np.float64)
 
     def _row_text(self, im, offset: np.ndarray) -> str:
+        """Image name, plus the camera position (frame + offset) when solved."""
         cam = im.camera
         if cam is None:
             return im.name
@@ -75,6 +78,7 @@ class DatasetPanel(QWidget):
         return f"{im.name}    ({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f})"
 
     def _rebuild(self) -> None:
+        """Repopulate the whole list (project opened / images or cameras changed)."""
         self._syncing = True
         self.image_list.clear()
         if self.project:

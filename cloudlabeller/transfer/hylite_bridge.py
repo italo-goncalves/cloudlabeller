@@ -47,6 +47,8 @@ from cloudlabeller.core.dataset import Camera, PointCloud
 
 
 def camera_to_hylite(camera: Camera):
+    """Convert a COLMAP-convention camera into a hylite ``Camera`` (see the
+    module docstring for the derivation, verified against proj_persp)."""
     from hylite.project import Camera as HCamera
     from scipy.spatial.transform import Rotation
 

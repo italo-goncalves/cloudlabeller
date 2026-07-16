@@ -37,6 +37,8 @@ import cv2
 
 @dataclass
 class Sample:
+    """One training example: an image, its label mask, and a loss weight."""
+
     name: str
     image: np.ndarray          # (H, W, C)
     mask: np.ndarray           # (H, W) int32 class ids
@@ -50,6 +52,7 @@ class TrainingSet:
         self.samples = samples
 
     def split(self, val_fraction: float = 0.2, seed: int = 0) -> tuple["TrainingSet", "TrainingSet"]:
+        """Random (train, validation) split — seeded, so re-runs are stable."""
         rng = np.random.default_rng(seed)
         idx = rng.permutation(len(self.samples))
         cut = int(len(idx) * (1 - val_fraction))
@@ -57,12 +60,14 @@ class TrainingSet:
         val = [self.samples[i] for i in idx[cut:]]
         return TrainingSet(train), TrainingSet(val)
 
-    # Augmentation = mirroring + sliding + gamma correction. Each image is
-    # concatenated with its mirror to form a seamless double-width panorama,
-    # then a full-width window is slid across it (2*n_rolls positions); the
-    # image (only) gets a random gamma tweak. Masks follow the same geometry.
     def augment_data(self, n_rolls=5):
+        """Augment by mirroring + sliding + gamma correction.
 
+        Each image is concatenated with its mirror to form a seamless
+        double-width panorama, then a full-width window is slid across it
+        (``2 * n_rolls`` positions); the image (only) gets a random gamma
+        tweak per window. Masks follow the same geometry untouched.
+        """
         photos = [sample.image for sample in self.samples]
         labels = [sample.mask for sample in self.samples]
         names = [sample.name for sample in self.samples]

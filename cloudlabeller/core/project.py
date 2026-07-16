@@ -49,6 +49,19 @@ FORMAT_VERSION = 1
 
 @dataclass
 class Project:
+    """A CloudLabeller project: a plain folder plus its in-memory state.
+
+    On disk the ``root`` folder holds ``project.json`` (schema, settings,
+    per-image label status), ``images/`` (the image store), ``reconstruction/``
+    (sparse cloud, cameras, dense cloud, visibility cache), ``products/``
+    (mesh), ``labels/`` (per-point/-vertex/-image label arrays) and ``ml/``
+    (checkpoints, predictions). Projects are portable — copy the folder as-is.
+
+    In memory it bundles the label ``schema``, the reconstructed ``dataset``
+    (images, clouds, mesh), the ``labels`` store, and free-form ``settings``
+    (e.g. ``settings["georeferenced"]`` with the ENU origin / CRS frame).
+    """
+
     root: Path
     schema: LabelSchema = field(default_factory=LabelSchema)
     dataset: Dataset = field(default_factory=Dataset)
@@ -326,6 +339,7 @@ class Project:
     # -- lifecycle ---------------------------------------------------------
     @classmethod
     def create(cls, root: str | Path, schema: LabelSchema | None = None) -> "Project":
+        """Create the folder structure for a new project and save its manifest."""
         root = Path(root)
         proj = cls(root=root, schema=schema or LabelSchema())
         for d in (proj.images_dir, proj.reconstruction_dir, proj.products_dir,
@@ -337,6 +351,7 @@ class Project:
 
     @classmethod
     def open(cls, root: str | Path) -> "Project":
+        """Load an existing project: manifest, then products, then labels."""
         root = Path(root)
         data = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
         proj = cls(
@@ -362,11 +377,13 @@ class Project:
         (self.root / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     def save(self) -> None:
+        """Full save: manifest plus every label array (the heavy part)."""
         self.save_manifest()
         self._save_labels()
 
     # -- label persistence -------------------------------------------------
     def _save_labels(self) -> None:
+        """Dump cloud/mesh label arrays and user-drawn image masks as .npy."""
         if self.labels.cloud_labels is not None:
             np.save(self.labels_dir / "cloud_labels.npy", self.labels.cloud_labels)
         if self.labels.dense_cloud_labels is not None:
@@ -377,6 +394,8 @@ class Project:
             np.save(self.labels_dir / "images" / f"{name}.npy", mask)
 
     def _load_labels(self) -> None:
+        """Load label arrays back; stale auto-generated image masks (from an
+        older app version that materialised them) are deleted, not loaded."""
         cloud_path = self.labels_dir / "cloud_labels.npy"
         if cloud_path.exists():
             self.labels.cloud_labels = np.load(cloud_path)

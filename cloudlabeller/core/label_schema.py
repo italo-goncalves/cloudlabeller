@@ -74,6 +74,8 @@ class LabelSchema:
     # -- editing -----------------------------------------------------------
     def add(self, name: str | None = None, color: str | None = None,
             hotkey: str | None = None) -> LabelClass:
+        """Append a class with the next contiguous id; name/colour default
+        to "label <id>" and the palette colour for that id."""
         cid = len(self.classes)
         cls = LabelClass(
             id=cid,

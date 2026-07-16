@@ -41,6 +41,8 @@ from cloudlabeller.ui.crs_picker import CrsPicker
 
 
 class ReprojectDialog(QDialog):
+    """Target-CRS choice for reprojection (see module docstring)."""
+
     def __init__(self, origin_lla, geo_settings: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Reproject to CRS")

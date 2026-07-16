@@ -42,12 +42,17 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 
 class JobSignals(QObject):
+    """Qt signals for a :class:`Job` (QRunnable can't own signals itself)."""
+
     progress = Signal(float, str)
     finished = Signal(object)      # result
     failed = Signal(str)           # error message
 
 
 class Job(QRunnable):
+    """Run ``fn(*args, **kwargs)`` on the global thread pool (see module
+    docstring for the progress/cancellation contract)."""
+
     def __init__(self, fn: Callable[..., Any], *args, **kwargs) -> None:
         super().__init__()
         self.fn = fn

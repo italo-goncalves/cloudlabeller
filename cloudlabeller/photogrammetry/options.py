@@ -30,6 +30,9 @@ CAMERA_MODELS = ("SIMPLE_RADIAL", "RADIAL", "OPENCV", "FULL_OPENCV", "PINHOLE", 
 
 @dataclass
 class SfmOptions:
+    """Everything the SfM stage needs, collected once by the dialogs and
+    serialised to run_cli flags via :meth:`to_cli_args`."""
+
     matcher: str = "spatial"   # uses EXIF GPS priors; ideal for drone surveys
     use_gpu: bool = False
     single_camera: bool = True

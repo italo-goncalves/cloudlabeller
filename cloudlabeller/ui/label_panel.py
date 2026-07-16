@@ -98,6 +98,9 @@ class _NameEdit(QLineEdit):
 
 
 class LabelRow(QFrame):
+    """One class in the list: colour swatch, editable name, hotkey hint.
+    Clicking activates the class; double-click renames; the swatch recolours."""
+
     activated = Signal(int)
     renamed = Signal(int, str)
     recolored = Signal(int, str)
@@ -167,6 +170,9 @@ class LabelRow(QFrame):
 
 
 class LabelPanel(QWidget):
+    """The Labels pane: the class list plus add/remove, kept in sync with
+    the project's :class:`~cloudlabeller.core.label_schema.LabelSchema`."""
+
     def __init__(self, bus: EventBus) -> None:
         super().__init__()
         self.bus = bus

@@ -103,6 +103,7 @@ class _LassoPathActor:
         self._plotter.render()
 
     def _sync(self) -> None:
+        """Rewrite the VTK polyline from the current path (closed loop)."""
         n = len(self._path)
         self._points.SetNumberOfPoints(n)
         for i, (x, y) in enumerate(self._path):
@@ -153,6 +154,10 @@ def blend_point_colors(rgb, labels, lut, blend, unlabelled_id=UNLABELLED_ID):
 
 
 class Viewer3D(QWidget):
+    """The 3D pane: renders the active cloud or mesh with label colours,
+    camera frustums with status dots, and hosts the selection/paint tools
+    (see the module docstring for the rendering strategy)."""
+
     selection_changed = Signal(int)               # number of lasso-selected points
 
     def __init__(self, bus: EventBus, config: AppConfig) -> None:
@@ -213,7 +218,8 @@ class Viewer3D(QWidget):
 
     # -- public controls (wired from ViewPanel) ---------------------------
     def set_representation(self, kind: str) -> None:
-        # Only the cloud/mesh changes — keep the frustums and the current view.
+        """Switch what is rendered: "sparse", "dense" or "mesh". Only the
+        geometry changes — frustums and the current view are kept."""
         self._representation = kind
         if kind == "mesh":                         # lasso works on clouds only
             self.set_lasso_mode(False)
@@ -329,6 +335,7 @@ class Viewer3D(QWidget):
 
     # -- data helpers ------------------------------------------------------
     def _active_cloud(self):
+        """The cloud behind the current representation (None for mesh)."""
         ds = self.project.dataset if self.project else None
         if ds is None:
             return None
@@ -441,6 +448,7 @@ class Viewer3D(QWidget):
         self.plotter.reset_camera_clipping_range()
 
     def _build_cloud(self, cloud) -> None:
+        """Add the cloud as a point-rendered PolyData with blended colours."""
         if cloud is None:
             return
         poly = pv.PolyData(cloud.xyz)
@@ -451,6 +459,7 @@ class Viewer3D(QWidget):
             render_points_as_spheres=False, point_size=2.0)
 
     def _build_mesh(self) -> None:
+        """Add the triangle mesh with per-vertex colours (GPU-interpolated)."""
         mesh = self.project.dataset.mesh
         if mesh is None:
             return
@@ -570,6 +579,7 @@ class Viewer3D(QWidget):
         self._hl_poly = None
 
     def _apply_highlight(self, name: str | None) -> None:
+        """Draw the selected image's frustum in cyan with a bigger marker."""
         entry = self._frustums.get(name)
         if entry is None:
             return

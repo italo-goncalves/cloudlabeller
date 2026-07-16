@@ -47,6 +47,9 @@ CAMERAS_FILE = "cameras.json"
 
 @dataclass
 class ReconstructResult:
+    """What SfM produces: the sparse cloud, the solved cameras (one
+    ImageRecord per image), and optionally the image-overlap graph."""
+
     cloud: PointCloud
     images: list[ImageRecord]
     adjacency: ImageAdjacency | None = None    # image-overlap graph (covisibility)
@@ -98,6 +101,9 @@ def _default_images_dir(workspace: str | Path) -> Path:
 
 
 def save_result(result: ReconstructResult, workspace: str | Path) -> None:
+    """Persist cloud.npz + cameras.json (+ adjacency) into the workspace.
+    Only images with a solved camera are written; order is preserved (the
+    georeferencing origin convention depends on it)."""
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
     c = result.cloud

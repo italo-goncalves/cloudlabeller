@@ -129,20 +129,20 @@ def main(argv: list[str]) -> int:
     except RuntimeError as exc:
         log.error("%s", exc)
         return 2
-    n_in = int(inliers.sum())
+    n_inliers = int(inliers.sum())
     log.info("similarity: scale=%.6f m/unit, %d/%d GPS inliers, rms=%.2f m",
-             s, n_in, len(centers), rms)
-    if n_in < len(centers):
+             s, n_inliers, len(centers), rms)
+    if n_inliers < len(centers):
         residuals = np.linalg.norm(
             np.array(centers) @ (s * R).T + t - enu, axis=1)
         for i in np.argsort(residuals)[::-1][:5]:
             if not inliers[i]:
                 log.warning("GPS outlier: %s off by %.1f m",
                             names[i], residuals[i])
-    if n_in < max(3, len(centers) // 2):
+    if n_inliers < max(3, len(centers) // 2):
         log.warning("only %d of %d GPS positions agree — the alignment may "
                     "be unreliable; consider re-checking the imagery's GPS",
-                    n_in, len(centers))
+                    n_inliers, len(centers))
 
     # 3. Apply to every product in place (COLMAP model backed up so the
     #    pre-alignment state stays restorable).
@@ -155,7 +155,7 @@ def main(argv: list[str]) -> int:
         "origin_lla": [float(v) for v in origin],
         "origin_convention": ORIGIN_CONVENTION_FIRST_GPS,
         "n_gps": len(gps),
-        "n_inliers": n_in,
+        "n_inliers": n_inliers,
         "fit_rms_m": rms,
     }), flush=True)
     progress(1.0, "Georeferencing complete")

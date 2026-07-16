@@ -44,6 +44,8 @@ from PySide6.QtWidgets import (
 
 
 class TrainDialog(QDialog):
+    """Training options: model name, sample sources, epochs, augmentation."""
+
     def __init__(self, n_user: int, n_auto: int,
                  training_size: tuple[int, int] | None,
                  manifests: list[dict] | None = None,
@@ -159,6 +161,8 @@ class TrainDialog(QDialog):
         return self._manifests.get(sanitize_name(self.cmb_name.currentText()))
 
     def _validate(self) -> None:
+        """Adapt the dialog to the chosen name: show the overwrite/resume
+        choice (with the saved model's facts) when the name already exists."""
         manifest = self._current_manifest()
         exists = manifest is not None
         for widget in (self.rb_overwrite, self.rb_resume, self.lbl_saved):

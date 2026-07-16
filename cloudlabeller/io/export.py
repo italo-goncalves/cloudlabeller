@@ -74,6 +74,8 @@ def _cloud_columns(cloud: PointCloud, labels: np.ndarray | None):
 def export_cloud_csv(cloud: PointCloud, labels: np.ndarray | None,
                      path: str | Path, progress: ProgressFn = _NOOP,
                      transform: TransformFn | None = None) -> None:
+    """Text export, ``x,y,z,red,green,blue,label`` — chunked so multi-million
+    point clouds stream without a full-size intermediate array."""
     rgb, lab = _cloud_columns(cloud, labels)
     n = cloud.n_points
     chunk = 500_000
@@ -91,6 +93,11 @@ def export_cloud_csv(cloud: PointCloud, labels: np.ndarray | None,
 def export_cloud_las(cloud: PointCloud, labels: np.ndarray | None,
                      path: str | Path, progress: ProgressFn = _NOOP,
                      transform: TransformFn | None = None, crs=None) -> None:
+    """LAS export with the label as an extra int32 dimension.
+
+    Local frame: LAS 1.2 / point format 2. With a ``crs``: LAS 1.4 / point
+    format 7, CRS embedded as a WKT VLR. Offsets/scales are chosen from the
+    data extent so the int32 packing keeps sub-millimetre precision."""
     import laspy
 
     rgb, lab = _cloud_columns(cloud, labels)
@@ -121,6 +128,8 @@ def export_cloud_las(cloud: PointCloud, labels: np.ndarray | None,
 def export_cloud_ply(cloud: PointCloud, labels: np.ndarray | None,
                      path: str | Path, progress: ProgressFn = _NOOP,
                      transform: TransformFn | None = None) -> None:
+    """Binary PLY with per-vertex colour, optional normals and a ``label``
+    (int32) property; float64 coordinates when a transform is applied."""
     from plyfile import PlyData, PlyElement
 
     rgb, lab = _cloud_columns(cloud, labels)

@@ -34,6 +34,9 @@ from cloudlabeller.photogrammetry.crs import projected_crs_catalogue
 
 
 class CrsPicker(QComboBox):
+    """The searchable projected-CRS combo (see module docstring); each item's
+    ``userData`` is the EPSG code as an int."""
+
     def __init__(self, preselect_epsg: int | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setEditable(True)
