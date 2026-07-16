@@ -21,13 +21,16 @@
 """Dataset browser: list images; selecting one shows it (Image pane) and
 highlights its camera frustum. Stays in sync when a frustum is clicked in 3D.
 
-Each row carries a status dot in the same colours as the 3D frustum dots:
-green = user-labelled, yellow = auto-labelled (cloud projection / U-Net),
-red = unlabelled.
+Each row carries a status dot in the same colours as the 3D frustum dots
+(green = user-labelled, yellow = auto-labelled, red = unlabelled) and — once
+the camera is solved — its X, Y, Z position in the project frame (plus the
+stored CRS offset, so reprojected projects show true map coordinates). The
+image name lives in Qt.UserRole; the display text is name + coordinates.
 """
 
 from __future__ import annotations
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 
@@ -46,7 +49,7 @@ class DatasetPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.image_list)
 
-        self.image_list.currentTextChanged.connect(self._on_row_selected)
+        self.image_list.currentItemChanged.connect(self._on_row_selected)
         bus.project_opened.connect(self._on_project_opened)
         bus.images_changed.connect(self._rebuild)
         bus.image_selected.connect(self._sync_selection)
@@ -59,27 +62,46 @@ class DatasetPanel(QWidget):
     def _status_of(self, name: str) -> str:
         return self.project.labels.status_of(name) if self.project else "none"
 
+    def _frame_offset(self) -> np.ndarray:
+        settings = getattr(self.project, "settings", None) or {}
+        crs_info = (settings.get("georeferenced") or {}).get("crs") or {}
+        return np.asarray(crs_info.get("offset") or (0.0, 0.0, 0.0), np.float64)
+
+    def _row_text(self, im, offset: np.ndarray) -> str:
+        cam = im.camera
+        if cam is None:
+            return im.name
+        c = -(cam.R.T @ np.asarray(cam.t, np.float64)) + offset
+        return f"{im.name}    ({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f})"
+
     def _rebuild(self) -> None:
         self._syncing = True
         self.image_list.clear()
         if self.project:
+            offset = self._frame_offset()
             for im in self.project.dataset.images:
-                self.image_list.addItem(
-                    QListWidgetItem(status_icon(self._status_of(im.name)), im.name))
+                item = QListWidgetItem(status_icon(self._status_of(im.name)),
+                                       self._row_text(im, offset))
+                item.setData(Qt.UserRole, im.name)
+                self.image_list.addItem(item)
         self._syncing = False
+
+    def _items_named(self, name: str) -> list[QListWidgetItem]:
+        return [self.image_list.item(i) for i in range(self.image_list.count())
+                if self.image_list.item(i).data(Qt.UserRole) == name]
 
     def _refresh_status(self, name: str) -> None:
         """Recolour one row's dot after its labels changed."""
-        for item in self.image_list.findItems(name, Qt.MatchExactly):
+        for item in self._items_named(name):
             item.setIcon(status_icon(self._status_of(name)))
 
-    def _on_row_selected(self, name: str) -> None:
-        if name and not self._syncing:
-            self.bus.image_selected.emit(name)
+    def _on_row_selected(self, current, _previous=None) -> None:
+        if current is not None and not self._syncing:
+            self.bus.image_selected.emit(current.data(Qt.UserRole))
 
     def _sync_selection(self, name: str) -> None:
         """Select the row for ``name`` without re-emitting image_selected."""
-        items = self.image_list.findItems(name, Qt.MatchExactly)
+        items = self._items_named(name)
         if not items:
             return
         self._syncing = True

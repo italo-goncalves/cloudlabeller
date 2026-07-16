@@ -49,6 +49,7 @@ class RunSfmDialog(QDialog):
     def __init__(self, image_count: int,
                  source_resolution: tuple[int, int] | None = None,
                  gpu_available: bool = False,
+                 gps_found: int = 0,
                  parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Run Structure-from-Motion")
@@ -104,8 +105,23 @@ class RunSfmDialog(QDialog):
         self.cmb_model.addItems(CAMERA_MODELS)
         self.detail = DetailControl(source_resolution, default_level="medium",
                                     custom_default=3200)
+        self.chk_georef = QCheckBox(
+            "Georeference to EXIF GPS after SfM (metres, true north)")
+        if gps_found >= 3:
+            self.chk_georef.setChecked(True)
+            self.chk_georef.setToolTip(
+                "Aligns the model to the images' GPS right after the solve — "
+                "MVS and mesh are then built in the metric frame and exports "
+                "are GIS-ready. Uncheck if the GPS is unreliable.")
+        else:
+            self.chk_georef.setChecked(False)
+            self.chk_georef.setEnabled(False)
+            self.chk_georef.setToolTip(
+                "Needs GPS EXIF in at least 3 images — not detected in this "
+                "image store.")
         form.addRow(self.chk_single)
         form.addRow(self.chk_gpu)
+        form.addRow(self.chk_georef)
         form.addRow("Camera model:", self.cmb_model)
         form.addRow("Detail:", self.detail)
         layout.addLayout(form)
@@ -118,6 +134,9 @@ class RunSfmDialog(QDialog):
         layout.addWidget(self.buttons)
 
     # -- results -----------------------------------------------------------
+    def georeference(self) -> bool:
+        return self.chk_georef.isChecked()
+
     def options(self) -> SfmOptions:
         if self.rb_exhaustive.isChecked():
             matcher = "exhaustive"

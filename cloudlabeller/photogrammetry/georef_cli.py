@@ -20,21 +20,24 @@
 
 """Subprocess entry point for georeferencing (align the model to EXIF GPS).
 
-Runs COLMAP ``model_aligner`` (alignment_type=enu: local East-North-Up frame,
-metres, true north) against the images' EXIF GPS, then applies the resulting
-similarity transform to EVERY product in place: sparse cloud + cameras, dense
-cloud (points + normals), and mesh. Label arrays are per-point/per-vertex and
-follow their geometry unchanged. The COLMAP model on disk is replaced by the
-aligned one (original backed up to ``sparse_prealigned/``) so later stages
+Aligns natively — no COLMAP executable needed: the images' EXIF GPS is
+converted to a local East-North-Up frame (metres, true north, origin at the
+first GPS coordinate — COLMAP ``model_aligner``'s convention, kept so old
+and new projects resolve the same origin), a robust RANSAC + Umeyama
+similarity is fitted from the solved camera centres, and the transform is
+applied to EVERY product in place: sparse cloud + cameras, dense cloud
+(points + normals), and mesh. Label arrays are per-point/per-vertex and
+follow their geometry unchanged. The COLMAP model on disk is transformed via
+pycolmap (original backed up to ``sparse_prealigned/``) so later stages
 (MVS, confidence cleaning) stay consistent.
 
 Usage::
 
     python -m cloudlabeller.photogrammetry.georef_cli PROJECT_ROOT
-        --colmap-binary PATH [--max-error 5.0]
+        [--max-error 5.0]
 
 Emits ``PROGRESS <frac> <msg>``; prints ``RESULT <json>`` on success
-(scale = metres per model unit, ENU origin as mean camera GPS).
+(scale = metres per model unit).
 """
 
 from __future__ import annotations
@@ -42,9 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -57,7 +58,6 @@ log = logging.getLogger("cloudlabeller.georef")
 def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="georef_cli")
     p.add_argument("project_root")
-    p.add_argument("--colmap-binary", required=True)
     p.add_argument("--max-error", type=float, default=5.0,
                    help="RANSAC threshold in metres (GPS accuracy)")
     return p.parse_args(argv[1:])
@@ -72,27 +72,14 @@ def main(argv: list[str]) -> int:
     def progress(frac: float, msg: str = "") -> None:
         print(f"PROGRESS {frac:.3f} {msg}", flush=True)
 
-    import pycolmap
-
-    from cloudlabeller.io.geometry import (
-        load_cloud_npz,
-        load_mesh_npz,
-        save_cloud_npz,
-        save_mesh_npz,
-    )
-    from cloudlabeller.photogrammetry.extract import best_model_dir
+    from cloudlabeller.photogrammetry.crs import lla_to_enu_transform
     from cloudlabeller.photogrammetry.georef import (
         exif_gps,
-        rotate_normals,
-        transform_camera,
-        transform_points,
-        umeyama_similarity,
+        ransac_similarity,
     )
-    from cloudlabeller.photogrammetry.mvs import _colmap
-    from cloudlabeller.photogrammetry.pipeline import (
-        ReconstructResult,
-        load_result,
-        save_result,
+    from cloudlabeller.photogrammetry.pipeline import load_result
+    from cloudlabeller.photogrammetry.project_transform import (
+        apply_similarity_to_products,
     )
 
     root = Path(args.project_root)
@@ -115,96 +102,60 @@ def main(argv: list[str]) -> int:
         log.error("georeferencing needs GPS EXIF in at least 3 solved images "
                   "(found %d)", len(gps))
         return 2
-    origin = np.mean(np.array(list(gps.values()), np.float64), axis=0)
+    # COLMAP's model_aligner anchors the ENU frame at the FIRST reference
+    # coordinate (first line of ref_images.txt), so that — not the mean GPS —
+    # is the origin that CRS-aware export must use.
+    origin = next(iter(gps.values()))
     progress(0.08, f"{len(gps)} images have GPS")
 
-    # 2. COLMAP model_aligner -> aligned model in a temp dir.
-    model_dir = best_model_dir(rec_dir / "sparse")
-    with tempfile.TemporaryDirectory(prefix="cl_georef_") as tmp:
-        ref_path = Path(tmp) / "ref_images.txt"
-        ref_path.write_text(
-            "\n".join(f"{name} {lat} {lon} {alt}"
-                      for name, (lat, lon, alt) in gps.items()) + "\n",
-            encoding="utf-8")
-        aligned_dir = Path(tmp) / "aligned"
-        aligned_dir.mkdir()
-        progress(0.1, "Aligning model to GPS (COLMAP model_aligner, ENU)…")
-        _colmap(str(args.colmap_binary), [
-            "model_aligner",
-            "--input_path", str(model_dir),
-            "--output_path", str(aligned_dir),
-            "--ref_images_path", str(ref_path),
-            "--ref_is_gps", "1",
-            "--alignment_type", "enu",
-            "--alignment_max_error", str(args.max_error),
-        ])
+    # 2. Native similarity fit: solved camera centres -> GPS in local ENU
+    #    (origin = first GPS coordinate, model_aligner's convention).
+    progress(0.1, "Fitting the model to GPS (RANSAC + Umeyama)…")
+    lla_to_enu = lla_to_enu_transform(origin)
+    names, centers = [], []
+    for record in result.images:
+        name = Path(record.path).name
+        if record.camera is not None and name in gps:
+            names.append(name)
+            cam = record.camera
+            centers.append(-(cam.R.T @ np.asarray(cam.t, np.float64)))
+    if len(centers) < 3:
+        log.error("fewer than 3 solved cameras have GPS (%d)", len(centers))
+        return 2
+    enu = lla_to_enu(np.array([gps[n] for n in names], np.float64))
+    try:
+        s, R, t, inliers, rms = ransac_similarity(
+            np.array(centers), enu, max_error=args.max_error)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return 2
+    n_in = int(inliers.sum())
+    log.info("similarity: scale=%.6f m/unit, %d/%d GPS inliers, rms=%.2f m",
+             s, n_in, len(centers), rms)
+    if n_in < len(centers):
+        residuals = np.linalg.norm(
+            np.array(centers) @ (s * R).T + t - enu, axis=1)
+        for i in np.argsort(residuals)[::-1][:5]:
+            if not inliers[i]:
+                log.warning("GPS outlier: %s off by %.1f m",
+                            names[i], residuals[i])
+    if n_in < max(3, len(centers) // 2):
+        log.warning("only %d of %d GPS positions agree — the alignment may "
+                    "be unreliable; consider re-checking the imagery's GPS",
+                    n_in, len(centers))
 
-        # 3. Similarity transform from matched camera centres (exact: the
-        #    aligner applied a Sim3; Umeyama recovers it to machine precision).
-        progress(0.4, "Computing the similarity transform…")
-        orig = pycolmap.Reconstruction(str(model_dir))
-        aligned = pycolmap.Reconstruction(str(aligned_dir))
-        orig_centers, new_centers = [], []
-        aligned_by_name = {im.name: im for im in aligned.images.values()}
-        for im in orig.images.values():
-            other = aligned_by_name.get(im.name)
-            if other is not None:
-                orig_centers.append(im.projection_center())
-                new_centers.append(other.projection_center())
-        if len(orig_centers) < 3:
-            log.error("aligned model shares <3 cameras with the original")
-            return 2
-        s, R, t = umeyama_similarity(np.array(orig_centers), np.array(new_centers))
-        fit = transform_points(np.array(orig_centers), s, R, t) - np.array(new_centers)
-        rms = float(np.sqrt((fit ** 2).sum(1).mean()))
-        log.info("similarity: scale=%.6f (m/unit), fit rms=%.2e m", s, rms)
-        if rms > 0.01 * s * float(np.ptp(np.array(orig_centers), axis=0).max()):
-            log.error("transform fit rms %.3g is not a rigid similarity — "
-                      "the aligner may have failed (too few GPS inliers?)", rms)
-            return 2
+    # 3. Apply to every product in place (COLMAP model backed up so the
+    #    pre-alignment state stays restorable).
+    apply_similarity_to_products(root, s, R, t, progress,
+                                 model_backup_dir=backup_dir)
 
-        # 4. Transform every product in place.
-        progress(0.5, "Transforming sparse cloud + cameras…")
-        result.cloud.xyz = transform_points(result.cloud.xyz, s, R, t)
-        for record in result.images:
-            if record.camera is not None:
-                record.camera = transform_camera(record.camera, s, R, t)
-        save_result(ReconstructResult(cloud=result.cloud, images=result.images),
-                    rec_dir)
-
-        dense_path = rec_dir / "dense.npz"
-        if dense_path.exists():
-            progress(0.6, "Transforming dense cloud…")
-            dense = load_cloud_npz(dense_path)
-            dense.xyz = transform_points(dense.xyz, s, R, t)
-            if dense.normals is not None:
-                dense.normals = rotate_normals(dense.normals, R)
-            save_cloud_npz(dense, dense_path)
-
-        mesh_path = root / "products" / "mesh.npz"
-        if mesh_path.exists():
-            progress(0.8, "Transforming mesh…")
-            mesh = load_mesh_npz(mesh_path)
-            mesh.vertices = transform_points(mesh.vertices, s, R, t)
-            save_mesh_npz(mesh, mesh_path)
-
-        # 5. Swap in the aligned COLMAP model (backup the original) so future
-        #    MVS runs / confidence cleaning match the new coordinates.
-        progress(0.9, "Replacing the COLMAP model (original backed up)…")
-        backup_dir.mkdir(parents=True)
-        shutil.move(str(model_dir), str(backup_dir / model_dir.name))
-        shutil.move(str(aligned_dir), str(model_dir))
-
-    # 6. Old visibility cache entries can never match again — free the space.
-    pmap = rec_dir / "pmap"
-    if pmap.exists():
-        for f in pmap.glob("*.npz"):
-            f.unlink(missing_ok=True)
-
+    from cloudlabeller.photogrammetry.crs import ORIGIN_CONVENTION_FIRST_GPS
     print("RESULT " + json.dumps({
         "scale_m_per_unit": s,
         "origin_lla": [float(v) for v in origin],
+        "origin_convention": ORIGIN_CONVENTION_FIRST_GPS,
         "n_gps": len(gps),
+        "n_inliers": n_in,
         "fit_rms_m": rms,
     }), flush=True)
     progress(1.0, "Georeferencing complete")

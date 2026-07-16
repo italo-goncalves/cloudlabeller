@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudlabeller"
-version = "0.1.1"
+version = "0.2.0"
 description = "Photogrammetry + bidirectional 2D/3D labelling with hylite transfer and U-Net propagation."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,6 +24,7 @@ dependencies = [
     "pyvistaqt>=0.11",
     "trimesh>=4.0",
     "laspy>=2.5",
+    "pyproj>=3.6",
     "pycolmap>=4,<5",
     "hylite>=1.36",
     "tensorflow==2.19.*",

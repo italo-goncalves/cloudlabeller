@@ -214,9 +214,13 @@ class MainWindow(QMainWindow):
         m_photo.addAction("Create Mesh", self._create_mesh)
         m_photo.addSeparator()
         m_photo.addAction("Clean Sparse Cloud…", self._clean_sparse_cloud)
-        m_photo.addAction("Georeference (align to GPS)…", self._georeference)
         m_photo.addSeparator()
         m_photo.addAction("Download COLMAP…", self._download_colmap)
+
+        # Georeferencing grows its own menu (Tier 2 — GCPs — lands here too).
+        m_georef = self.menuBar().addMenu("&Georeferencing")
+        m_georef.addAction("Align to EXIF GPS…", self._georeference)
+        m_georef.addAction("Reproject to CRS…", self._reproject)
 
         m_transfer = self.menuBar().addMenu("&Transfer")
         m_transfer.addAction("Images → Cloud", self._images_to_cloud)
@@ -243,6 +247,8 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         # Permanent (always-visible) project summary on the right; transient
         # messages (showMessage) use the left area.
+        self.status_crs = QLabel("")            # current coordinate frame
+        self.statusBar().addPermanentWidget(self.status_crs)
         self.status_info = QLabel("No project open")
         self.status_info.setToolTip("Click for the full project summary "
                                     "(origin, counts, models…)")
@@ -261,6 +267,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.btn_stop)
         self._active_job = None
         self._colmap_dl_job = None
+        self._georef_after_sfm = False
 
         for sig in (self.bus.project_opened, self.bus.images_changed,
                     self.bus.cloud_changed, self.bus.schema_changed):
@@ -271,7 +278,13 @@ class MainWindow(QMainWindow):
         p = self.project
         if not p:
             self.status_info.setText("No project open")
+            self.status_crs.setText("")
             return
+        from cloudlabeller.photogrammetry.crs import frame_labels
+
+        short, full = frame_labels(p.settings.get("georeferenced"))
+        self.status_crs.setText(short + "  ·")
+        self.status_crs.setToolTip(full)
         ds = p.dataset
         n_pts = ds.cloud.n_points if ds.cloud is not None else 0
         status_txt = {
@@ -359,9 +372,11 @@ class MainWindow(QMainWindow):
         dialog = RunPipelineDialog(n_images,
                                    source_resolution=self.project.source_resolution(),
                                    gpu_available=True,   # colmap_binary checked above
+                                   gps_found=self._gps_image_hint(),
                                    parent=self)
         if dialog.exec() != RunPipelineDialog.Accepted:
             return
+        self._georef_after_sfm = dialog.georeference()
 
         import time
 
@@ -425,10 +440,20 @@ class MainWindow(QMainWindow):
         gpu_ok = find_colmap_binary(self.config.colmap_binary) is not None
         dialog = RunSfmDialog(n_images,
                               source_resolution=self.project.source_resolution(),
-                              gpu_available=gpu_ok, parent=self)
+                              gpu_available=gpu_ok,
+                              gps_found=self._gps_image_hint(), parent=self)
         if dialog.exec() != RunSfmDialog.Accepted:
             return
+        self._georef_after_sfm = dialog.georeference()
         self._launch_sfm(dialog.options())
+
+    def _gps_image_hint(self) -> int:
+        """How many of the store's first images have GPS EXIF (capped scan —
+        enough to decide whether auto-georeferencing can be offered)."""
+        from cloudlabeller.core.images import list_image_files
+        from cloudlabeller.photogrammetry.georef import count_gps_images
+
+        return count_gps_images(list_image_files(self.project.images_dir))
 
     def _launch_sfm(self, options) -> None:
         """Start the SfM child process (also the pipeline's first stage)."""
@@ -470,6 +495,15 @@ class MainWindow(QMainWindow):
             self._on_sfm_failed("Reconstruction", "no point cloud was produced")
             return
         self.project.mark_reconstruction_current()
+        # A fresh solve is a new (local) frame: any previous alignment and its
+        # backup no longer correspond to this model.
+        if self.project.settings.pop("georeferenced", None) is not None:
+            self.log_panel.append("New solve — previous georeferencing cleared.")
+        backup = self.project.reconstruction_dir / "sparse_prealigned"
+        if backup.exists():
+            import shutil
+
+            shutil.rmtree(backup, ignore_errors=True)
         self._save()                              # persist manifest + labels
         self.bus.job_finished.emit("Reconstruction", True)
         self.bus.cloud_changed.emit()
@@ -477,7 +511,13 @@ class MainWindow(QMainWindow):
         n = self.project.dataset.cloud.n_points
         ncam = len(self.project.dataset.solved_images())
         self.statusBar().showMessage(f"Reconstruction: {n} points, {ncam} cameras", 8000)
-        # Pipeline chain: SfM done -> start dense MVS.
+        # Chain: auto-georeference first (its handlers resume the pipeline;
+        # failure falls back to the local frame), then dense MVS.
+        if self._georef_after_sfm:
+            self._georef_after_sfm = False
+            self.log_panel.append("--- Auto-georeferencing to EXIF GPS ---")
+            self._start_georef_job(auto=True)
+            return
         if self._pipeline is not None:
             self.log_panel.append("=== Pipeline: SfM complete — starting dense MVS ===")
             self._launch_mvs(self._pipeline["mvs_px"], self._pipeline["colmap"],
@@ -595,8 +635,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 8000)
 
     def _georeference(self) -> None:
-        """Align the whole model to the images' EXIF GPS (metric ENU frame)
-        via COLMAP model_aligner, transforming every product in place."""
+        """Align the whole model to the images' EXIF GPS (metric ENU frame) —
+        native RANSAC + Umeyama fit, transforming every product in place."""
         if not self.project or self.project.dataset.cloud is None:
             QMessageBox.information(self, "No reconstruction", "Run SfM first.")
             return
@@ -606,20 +646,11 @@ class MainWindow(QMainWindow):
                 "This project is already aligned to GPS — aligning twice "
                 "would double-transform the model.")
             return
-        from cloudlabeller.photogrammetry.mvs import find_colmap_binary
-
-        colmap_binary = find_colmap_binary(self.config.colmap_binary)
-        if colmap_binary is None:
-            QMessageBox.warning(self, "No COLMAP",
-                                "Georeferencing uses the COLMAP executable "
-                                "(model_aligner), which was not found.\n"
-                                "Get it via Photogrammetry → Download COLMAP…")
-            return
         answer = QMessageBox.question(
             self, "Georeference model",
             "Align the model to the images' EXIF GPS?\n\n"
             "• Coordinates become a local East-North-Up frame: metres, true "
-            "north, origin at the survey centre.\n"
+            "north, origin at the site.\n"
             "• The sparse/dense clouds, mesh, cameras and labels are all "
             "transformed consistently.\n\n"
             "Do this AFTER the reconstruction stages are final: an in-progress "
@@ -628,21 +659,29 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        self._start_georef_job(auto=False)
 
+    def _start_georef_job(self, auto: bool) -> None:
+        """Launch the georeferencing subprocess. ``auto`` = chained after SfM:
+        failures are logged and the pipeline continues in the local frame."""
         from cloudlabeller.workers.process_job import ProcessJob
 
         desc = "Georeference"
         job = ProcessJob(
             "cloudlabeller.photogrammetry.georef_cli",
-            [str(self.project.root), "--colmap-binary", colmap_binary],
+            [str(self.project.root)],
             log_path=self.project.reconstruction_dir / "georef.log")
         self._georef_job = job
         job.progress.connect(lambda f, m="": self.bus.job_progress.emit(desc, f))
         job.log_line.connect(self.log_panel.append)
         job.finished.connect(lambda: self._on_georef_done(job))
-        job.failed.connect(lambda e: self._on_sfm_failed(desc, e))
+        if auto:
+            job.failed.connect(self._on_georef_auto_failed)
+        else:
+            job.failed.connect(lambda e: self._on_sfm_failed(desc, e))
         self.log_panel.append("--- Georeferencing started ---")
         self.bus.job_started.emit(desc)
+        self._pipeline_stage_started(job)
         job.start()
 
     def _on_georef_done(self, job) -> None:
@@ -650,6 +689,7 @@ class MainWindow(QMainWindow):
         self.project.load_products()               # reload transformed products
         self.project.settings["georeferenced"] = {
             "frame": "ENU", "origin_lla": out.get("origin_lla"),
+            "origin_convention": out.get("origin_convention"),
             "scale_m_per_unit": out.get("scale_m_per_unit"),
             "n_gps": out.get("n_gps"),
         }
@@ -657,13 +697,110 @@ class MainWindow(QMainWindow):
         self.bus.job_finished.emit("Georeference", True)
         self.bus.cloud_changed.emit()
         self.bus.mesh_changed.emit()
+        self.bus.images_changed.emit()             # camera coords in Dataset pane
         origin = out.get("origin_lla") or [0, 0, 0]
         msg = (f"Georeferenced to ENU: 1 unit = 1 m now "
                f"(previous scale ×{out.get('scale_m_per_unit', 0):.4f}); "
-               f"origin ≈ {origin[0]:.6f}°, {origin[1]:.6f}°, {origin[2]:.1f} m "
-               f"from {out.get('n_gps', 0)} GPS-tagged images")
+               f"origin ≈ {origin[0]:.6f}°, {origin[1]:.6f}°, {origin[2]:.1f} m; "
+               f"{out.get('n_inliers', '?')}/{out.get('n_gps', 0)} GPS images "
+               f"agree within {out.get('fit_rms_m', 0):.1f} m rms")
         self.log_panel.append(msg)
         self.statusBar().showMessage(msg, 10000)
+        if self._pipeline is not None:
+            self.log_panel.append("=== Pipeline: georeferencing done — "
+                                  "starting dense MVS ===")
+            self._launch_mvs(self._pipeline["mvs_px"], self._pipeline["colmap"],
+                             self._pipeline.get("mvs_quality", "standard"))
+
+    def _resolved_enu_origin(self):
+        """The project's exact ENU origin (healing legacy projects that
+        stored the mean GPS — persisted once recovered)."""
+        from cloudlabeller.photogrammetry.crs import (
+            ORIGIN_CONVENTION_FIRST_GPS,
+            resolve_enu_origin,
+        )
+
+        geo = self.project.settings["georeferenced"]
+        origin = resolve_enu_origin(geo, self.project.reconstruction_dir,
+                                    self.project.images_dir)
+        if origin.exact and geo.get("origin_convention") != ORIGIN_CONVENTION_FIRST_GPS:
+            geo["origin_lla"] = list(origin.lla)
+            geo["origin_convention"] = ORIGIN_CONVENTION_FIRST_GPS
+            self.project.save_manifest()
+        return origin
+
+    def _reproject(self) -> None:
+        """Move the whole project (clouds, mesh, cameras, COLMAP model) into
+        a chosen projected CRS — stored minus a km offset for precision."""
+        if not self.project or self.project.dataset.cloud is None:
+            QMessageBox.information(self, "No reconstruction", "Run SfM first.")
+            return
+        geo = self.project.settings.get("georeferenced")
+        if not geo:
+            QMessageBox.information(
+                self, "Not georeferenced",
+                "Reprojection needs a georeferenced model — run "
+                "Georeferencing → Align to EXIF GPS… first.")
+            return
+        from cloudlabeller.ui.reproject_dialog import ReprojectDialog
+
+        origin = self._resolved_enu_origin()
+        dlg = ReprojectDialog(origin.lla, geo, parent=self)
+        if not dlg.exec():
+            return
+
+        from cloudlabeller.workers.process_job import ProcessJob
+
+        desc = "Reproject"
+        args = [str(self.project.root), "--epsg", str(dlg.epsg())]
+        if dlg.orthometric():
+            args.append("--orthometric")
+        job = ProcessJob("cloudlabeller.photogrammetry.reproject_cli", args,
+                         log_path=self.project.reconstruction_dir / "reproject.log")
+        self._georef_job = job
+        job.progress.connect(lambda f, m="": self.bus.job_progress.emit(desc, f))
+        job.log_line.connect(self.log_panel.append)
+        job.finished.connect(lambda: self._on_reproject_done(job))
+        job.failed.connect(lambda e: self._on_sfm_failed(desc, e))
+        self.log_panel.append("--- Reprojection started ---")
+        self.bus.job_started.emit(desc)
+        job.start()
+
+    def _on_reproject_done(self, job) -> None:
+        out = self._job_result(job) or {}
+        self.project.load_products()               # reload transformed products
+        self.project.settings["georeferenced"]["crs"] = {
+            "epsg": out.get("epsg"), "name": out.get("name"),
+            "orthometric": out.get("orthometric", False),
+            "offset": out.get("offset"),
+        }
+        self._save()
+        self.bus.job_finished.emit("Reproject", True)
+        self.bus.cloud_changed.emit()
+        self.bus.mesh_changed.emit()
+        self.bus.images_changed.emit()             # camera coords in Dataset pane
+        off = out.get("offset") or [0, 0, 0]
+        msg = (f"Reprojected to EPSG:{out.get('epsg')} — {out.get('name')} "
+               f"(stored offset {off[0]:.0f}, {off[1]:.0f}, {off[2]:.0f}; "
+               f"projection-vs-similarity rms {out.get('fit_rms_m', 0):.3f} m)")
+        self.log_panel.append(msg)
+        self.statusBar().showMessage(msg, 10000)
+
+    def _on_georef_auto_failed(self, error: str) -> None:
+        """Auto-georeferencing is best-effort: keep the local frame and keep
+        going (Photogrammetry → Georeference remains available)."""
+        headline = (error.splitlines() or ["unknown error"])[0]
+        self.bus.job_finished.emit("Georeference", False)
+        if "cancelled" in error.lower():           # user stop = abort, not skip
+            self.log_panel.append("Georeferencing cancelled.")
+            self._pipeline_end("aborted at Georeference")
+            return
+        self.log_panel.append(f"Auto-georeferencing failed — continuing in "
+                              f"the local frame: {headline}")
+        if self._pipeline is not None:
+            self.log_panel.append("=== Pipeline: starting dense MVS ===")
+            self._launch_mvs(self._pipeline["mvs_px"], self._pipeline["colmap"],
+                             self._pipeline.get("mvs_quality", "standard"))
 
     def _ask_conflict_policy(self, source_dir: str) -> str | None:
         """If the source has names already in the store, ask how to resolve.
@@ -743,8 +880,8 @@ class MainWindow(QMainWindow):
         """Fetch the official COLMAP bundle into ``~/.cloudlabeller`` (the
         location ``find_colmap_binary`` searches). COLMAP is not shipped with
         the app — its official bundle links GPL components — so this one-time
-        download is how the GPU engine (SfM SIFT, dense MVS, georeferencing,
-        Delaunay meshing) becomes available."""
+        download is how the GPU engine (SfM SIFT, dense MVS, Delaunay
+        meshing) becomes available."""
         from cloudlabeller.photogrammetry.colmap_fetch import (
             COLMAP_VERSION,
             DOWNLOAD_MB,
@@ -772,8 +909,8 @@ class MainWindow(QMainWindow):
                      "recommended: it enables dense MVS and ~10× faster SIFT.")
         else:
             text += ("<b>No NVIDIA GPU detected.</b> The CUDA version needs "
-                     "one. The CPU-only version still provides georeferencing "
-                     "and Delaunay meshing, but not dense MVS.")
+                     "one. The CPU-only version still provides Delaunay "
+                     "meshing, but not dense MVS.")
         box = QMessageBox(QMessageBox.Question, "Download COLMAP", text,
                           QMessageBox.NoButton, self)
         b_cuda = box.addButton(f"CUDA (~{DOWNLOAD_MB['cuda']} MB)",
@@ -1029,6 +1166,73 @@ class MainWindow(QMainWindow):
         self.log_panel.append(f"Mesh labels updated: {n:,} labelled vertices")
 
     # -- export ------------------------------------------------------------
+    def _ask_export_crs(self):
+        """Export coordinate spec: a dict for :meth:`_build_export_transform`,
+        or None if the user cancelled the dialog.
+
+        No dialog is shown when there is nothing to ask: unreferenced
+        projects export the local frame; reprojected projects are already in
+        their CRS (the export just adds the stored offset back)."""
+        geo = self.project.settings.get("georeferenced")
+        if not geo:
+            return {"kind": "local"}
+        crs_info = geo.get("crs")
+        if crs_info:
+            return {"kind": "offset", "epsg": crs_info["epsg"],
+                    "orthometric": crs_info.get("orthometric", False),
+                    "offset": crs_info.get("offset") or [0.0, 0.0, 0.0]}
+        from cloudlabeller.ui.export_crs_dialog import ExportCrsDialog
+
+        origin = self._resolved_enu_origin()
+        dlg = ExportCrsDialog(origin.lla, geo, parent=self)
+        if not dlg.exec():
+            return None
+        choice = dlg.choice()
+        if choice.mode == "projected":
+            geo.update(export_mode="projected", export_epsg=choice.epsg,
+                       export_orthometric=choice.orthometric)
+            self.project.save_manifest()
+            return {"kind": "enu", "epsg": choice.epsg,
+                    "orthometric": choice.orthometric, "origin": origin.lla}
+        geo["export_mode"] = "local"
+        self.project.save_manifest()
+        return {"kind": "local"}
+
+    @staticmethod
+    def _build_export_transform(spec, progress):
+        """(transform, crs) for an export work fn; (None, None) = local frame.
+        Runs on the worker thread — may download the geoid grid once."""
+        if spec["kind"] == "local":
+            return None, None
+        import numpy as np
+        import pyproj
+
+        from cloudlabeller.photogrammetry.crs import (
+            _compound_crs,
+            crs_display,
+            download_geoid_grids,
+            enu_to_crs_transform,
+            geoid_ready,
+        )
+
+        epsg, orthometric = spec["epsg"], spec["orthometric"]
+        if spec["kind"] == "offset":
+            # Stored coordinates are already in the CRS, minus the offset.
+            offset = np.asarray(spec["offset"], np.float64)
+            crs = (_compound_crs(epsg) if orthometric
+                   else pyproj.CRS.from_epsg(int(epsg)))
+            transform = lambda xyz: np.asarray(xyz, np.float64) + offset  # noqa: E731
+        else:
+            if orthometric and not geoid_ready(epsg):
+                progress(0.01, "Downloading the EGM96 geoid grid "
+                               "(~3 MB, one-time)…")
+                download_geoid_grids(epsg)
+            transform, crs = enu_to_crs_transform(spec["origin"], epsg,
+                                                  orthometric)
+        progress(0.02, f"Coordinates: {crs_display(epsg)}"
+                       + (" + EGM96 heights" if orthometric else ""))
+        return transform, crs
+
     def _export_cloud(self) -> None:
         """Export the dense cloud (or sparse, if no dense yet) with labels."""
         if not self.project:
@@ -1049,15 +1253,20 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith((".las", ".csv", ".ply")):
             path += ".las"
+        spec = self._ask_export_crs()
+        if spec is None:
+            return
         labels_copy = None if labels is None else labels.copy()   # thread snapshot
 
         def work(progress=None):
             progress = progress or (lambda f, m="": None)
             from cloudlabeller.io.export import export_cloud
 
+            transform, crs = self._build_export_transform(spec, progress)
             progress(0.0, f"Exporting {kind} cloud ({cloud.n_points:,} points) "
                           f"to {path}")
-            export_cloud(cloud, labels_copy, path, progress)
+            export_cloud(cloud, labels_copy, path, progress,
+                         transform=transform, crs=crs)
             return path
 
         self._start_transfer_job("Export cloud", work, self._on_export_done)
@@ -1075,13 +1284,17 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith((".ply", ".obj", ".stl")):
             path += ".ply"
+        spec = self._ask_export_crs()
+        if spec is None:
+            return
 
         def work(progress=None):
             progress = progress or (lambda f, m="": None)
             from cloudlabeller.io.export import export_mesh
 
+            transform, crs = self._build_export_transform(spec, progress)
             progress(0.0, f"Exporting mesh to {path}")
-            export_mesh(mesh, path, progress)
+            export_mesh(mesh, path, progress, transform=transform, crs=crs)
             return path
 
         self._start_transfer_job("Export mesh", work, self._on_export_done)

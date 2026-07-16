@@ -27,7 +27,13 @@ survey where per-point classes matter.
   mode, and crash-resumable workspaces.
 - Meshing: Poisson (depth auto-matched to the cloud's density, with run-time
   and RAM estimates) or Delaunay, rebuilt automatically after MVS.
-- Georeferencing to the images' EXIF GPS (metric, true-north local frame).
+- Georeferencing to the images' EXIF GPS (metric, true-north local frame) —
+  automatically after SfM (optional) or on demand, with outlier-robust
+  fitting; runs natively, no COLMAP executable needed.
+- Reproject the whole project (clouds, mesh, cameras) into any projected
+  CRS — coordinates are stored minus a km-rounded offset to preserve
+  precision, the current frame shows in the status bar, and camera positions
+  appear next to the file names in the Dataset pane.
 - A one-click **full pipeline** (SfM → MVS → mesh) for overnight runs — the
   machine is kept awake and every stage logs to the project.
 - COLMAP is **not** bundled: *Photogrammetry → Download COLMAP…* fetches the
@@ -51,6 +57,10 @@ survey where per-point classes matter.
 **Data interchange**
 - Export labelled clouds to `.las`, `.ply` or `.csv` and meshes to `.ply`,
   `.obj` or `.stl` for GIS and geomodelling tools.
+- Georeferenced projects export in any projected CRS — searchable EPSG
+  picker with the site's UTM zone pre-selected, optional sea-level (EGM96)
+  heights. The CRS ships inside the LAS header and as a `.prj` sidecar for
+  the other formats.
 - Projects are plain folders — copy them between machines as-is.
 
 ## Getting started

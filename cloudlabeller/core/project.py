@@ -268,9 +268,22 @@ class Project:
 
         geo = self.settings.get("georeferenced")
         if geo:
+            crs_info = geo.get("crs")
+            if crs_info:
+                off = crs_info.get("offset") or [0, 0, 0]
+                rows.append(("Coordinates",
+                             f"EPSG:{crs_info.get('epsg')} — "
+                             f"{crs_info.get('name', '?')}"))
+                rows.append(("Heights", "EGM96 (sea level)"
+                             if crs_info.get("orthometric") else "ellipsoidal"))
+                if any(off):
+                    rows.append(("Stored offset",
+                                 f"{off[0]:.0f}, {off[1]:.0f}, {off[2]:.0f} "
+                                 "(exports add it back)"))
+            else:
+                rows.append(("Coordinates",
+                             f"{geo.get('frame', 'ENU')} — metres, true north"))
             lat, lon, alt = (geo.get("origin_lla") or [0, 0, 0])
-            rows.append(("Coordinates",
-                         f"{geo.get('frame', 'ENU')} — metres, true north"))
             rows.append(("Origin (lat, lon, alt)",
                          f"{lat:.7f}°, {lon:.7f}°, {alt:.1f} m"))
             scale = geo.get("scale_m_per_unit")

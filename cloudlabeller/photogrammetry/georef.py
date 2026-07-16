@@ -20,12 +20,14 @@
 
 """Georeferencing: align the model to the images' GPS (metric ENU frame).
 
-COLMAP's ``model_aligner`` computes a similarity transform from the solved
-camera positions to their EXIF GPS coordinates (converted to a local
-East-North-Up frame — metres, true north, small numbers that survive the
-float32 storage; ECEF's ~6.4e6 m magnitudes would not). This module holds the
-pure logic: EXIF GPS extraction, the similarity fit between the original and
-aligned models, and applying that transform to cameras and geometry.
+A similarity transform is fitted from the solved camera positions to their
+EXIF GPS coordinates (converted to a local East-North-Up frame — metres,
+true north, small numbers that survive the float32 storage; ECEF's ~6.4e6 m
+magnitudes would not). This module holds the pure numpy logic: EXIF GPS
+extraction, the robust (RANSAC + Umeyama) similarity fit, and applying that
+transform to cameras and geometry. The fit runs natively — no COLMAP
+executable involved (the ENU origin convention — first GPS coordinate —
+matches COLMAP's ``model_aligner`` for compatibility with older projects).
 
 World transform convention: ``X' = s · R @ X + t``.
 """
@@ -100,6 +102,69 @@ def umeyama_similarity(src: np.ndarray, dst: np.ndarray
     scale = float(np.trace(np.diag(d) @ sign) / var_s)
     translation = mu_d - scale * rotation @ mu_s
     return scale, rotation, translation
+
+
+def count_gps_images(paths, need: int = 3, limit: int = 25) -> int:
+    """How many of the first ``limit`` images have GPS EXIF, stopping early
+    once ``need`` are found. Header-only reads, capped so cloud-synced image
+    stores aren't mass-hydrated just to populate a dialog."""
+    found = 0
+    for path in list(paths)[:limit]:
+        if exif_gps(path) is not None:
+            found += 1
+            if found >= need:
+                break
+    return found
+
+
+def ransac_similarity(src: np.ndarray, dst: np.ndarray, max_error: float = 5.0,
+                      min_inliers: int = 3, iters: int = 500, seed: int = 0
+                      ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, float]:
+    """Robust similarity fit ``dst ≈ s·R@src + t`` for GPS-grade data.
+
+    Consumer GPS has occasional wild outliers (multipath, cold fixes) that
+    wreck a plain least-squares fit, so: RANSAC over minimal 3-point samples,
+    inliers within ``max_error`` metres, final Umeyama refit on the inliers.
+
+    Returns ``(s, R, t, inlier_mask, rms)`` — rms over the inliers, metres.
+    Raises ``RuntimeError`` when no sample yields ``min_inliers`` inliers.
+    """
+    src = np.asarray(src, np.float64)
+    dst = np.asarray(dst, np.float64)
+    n = len(src)
+    if n < 3:
+        raise RuntimeError(f"similarity fit needs >= 3 points, got {n}")
+
+    def residuals(s, R, t):
+        return np.linalg.norm(src @ (s * R).T + t - dst, axis=1)
+
+    rng = np.random.default_rng(seed)
+    best_mask = None
+    for _ in range(iters):
+        idx = rng.choice(n, 3, replace=False)
+        try:
+            s, R, t = umeyama_similarity(src[idx], dst[idx])
+        except np.linalg.LinAlgError:
+            continue
+        if not (np.isfinite(s) and s > 0):        # degenerate sample
+            continue
+        mask = residuals(s, R, t) < max_error
+        if best_mask is None or mask.sum() > best_mask.sum():
+            best_mask = mask
+    if best_mask is None or best_mask.sum() < min_inliers:
+        raise RuntimeError(
+            f"could not align: fewer than {min_inliers} of {n} GPS positions "
+            f"agree within {max_error:.1f} m — GPS may be unreliable here")
+
+    # Refit on the consensus set, then let the refined fit re-pick inliers.
+    for _ in range(2):
+        s, R, t = umeyama_similarity(src[best_mask], dst[best_mask])
+        mask = residuals(s, R, t) < max_error
+        if mask.sum() < min_inliers or (mask == best_mask).all():
+            break
+        best_mask = mask
+    rms = float(np.sqrt((residuals(s, R, t)[best_mask] ** 2).mean()))
+    return s, R, t, best_mask, rms
 
 
 def transform_camera(camera: Camera, s: float, R: np.ndarray, t: np.ndarray) -> Camera:

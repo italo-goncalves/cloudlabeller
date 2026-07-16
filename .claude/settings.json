@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true /c/Python_envs/cloudlabeller/python.exe -m pytest *)",
+      "Bash(QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true ./.venv/Scripts/python.exe -m pytest *)",
+      "Bash(QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true .venv/Scripts/python -m pytest *)"
+    ]
+  }
+}

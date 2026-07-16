@@ -401,11 +401,17 @@ class Viewer3D(QWidget):
         self.plotter.render()
 
     def _scene_up(self) -> np.ndarray | None:
-        """The scene's up direction, derived from the camera orientations
-        (COLMAP's world axes are arbitrary — a fixed +Z up showed the model
-        upside down). Sign chosen empirically: +R[1] is what lands right-side
-        up for this DJI/COLMAP chain (EXIF/gimbal conventions vary)."""
-        ups = [e.camera.R[1] for e in self._frustums.values()]
+        """The scene's up direction.
+
+        Georeferenced projects (ENU or a projected CRS) have +Z up by
+        construction — use it, no guessing. Otherwise COLMAP's world axes are
+        arbitrary and up is derived from the camera orientations: COLMAP's
+        image y-axis points DOWN in the image, so world up ≈ -mean(R[1]).
+        (The + sign used before was tuned on an unreferenced solve whose
+        frame turned out to be flipped — georeferencing exposed it.)"""
+        if self.project and self.project.settings.get("georeferenced"):
+            return np.array([0.0, 0.0, 1.0])
+        ups = [-e.camera.R[1] for e in self._frustums.values()]
         if not ups:
             return None
         up = np.mean(ups, axis=0)
