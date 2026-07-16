@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self.view_panel = ViewPanel(self.bus)
         self.log_panel = LogPanel()
 
+        self._docks: list[QDockWidget] = []    # feeds the Panes menu
         self._add_dock("Image", self.image_view, Qt.RightDockWidgetArea)
         # Left column, top→bottom: Labels, View, Dataset.
         self._add_dock("Labels", self.label_panel, Qt.LeftDockWidgetArea)
@@ -188,6 +189,7 @@ class MainWindow(QMainWindow):
         dock.setObjectName(f"dock_{title}")   # required for saveState/restoreState
         dock.setWidget(widget)
         self.addDockWidget(area, dock)
+        self._docks.append(dock)              # its toggle action → Panes menu
 
     def _build_menus(self) -> None:
         m_file = self.menuBar().addMenu("&File")
@@ -228,6 +230,12 @@ class MainWindow(QMainWindow):
         m_edit = self.menuBar().addMenu("&Edit")
         m_edit.addAction("Undo", self._undo, "Ctrl+Z")
         m_edit.addAction("Redo", self._redo, "Ctrl+Y")
+
+        # A closed pane is otherwise unrecoverable — Qt's toggle actions stay
+        # checked/unchecked in sync with each dock's visibility.
+        m_panes = self.menuBar().addMenu("&Panes")
+        for dock in self._docks:
+            m_panes.addAction(dock.toggleViewAction())
 
         m_help = self.menuBar().addMenu("&Help")
         m_help.addAction("About CloudLabeller…", self._show_about)

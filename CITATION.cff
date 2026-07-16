@@ -7,8 +7,8 @@ authors:
     given-names: "Ítalo"
     orcid: "https://orcid.org/0000-0002-5546-6102"
 license: GPL-3.0-or-later
-version: 0.1.0
-date-released: "2026-07-14"
+version: 0.1.1
+date-released: "2026-07-16"
 keywords:
   - photogrammetry
   - point cloud

@@ -48,10 +48,12 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsView,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QToolButton,
     QVBoxLayout,
@@ -202,24 +204,39 @@ class ImageView(QWidget):
             "with the highest alpha. The mask must match the image size.")
         self.lbl_name = QLabel("")                    # current image's file name
         self.lbl_name.setStyleSheet("color: gray;")
+        # Let the label clip instead of forcing the pane wide enough for a
+        # long file name — the dock must stay shrinkable.
+        self.lbl_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.lbl_name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(50)
         self.slider.setFixedWidth(120)
         self.slider.setToolTip("Label overlay transparency")
 
-        bar = QHBoxLayout()
-        bar.addWidget(self.btn_draw)
-        bar.addWidget(self.btn_finish)
-        bar.addWidget(self.btn_done)
-        bar.addWidget(self.btn_cancel)
-        bar.addWidget(self.btn_propagate)
-        bar.addWidget(self.btn_mask)
-        bar.addStretch(1)
-        bar.addWidget(self.lbl_name)
-        bar.addStretch(1)
-        bar.addWidget(QLabel("Opacity"))
-        bar.addWidget(self.slider)
+        # Two button rows (edit row / action row) so the dock can be narrowed;
+        # right column: file name with the opacity slider below it.
+        row_edit = QHBoxLayout()
+        for b in (self.btn_draw, self.btn_finish, self.btn_done, self.btn_cancel):
+            row_edit.addWidget(b)
+        row_edit.addStretch(1)
+        row_act = QHBoxLayout()
+        for b in (self.btn_propagate, self.btn_mask):
+            row_act.addWidget(b)
+        row_act.addStretch(1)
+
+        opacity = QHBoxLayout()
+        opacity.addStretch(1)
+        opacity.addWidget(QLabel("Opacity"))
+        opacity.addWidget(self.slider)
+
+        bar = QGridLayout()
+        bar.addLayout(row_edit, 0, 0)
+        bar.addLayout(row_act, 1, 0)
+        bar.addWidget(self.lbl_name, 0, 1)
+        bar.addLayout(opacity, 1, 1)
+        bar.setColumnStretch(0, 3)
+        bar.setColumnStretch(1, 2)
 
         layout = QVBoxLayout(self)
         layout.addLayout(bar)

@@ -343,6 +343,28 @@ def test_dataset_panel_status_dots():
     assert dot(2) == STATUS_COLORS["user"]
 
 
+# --- image pane: shrinkable two-row toolbar ----------------------------------
+def test_image_view_toolbar_stays_shrinkable():
+    """The dock must be narrowable: buttons sit in two rows and the file-name
+    label must not impose its text width as a minimum (long names would
+    otherwise lock the pane wide)."""
+    from PySide6.QtWidgets import QApplication, QGridLayout, QSizePolicy
+
+    from cloudlabeller.core.events import EventBus
+    from cloudlabeller.ui.image_view import ImageView
+
+    QApplication.instance() or QApplication([])
+    view = ImageView(EventBus())
+
+    assert view.lbl_name.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+    grid = view.layout().itemAt(0).layout()
+    assert isinstance(grid, QGridLayout) and grid.rowCount() == 2
+    before = view.minimumSizeHint().width()
+    view.lbl_name.setText("a-very-long-file-name-from-a-drone_DJI_20260716.JPG"
+                          * 4)
+    assert view.minimumSizeHint().width() == before
+
+
 # --- detail levels: SfM vs MVS resolution presets ---------------------------
 def test_detail_control_levels():
     from PySide6.QtWidgets import QApplication
