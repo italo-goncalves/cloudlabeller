@@ -25,7 +25,7 @@ free of Qt imports; the GUI in :mod:`cloudlabeller.ui` depends on core, never th
 other way around.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def _preload_msvc_runtime() -> None:

@@ -34,6 +34,74 @@ from cloudlabeller.core.project import Project
 from cloudlabeller.transfer.mesh_cloud import cloud_to_mesh
 
 
+class TestResampleLabelMask:
+    """Upscaling a prediction to the photo resolution must smooth class
+    boundaries without ever averaging ids into a class that was not there.
+    Regression for the nearest-neighbour prediction upscale (2026-07-21)."""
+
+    def _diag(self, h, w, a=0, b=2):
+        """h×w mask split by a diagonal: class ``a`` above, ``b`` below."""
+        m = np.full((h, w), a, np.int32)
+        for r in range(h):
+            m[r, r * w // h:] = b
+        return m
+
+    def test_upscale_introduces_no_spurious_class(self):
+        from cloudlabeller.core.raster import resample_label_mask
+
+        small = self._diag(30, 40, a=0, b=2)          # 0 and 2 adjacent
+        big = resample_label_mask(small, (400, 300))  # 10x enlarge
+        assert set(np.unique(big).tolist()) == {0, 2}   # never a spurious 1
+
+    def test_upscale_is_smoother_than_nearest(self):
+        import cv2
+
+        from cloudlabeller.core.raster import resample_label_mask
+
+        small = self._diag(30, 40)
+        size = (400, 300)
+        smooth = resample_label_mask(small, size)
+        nn = cv2.resize(small.astype(np.float32), size,
+                        interpolation=cv2.INTER_NEAREST).astype(np.int32)
+
+        def edge_var(m):                              # jaggedness of the 0|2 seam
+            cols = [np.argmax(row == 2) for row in m]
+            return float(np.var(np.diff(cols)))
+
+        assert edge_var(smooth) < edge_var(nn) / 2    # markedly less staircased
+
+    def test_dense_mask_stays_dense(self):
+        from cloudlabeller.core.raster import resample_label_mask
+
+        small = self._diag(20, 20, a=1, b=3)
+        big = resample_label_mask(small, (200, 200))
+        assert (big >= 0).all()                       # no -1 introduced (dense)
+
+    def test_all_unlabelled_and_size_convention(self):
+        from cloudlabeller.core.raster import resample_label_mask
+
+        out = resample_label_mask(np.full((10, 12), -1, np.int32), (24, 20))
+        assert out.shape == (20, 24) and np.all(out == -1)
+
+
+def test_prediction_mask_upscales_smoothly(tmp_path):
+    from cloudlabeller.core.dataset import Camera, ImageRecord
+
+    proj = Project.create(tmp_path / "p.clproj")
+    small = np.zeros((30, 40), np.int32)              # 0 above, 2 below diagonal
+    for r in range(30):
+        small[r, r * 40 // 30:] = 2
+    proj.predictions_dir.mkdir(parents=True, exist_ok=True)
+    np.save(proj.predictions_dir / "a.jpg.npy", small)
+    cam = Camera(K=np.eye(3), R=np.eye(3), t=np.zeros(3), width=400, height=300)
+    proj.dataset.images = [ImageRecord(0, tmp_path / "a.jpg", camera=cam)]
+    proj.labels.mark_ml_labeled("a.jpg")
+
+    mask = proj.prediction_mask("a.jpg")
+    assert mask.shape == (300, 400)
+    assert set(np.unique(mask).tolist()) == {0, 2}    # no averaged-in class 1
+
+
 def test_schema_starts_empty_and_numbers_from_zero():
     schema = LabelSchema()
     assert schema.classes == []                       # no reserved unlabelled class

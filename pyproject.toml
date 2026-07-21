@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudlabeller"
-version = "0.2.0"
+version = "0.2.1"
 description = "Photogrammetry + bidirectional 2D/3D labelling with hylite transfer and U-Net propagation."
 readme = "README.md"
 requires-python = ">=3.10"

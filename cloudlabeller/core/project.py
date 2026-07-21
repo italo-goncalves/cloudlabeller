@@ -197,10 +197,17 @@ class Project:
         return self.ml_dir / "predictions"
 
     def prediction_mask(self, name: str):
-        """Load ``name``'s U-Net prediction and upscale it (nearest-neighbour)
-        to the photo's resolution. Returns (H, W) int32 or None. Predictions
-        are stored at the model's training size — full-resolution int32 masks
-        are ~84 MB each, which froze the UI when materialised."""
+        """Load ``name``'s U-Net prediction and upscale it to the photo's
+        resolution. Returns (H, W) int32 or None. Predictions are stored at
+        the model's training size — full-resolution int32 masks are ~84 MB
+        each, which froze the UI when materialised.
+
+        The upscale is a per-class one-hot resample (see
+        :func:`~cloudlabeller.core.raster.resample_label_mask`) — smooth
+        class boundaries instead of the blocky staircase nearest-neighbour
+        baked in, and never a spurious in-between class. This mask also feeds
+        cloud transfer and retraining, so the boundary quality carries through.
+        """
         path = self.predictions_dir / f"{name}.npy"
         if not path.exists():
             return None
@@ -211,10 +218,9 @@ class Project:
             wh = (record.camera.width, record.camera.height)
         if wh is None or (small.shape[1], small.shape[0]) == wh:
             return small.astype(np.int32)
-        import cv2   # lazy: keep core light
+        from cloudlabeller.core.raster import resample_label_mask
 
-        return cv2.resize(small.astype(np.float32), (int(wh[0]), int(wh[1])),
-                          interpolation=cv2.INTER_NEAREST).astype(np.int32)
+        return resample_label_mask(small, (int(wh[0]), int(wh[1]))).astype(np.int32)
 
     # -- model / ML settings ----------------------------------------------
     def model_spec(self):

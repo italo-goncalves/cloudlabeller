@@ -109,34 +109,21 @@ MASK_LABEL_FRACTION = 0.2
 
 def resize_mask(mask: np.ndarray, size: tuple[int, int],
                 min_label_fraction: float = MASK_LABEL_FRACTION) -> np.ndarray:
-    """Resize an int label mask to ``size`` = (width, height), preserving
-    labelled area far better than nearest-neighbour.
+    """Resize a training-data label mask to ``size`` = (width, height),
+    preserving labelled area far better than nearest-neighbour.
 
-    Each labelled class (id >= 0) is resized as a one-hot channel with area
-    averaging, so every target pixel gets the fraction of its area covered by
-    each class. A pixel takes the majority labelled class whenever labelled
-    classes *together* cover at least ``min_label_fraction`` of it, and -1
-    (unlabelled) otherwise — i.e. the unlabelled background only wins when
-    labels are genuinely sparse there.
-
-    This keeps thin labels that nearest-neighbour would drop on downscaling,
-    and closes the scattered -1 holes typical of projection-derived masks
-    (which matters when those auto-labelled images are used as training data).
+    A pixel takes the majority labelled class whenever labelled classes
+    *together* cover at least ``min_label_fraction`` of it, and -1 (unlabelled)
+    otherwise — so the unlabelled background only wins where labels are
+    genuinely sparse. This keeps thin labels that nearest-neighbour drops on
+    downscaling and closes the scattered -1 holes of projection-derived masks
+    (which matters when those auto-labelled images are reused as training
+    data). See :func:`cloudlabeller.core.raster.resample_label_mask` for the
+    shared one-hot resampling.
     """
-    import cv2
+    from cloudlabeller.core.raster import resample_label_mask
 
-    labelled_ids = [int(c) for c in np.unique(mask) if c >= 0]
-    if not labelled_ids:                          # nothing labelled to preserve
-        width, height = size
-        return np.full((height, width), -1, dtype=mask.dtype)
-    coverage = np.stack(
-        [cv2.resize((mask == c).astype(np.float32), size,
-                    interpolation=cv2.INTER_AREA) for c in labelled_ids],
-        axis=-1)                                  # (H, W, K) per-class area fraction
-    labelled_fraction = coverage.sum(axis=-1)
-    winner = np.asarray(labelled_ids)[coverage.argmax(axis=-1)]
-    resized = np.where(labelled_fraction >= min_label_fraction, winner, -1)
-    return resized.astype(mask.dtype)
+    return resample_label_mask(mask, size, min_label_fraction=min_label_fraction)
 
 
 def resize_pair(image: np.ndarray, mask: np.ndarray, size: tuple[int, int]

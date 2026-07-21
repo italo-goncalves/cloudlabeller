@@ -75,6 +75,51 @@ def mask_from_file(path, expected_shape: tuple[int, int] | None = None) -> np.nd
     return data == data.max()
 
 
+def resample_label_mask(mask: np.ndarray, size: tuple[int, int],
+                        min_label_fraction: float = 0.0) -> np.ndarray:
+    """Resize an integer label mask to ``size`` = (width, height) without ever
+    averaging class ids.
+
+    Each labelled class (id >= 0) is resampled as a one-hot channel — bilinear
+    when enlarging (smooth boundaries), area-averaged when shrinking (no
+    moire) — and every target pixel takes the class with the largest coverage.
+    A pixel becomes -1 (unlabelled) where labelled classes together cover less
+    than ``min_label_fraction`` of it. The default 0 keeps a dense mask fully
+    labelled while still leaving genuinely uncovered pixels unlabelled — so a
+    mask that mixes labels with -1 keeps its -1 regions.
+
+    Resizing the ids directly would blend them: bilinear turns a class-0 /
+    class-2 border into a spurious class-1 seam, and INTER_AREA silently
+    degenerates to nearest-neighbour when enlarging (no smoothing at all).
+    Uses a running arg-max so memory stays at a few full-size buffers
+    regardless of the class count.
+    """
+    import cv2
+
+    mask = np.asarray(mask)
+    width, height = int(size[0]), int(size[1])
+    src_h, src_w = mask.shape
+    labelled_ids = [int(c) for c in np.unique(mask) if c >= 0]
+    if not labelled_ids:                              # nothing labelled
+        return np.full((height, width), -1, dtype=mask.dtype)
+    interp = (cv2.INTER_LINEAR if width * height >= src_w * src_h
+              else cv2.INTER_AREA)
+    best_cover = np.zeros((height, width), np.float32)
+    best_id = np.full((height, width), labelled_ids[0], mask.dtype)
+    total_cover = np.zeros((height, width), np.float32)
+    for cid in labelled_ids:
+        cover = cv2.resize((mask == cid).astype(np.float32), (width, height),
+                           interpolation=interp)
+        total_cover += cover
+        winning = cover > best_cover
+        best_cover[winning] = cover[winning]
+        best_id[winning] = cid
+    # A tiny floor (even when min_label_fraction is 0) keeps truly uncovered
+    # pixels unlabelled — a dense mask still comes back fully labelled.
+    threshold = max(min_label_fraction, 1e-6)
+    return np.where(total_cover >= threshold, best_id, -1).astype(mask.dtype)
+
+
 def mask_to_indexed(mask: np.ndarray,
                     lut: dict[int, tuple[int, int, int]]):
     """(H, W) int label mask -> (uint8 index image, RGBA colour table).
