@@ -34,7 +34,98 @@ import pytest
 from cloudlabeller.core.labels import LabelStore
 from cloudlabeller.core.project import Project
 from cloudlabeller.ml import model_store
+from cloudlabeller.ml.dataset_builder import (
+    MASK_LABEL_FRACTION,
+    resize_mask,
+    resize_pair,
+)
 from cloudlabeller.ml.model_spec import ModelSpec
+
+
+def _nn_resize(mask, size):
+    """The old nearest-neighbour mask resize, for comparison."""
+    import cv2
+
+    return cv2.resize(mask.astype(np.float32), size,
+                      interpolation=cv2.INTER_NEAREST).astype(mask.dtype)
+
+
+class TestResizeMask:
+    """The one-hot/area mask resize (dataset_builder.resize_mask) must keep
+    labelled area that nearest-neighbour drops — thin labels and the -1 holes
+    of projection-derived masks — without inventing classes or corrupting
+    clean masks. Regression for the resize_pair note (2026-07-16)."""
+
+    def test_shape_dtype_and_size_convention(self):
+        mask = np.full((40, 60), -1, np.int32)
+        mask[10:30, 20:50] = 2
+        out = resize_mask(mask, (30, 20))          # size = (width, height)
+        assert out.shape == (20, 30) and out.dtype == np.int32
+
+    def test_all_unlabelled_stays_unlabelled(self):
+        out = resize_mask(np.full((50, 40), -1, np.int32), (20, 25))
+        assert out.shape == (25, 20)
+        assert np.all(out == -1)
+
+    def test_never_invents_a_class(self):
+        mask = np.full((80, 80), -1, np.int32)
+        mask[20:60, 20:60] = 5
+        out = resize_mask(mask, (25, 25))
+        assert set(np.unique(out)).issubset({-1, 5})
+
+    def test_solid_boundary_preserved_like_nn(self):
+        """On a clean split there is nothing to gain — must match NN exactly."""
+        mask = np.full((100, 100), -1, np.int32)
+        mask[:, :50] = 0
+        mask[:, 50:] = 1
+        out = resize_mask(mask, (20, 20))
+        assert np.array_equal(out, _nn_resize(mask, (20, 20)))
+        assert (out == 0).sum() == (out == 1).sum() == 200
+
+    def test_thin_label_survives_downscale(self):
+        """A thin diagonal stripe that NN under-samples on downscale: the
+        area method must retain strictly more of it (NN drops the pixels its
+        fixed grid sampling misses as the stripe's column shifts per row)."""
+        mask = np.full((300, 400), -1, np.int32)
+        for row in range(300):
+            col = row * 400 // 300                 # 3-px diagonal, non-square ratio
+            mask[row, col:col + 3] = 0
+        out = resize_mask(mask, (100, 75))
+        nn = _nn_resize(mask, (100, 75))
+        assert (out == 0).sum() > (nn == 0).sum()  # NN under-samples the stripe
+        assert (out == 0).any()
+
+    def test_fills_projection_holes(self):
+        """A solid blob riddled with -1 holes: labelled area must grow toward
+        the hole-free blob, not shrink (NN keeps the holes)."""
+        rng = np.random.default_rng(0)
+        mask = np.full((200, 200), -1, np.int32)
+        mask[50:150, 50:150] = 1
+        mask[(rng.random(mask.shape) < 0.35) & (mask == 1)] = -1
+        out = resize_mask(mask, (50, 50))
+        nn = _nn_resize(mask, (50, 50))
+        assert (out == 1).mean() > (nn == 1).mean()
+
+    def test_threshold_rule(self):
+        """A pixel is labelled iff labelled classes cover >= the threshold.
+
+        Downscale 5x1 -> 1x1: the single target pixel's labelled coverage is
+        exactly (#labelled source px)/5, so 1/5 = 0.2 passes (>=) and 0/5 fails.
+        """
+        assert MASK_LABEL_FRACTION == 0.2
+        below = np.array([[0, -1, -1, -1, -1]], np.int32)   # 0.2 coverage...
+        # one labelled px out of five -> exactly 0.2, which is >= threshold
+        assert resize_mask(below, (1, 1))[0, 0] == 0
+        none = np.full((1, 5), -1, np.int32)
+        assert resize_mask(none, (1, 1))[0, 0] == -1
+
+    def test_resize_pair_uses_resize_mask(self):
+        image = np.zeros((40, 60, 3), np.uint8)
+        mask = np.full((40, 60), -1, np.int32)
+        mask[5:35, 10:50] = 3
+        out_img, out_mask = resize_pair(image, mask, (30, 20))
+        assert out_img.shape == (20, 30, 3)
+        assert np.array_equal(out_mask, resize_mask(mask, (30, 20)))
 
 
 class TestModelStore:

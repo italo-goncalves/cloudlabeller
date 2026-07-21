@@ -102,22 +102,57 @@ class TrainingSet:
         return TrainingSet(augmented_dataset)
 
 
+#: A target pixel is kept labelled when labelled classes together cover at
+#: least this fraction of its area (below it, it becomes -1/unlabelled).
+MASK_LABEL_FRACTION = 0.2
+
+
+def resize_mask(mask: np.ndarray, size: tuple[int, int],
+                min_label_fraction: float = MASK_LABEL_FRACTION) -> np.ndarray:
+    """Resize an int label mask to ``size`` = (width, height), preserving
+    labelled area far better than nearest-neighbour.
+
+    Each labelled class (id >= 0) is resized as a one-hot channel with area
+    averaging, so every target pixel gets the fraction of its area covered by
+    each class. A pixel takes the majority labelled class whenever labelled
+    classes *together* cover at least ``min_label_fraction`` of it, and -1
+    (unlabelled) otherwise — i.e. the unlabelled background only wins when
+    labels are genuinely sparse there.
+
+    This keeps thin labels that nearest-neighbour would drop on downscaling,
+    and closes the scattered -1 holes typical of projection-derived masks
+    (which matters when those auto-labelled images are used as training data).
+    """
+    import cv2
+
+    labelled_ids = [int(c) for c in np.unique(mask) if c >= 0]
+    if not labelled_ids:                          # nothing labelled to preserve
+        width, height = size
+        return np.full((height, width), -1, dtype=mask.dtype)
+    coverage = np.stack(
+        [cv2.resize((mask == c).astype(np.float32), size,
+                    interpolation=cv2.INTER_AREA) for c in labelled_ids],
+        axis=-1)                                  # (H, W, K) per-class area fraction
+    labelled_fraction = coverage.sum(axis=-1)
+    winner = np.asarray(labelled_ids)[coverage.argmax(axis=-1)]
+    resized = np.where(labelled_fraction >= min_label_fraction, winner, -1)
+    return resized.astype(mask.dtype)
+
+
 def resize_pair(image: np.ndarray, mask: np.ndarray, size: tuple[int, int]
                 ) -> tuple[np.ndarray, np.ndarray]:
     """Resize an (image, mask) pair to ``size`` = (width, height).
 
-    The image uses area averaging (best for downscaling); the mask uses
-    nearest-neighbour so class ids — including -1 (unlabelled) — are preserved
-    exactly. cv2 can't resize int32 directly, so the mask round-trips via
-    float32. The target usually stretches the aspect ratio slightly (it is the
-    snapped U-Net-compatible size from ``ModelSpec.training_size``).
+    The image uses area averaging (best for downscaling); the mask uses the
+    area-based one-hot method in :func:`resize_mask`, which preserves labelled
+    pixels (including sparse projection labels) better than nearest-neighbour.
+    The target usually stretches the aspect ratio slightly (it is the snapped
+    U-Net-compatible size from ``ModelSpec.training_size``).
     """
     import cv2
 
     image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
-    mask = cv2.resize(mask.astype(np.float32), size,
-                      interpolation=cv2.INTER_NEAREST).astype(mask.dtype)
-    return image, mask
+    return image, resize_mask(mask, size)
 
 
 def build_training_set(
