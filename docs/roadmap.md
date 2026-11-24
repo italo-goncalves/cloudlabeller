@@ -23,32 +23,29 @@ with GeoScape, and the Environment installs itself
 shipping the Qt app until this is done.
 
 The steps, in order. Each step depends only on the ones before it, except
-steps 2 and 3, which share no files and can run side by side.
+steps 1 and 2, which share no files and can run side by side. (The GPU SIFT
+spike is done: all of COLMAP runs in WSL, see ADR-0003.)
 
-1. **Spike: GPU SIFT in WSL.** On real hardware, check whether COLMAP's GPU
-   feature extraction runs headless from `pycolmap-cuda12` inside WSL. This
-   decides whether extraction stays in WSL or falls back to the native CUDA
-   `colmap.exe` (ADR-0003).
-2. **The kit.** Create `rockanalytica/geokit` (Apache-2.0, © RockAnalytica) by
+1. **The kit.** Create `rockanalytica/geokit` (Apache-2.0, © RockAnalytica) by
    extracting GeoScape's tokens, its three.js-only viewer layers and its
    Environment manager, then add the GPU Lease. GeoScape switches to the kit
    and releases before CloudLabeller takes anything from it.
-3. **The Engine.** JSON-RPC over stdin/stdout on top of `core/`,
+2. **The Engine.** JSON-RPC over stdin/stdout on top of `core/`,
    `photogrammetry/` and `ml/`, with contract tests. Large arrays go as files.
    Jobs stay `*_cli.py` processes.
-4. **The Tauri shell.** Includes:
+3. **The Tauri shell.** Includes:
    - the Environment setup screen: WSL when a distro exists and `nvidia-smi`
      works there, otherwise native on the CPU;
    - uv with Python 3.12, from a committed lockfile, keeping TensorFlow 2.19;
    - pycolmap moved from 4.1 to 4.2;
    - the GPU Lease, Workspace staging for WSL COLMAP Jobs, the per-user NSIS
      installer and the updater.
-5. **Screens to parity** with the Qt app: import, SfM/MVS, georeferencing,
+4. **Screens to parity** with the Qt app: import, SfM/MVS, georeferencing,
    painting masks on photos in the page, labelling on the cloud, training,
    prediction, export. Along the way the kit gains camera frusta,
    single-point picking and lasso selection. Clouds reach the viewer as one
    flat buffer, thinned by the detail level.
-6. **Release.** Qt and its tests are removed, the Windows installer is
+5. **Release.** Qt and its tests are removed, the Windows installer is
    published, and Zenodo mints the new version's DOI.
 
 **Done when:** a new user on Windows runs the installer, the app sets up its

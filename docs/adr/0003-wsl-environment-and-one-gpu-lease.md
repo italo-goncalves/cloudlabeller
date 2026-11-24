@@ -22,15 +22,21 @@ photo falls back to the CPU instead of queueing behind a long reconstruction.
 - **A lock inside Python**: it can't see a native `colmap.exe` and a WSL
   TensorFlow at the same time.
 - **COLMAP native and TensorFlow in WSL**: two runtimes for every
-  Project. Rejected, unless the spike below fails.
+  Project. Rejected; the spike below showed it isn't needed.
 
 ## Consequences
 
 - In WSL, COLMAP runs from `pycolmap-cuda12` (BSD, Linux only, CUDA runtime
-  from pip). pycolmap moves from 4.1 to 4.2. WSL has no OpenGL, and it is
-  unverified whether COLMAP's GPU SIFT runs headless. A spike on real hardware
-  decides this first. If SIFT fails there, only feature extraction falls back
-  to the native CUDA `colmap.exe`. Matching and patch-match stereo stay in WSL.
+  from pip). pycolmap moves from 4.1 to 4.2. All of COLMAP stays in WSL,
+  feature extraction included: no native `colmap.exe` fallback is needed.
+  *Spike, 2026-11-24:* Ubuntu on WSL2 with an RTX 4060 Ti (driver 610.88),
+  `pycolmap-cuda12` 4.2.1 from uv with Python 3.12, `DISPLAY` and
+  `WAYLAND_DISPLAY` unset. COLMAP logged "Creating SIFT GPU feature
+  extractor" and reported `requires_opengl() == False`. On 20 DJI photos
+  (248 MB) extraction took 5.9 s on CUDA and 22.7 s on the CPU, and CUDA
+  exhaustive matching took 1.1 s (177 verified pairs). In WSL, `nvidia-smi`
+  cannot list per-process GPU use, so the Lease must track its own holders
+  rather than poll the GPU.
 - WSL COLMAP Jobs work in a **Workspace** on WSL's own disk. The Tauri core
   copies the inputs in from the Windows side, which also makes OneDrive
   download online-only files properly. The Job's products are copied back. This
