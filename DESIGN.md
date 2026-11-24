@@ -256,7 +256,4 @@ import existing cameras+cloud (Metashape/COLMAP export) → label & transfer.
 ---
 
 ## 11. Open decisions / future work
-- Georeferencing via GCPs / EXIF GPS.
-- Active-learning loop (model proposes uncertain images to label next).
-- Multi-resolution out-of-core cloud (Potree-style) for very large datasets.
-- Polygon/superpixel-assisted 2D labelling (SAM-style click-to-segment).
+What comes next, and in what order, is kept in [docs/roadmap.md](docs/roadmap.md).
