@@ -47,6 +47,10 @@ Rules:
 
 ## Project facts
 
+- The repo lives at `C:\Repos\cloudlabeller` (moved out of OneDrive
+  2026-11-24). Read `GLOSSARY.md` before naming anything, and `docs/adr/`
+  before revisiting the 0.3.0 Tauri migration.
+
 - Run the app: `.venv/Scripts/python -m cloudlabeller` (venv Python 3.10;
   no bare `python` on PATH).
 - Tests: `QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true
