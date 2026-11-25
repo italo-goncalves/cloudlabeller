@@ -51,17 +51,20 @@ Rules:
   siblings `geokit` and `geoscape`. Read `GLOSSARY.md` before naming
   anything, and `docs/adr/` before revisiting the 0.3.0 Tauri migration.
 
-- Run the app: `.venv/Scripts/python -m cloudlabeller` (venv Python 3.10).
-  The `python` on PATH is a bare 3.12 without the app's dependencies.
+- The dev environment is `/c/Python_envs/cloudlabeller/python.exe`
+  (Python 3.10, outside the repo, with an editable install of this working
+  tree). There is no `.venv` in the repo. The `python` on PATH is a bare
+  3.12 without the app's dependencies. Don't test with the installed app's
+  embedded Python either (`C:\Programas\CloudLabeller`): it imports its own
+  installed copy of the app.
+- Run the app: `/c/Python_envs/cloudlabeller/python.exe -m cloudlabeller`.
 - Tests: `QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true
-  .venv/Scripts/python -m pytest tests/ -q` — keep the suite green; add a
-  regression test with every bug fix.
-- If `.venv` is missing (as on 2026-11-25), the installed app's embedded
-  Python, `C:\Programas\CloudLabeller\python.exe`, has every dependency but
-  no pytest. It also ignores `PYTHONPATH` and imports its own installed copy
-  of the app. To test against this working tree, run pytest from a
-  bootstrap script that puts the repo first on `sys.path`, with pytest
-  installed in a scratch folder. Never install into the distribution.
+  /c/Python_envs/cloudlabeller/python.exe -m pytest tests/ -q` — keep the
+  suite green; add a regression test with every bug fix.
+- `graft` (a context graph in `graft/`, hooks in `.claude/settings.json`):
+  run `graft ask "<question>"` before grepping the tree, and
+  `graft callers <symbol>` for what a change touches. `graft/` is a local,
+  git-ignored cache; `graft build` rebuilds it.
 - `cloudlabeller/core/` and `cloudlabeller/engine/` must stay Qt-free
   (except `core/events.py`).
 - The Engine (`python -m cloudlabeller.engine`, step 2 of 0.3.0) is
