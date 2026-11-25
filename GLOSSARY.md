@@ -16,6 +16,12 @@ The Python side of an open Project, living in the active Environment, that
 answers the window's requests and starts its Jobs; one per open Project.
 _Avoid_: backend, server, kernel
 
+**Array file**:
+A large array (a cloud, a mask, label ids) passed between the window and
+the Engine as raw bytes in the Project's `.arrays/` folder, named in the
+message instead of sent through it.
+_Avoid_: buffer, blob, exchange file
+
 **Job**:
 One long-running piece of work the user starts and can cancel: a
 reconstruction step, georeferencing, training, a prediction batch.

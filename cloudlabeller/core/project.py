@@ -388,6 +388,13 @@ class Project:
         self._save_labels()
 
     # -- label persistence -------------------------------------------------
+    def save_image_mask(self, name: str) -> None:
+        """Write one user-drawn image mask (cheaper than a full save)."""
+        mask = self.labels.image_masks.get(name)
+        if mask is not None:
+            (self.labels_dir / "images").mkdir(parents=True, exist_ok=True)
+            np.save(self.labels_dir / "images" / f"{name}.npy", mask)
+
     def _save_labels(self) -> None:
         """Dump cloud/mesh label arrays and user-drawn image masks as .npy."""
         if self.labels.cloud_labels is not None:

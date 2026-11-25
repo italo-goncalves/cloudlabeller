@@ -33,6 +33,10 @@ spike is done: all of COLMAP runs in WSL, see ADR-0003.)
 2. **The Engine.** JSON-RPC over stdin/stdout on top of `core/`,
    `photogrammetry/` and `ml/`, with contract tests. Large arrays go as files.
    Jobs stay `*_cli.py` processes.
+   *Built 2026-11-25:* `cloudlabeller/engine/`, with its contract in
+   [engine.md](engine.md). Left for step 4, added as the screens need them:
+   export, cleaning the sparse cloud, the COLMAP download, the viewer's
+   thinned flat buffer, and the multi-stage pipeline (run by the window).
 3. **The Tauri shell.** Includes:
    - the Environment setup screen: WSL when a distro exists and `nvidia-smi`
      works there, otherwise native on the CPU;

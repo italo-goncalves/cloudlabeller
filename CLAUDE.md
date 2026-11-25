@@ -47,16 +47,31 @@ Rules:
 
 ## Project facts
 
-- The repo lives at `C:\Repos\cloudlabeller` (moved out of OneDrive
-  2026-11-24). Read `GLOSSARY.md` before naming anything, and `docs/adr/`
-  before revisiting the 0.3.0 Tauri migration.
+- The repo lives at `C:\Repos\RockAnalytica\cloudlabeller`, beside its
+  siblings `geokit` and `geoscape`. Read `GLOSSARY.md` before naming
+  anything, and `docs/adr/` before revisiting the 0.3.0 Tauri migration.
 
-- Run the app: `.venv/Scripts/python -m cloudlabeller` (venv Python 3.10;
-  no bare `python` on PATH).
+- Run the app: `.venv/Scripts/python -m cloudlabeller` (venv Python 3.10).
+  The `python` on PATH is a bare 3.12 without the app's dependencies.
 - Tests: `QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true
   .venv/Scripts/python -m pytest tests/ -q` — keep the suite green; add a
   regression test with every bug fix.
-- `cloudlabeller/core/` must stay Qt-free (except `core/events.py`).
+- If `.venv` is missing (as on 2026-11-25), the installed app's embedded
+  Python, `C:\Programas\CloudLabeller\python.exe`, has every dependency but
+  no pytest. It also ignores `PYTHONPATH` and imports its own installed copy
+  of the app. To test against this working tree, run pytest from a
+  bootstrap script that puts the repo first on `sys.path`, with pytest
+  installed in a scratch folder. Never install into the distribution.
+- `cloudlabeller/core/` and `cloudlabeller/engine/` must stay Qt-free
+  (except `core/events.py`).
+- The Engine (`python -m cloudlabeller.engine`, step 2 of 0.3.0) is
+  JSON-RPC over stdin/stdout, and its contract is `docs/engine.md`. A new or
+  changed method is documented there in the same change, and
+  `tests/test_engine_contract.py` fails when the two disagree. Only the
+  Engine's loop thread touches the Project: slow work returns a `Deferred`.
+  The Engine reads and writes the protocol on private copies of stdin and
+  stdout. Don't use `sys.stdin`/`sys.stdout` there: on Windows a native
+  library probing fd 0 hung it (diagnosed 2026-11-25).
 - Heavy native work (COLMAP, TensorFlow) runs in subprocesses (`*_cli.py` +
   `ProcessJob`); pure-numpy work runs in `QThreadPool` via `workers.job.Job`.
   NEVER run TensorFlow on an in-process thread — it deadlocks the GIL against
