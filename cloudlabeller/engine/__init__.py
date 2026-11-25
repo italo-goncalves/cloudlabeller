@@ -24,7 +24,8 @@ One long-running process, ``python -m cloudlabeller.engine``, started by the
 window inside the active Environment. It speaks JSON-RPC 2.0 over
 stdin/stdout, one JSON message per line. Large arrays travel as Array files
 in the Project folder (:mod:`.arrays`), never through the pipe. Jobs stay
-separate ``*_cli.py`` processes (:mod:`.jobs`).
+separate ``*_cli.py`` processes: the Engine plans them and applies their
+results, the Tauri core runs them (ADR-0004, :mod:`.jobs`).
 
 The contract — every method, notification and error code — is
 ``docs/engine.md``; ``tests/test_engine_contract.py`` holds the Engine to it.

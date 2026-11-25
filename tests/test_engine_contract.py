@@ -6,8 +6,7 @@ Two harnesses:
   talks to it over stdin/stdout, exactly as the window will. Every line the
   Engine writes must be a JSON-RPC message.
 - :class:`InProcess` runs :class:`Engine` on a thread, for what the pipe
-  can't reach: cancellation timing and Job processes driven by a stand-in
-  CLI (``tests/engine_fake_cli.py``).
+  can't reach: cancellation timing and autosave.
 """
 
 from __future__ import annotations
@@ -34,10 +33,9 @@ DOC = REPO / "docs" / "engine.md"
 
 # Children run the working tree's package whatever the interpreter's own
 # path setup (an embedded Python ignores PYTHONPATH).
-BOOT = ("import runpy, sys; sys.path[:0] = [{repo!r}, {tests!r}]; mod = sys.argv[1]; "
+BOOT = ("import runpy, sys; sys.path.insert(0, {repo!r}); mod = sys.argv[1]; "
         "sys.argv = [mod] + sys.argv[2:]; "
-        "runpy.run_module(mod, run_name='__main__', alter_sys=True)").format(
-            repo=str(REPO), tests=str(REPO / "tests"))
+        "runpy.run_module(mod, run_name='__main__', alter_sys=True)").format(repo=str(REPO))
 CHILD = [sys.executable, "-u", "-c", BOOT]
 
 
@@ -154,7 +152,6 @@ class InProcess(_Client):
         self._lines: queue.Queue = queue.Queue()
         self.engine = Engine(lambda data: self.incoming.put(json.loads(data)),
                              autosave_s=autosave_s)
-        self.engine.jobs.command = list(CHILD)
         self._thread = threading.Thread(
             target=self.engine.serve, args=(iter(self._lines.get, None),), daemon=True)
         self._thread.start()
@@ -484,19 +481,19 @@ def test_jobs_refuse_what_cannot_run(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.start", {"kind": "predict", "options": {"model": "nope"}})
+        pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "nope"}})
     assert err.value.data["code"] == "job.predict.no_model"
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.start", {"kind": "reproject", "options": {"epsg": 32723}})
+        pipe.call("jobs.plan", {"kind": "reproject", "options": {"epsg": 32723}})
     assert err.value.data["code"] == "job.reproject.not_georeferenced"
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.start", {"kind": "mesh"})
+        pipe.call("jobs.plan", {"kind": "mesh"})
     assert err.value.data["code"] == "job.mesh.no_dense"
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.start", {"kind": "warp"})
+        pipe.call("jobs.plan", {"kind": "warp"})
     assert err.value.code == protocol.INVALID_PARAMS
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.start", {"kind": "sfm", "options": {"matcher": "psychic"}})
+        pipe.call("jobs.plan", {"kind": "sfm", "options": {"matcher": "psychic"}})
     assert err.value.code == protocol.INVALID_PARAMS
     assert pipe.call("jobs.list") == {"jobs": []}
 
@@ -552,7 +549,7 @@ def test_native_libraries_load_on_worker_threads(tmp_path):
         assert client.close() == 0
 
 
-# -- in-process: autosave, cancellation and Job processes -----------------------------
+# -- in-process: autosave and cancellation -----------------------------
 def test_autosave_runs_while_requests_keep_coming(tmp_path):
     """Regression: autosave fired only after an idle stretch, so an Engine
     kept busy by the window never saved dirty labels."""
@@ -600,75 +597,89 @@ def test_cancel_a_pending_request(inproc, monkeypatch):
     assert inproc.call("engine.cancel", {"id": "s"}) == {"cancelled": False}
 
 
-def _fake_kind(monkeypatch, tmp_path, args, stop_file=None):
-    from cloudlabeller.engine import jobs
-
-    def prepare(engine, project, options):
-        return jobs.Plan(list(args), tmp_path / "fake.log", gpu=True, stop_file=stop_file)
-
-    def apply(engine, project, results, plan):
-        engine.changed("settings")
-        return jobs.parse_result(results)
-
-    monkeypatch.setitem(jobs.KINDS, "fake", jobs.JobKind(
-        "fake", "engine_fake_cli", "test", prepare, apply, "stand-in"))
+def _fake_model(root: Path, name: str = "m1", n_classes: int = 2) -> None:
+    """A saved model as ``models.list`` sees one (no real weights needed)."""
+    d = root / "ml" / "models" / name
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps(
+        {"name": name, "n_classes": n_classes, "created": "2026-11-25"}), encoding="utf-8")
+    (d / "model.weights.h5").write_bytes(b"")
 
 
-def test_job_reports_progress_log_and_result(inproc, monkeypatch, tmp_path):
+def test_plan_says_how_to_run_and_finish_applies(pipe, tmp_path):
+    """ADR-0004: the Engine plans, the core runs, the Engine applies."""
     root = make_project(tmp_path / "p.clproj")
-    inproc.call("project.open", {"root": str(root)})
-    _fake_kind(monkeypatch, tmp_path, ["0"])
-    started = inproc.call("jobs.start", {"kind": "fake"})
-    assert started["kind"] == "fake" and started["gpu"] is True
-    done = inproc.wait_notification("job.finished", job=started["job"])["params"]
-    assert done["ok"] is True and done["result"] == {"answer": 42}
-    assert done["stopped"] is False
-    assert inproc.wait_notification("job.started", job=started["job"])
-    prog = inproc.wait_notification("job.progress", job=started["job"])["params"]
-    assert prog["fraction"] == 0.5 and prog["message"] == "halfway"
-    lines = [n["params"]["line"] for n in inproc.drained("job.log")]
-    assert "a plain log line" in lines and "warning on stderr" in lines
-    log_text = (tmp_path / "fake.log").read_text(encoding="utf-8")
-    assert "a plain log line" in log_text and log_text.startswith("$ ")
-    assert inproc.call("jobs.list") == {"jobs": []}
+    _fake_model(root)
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
+    assert plan["kind"] == "predict" and plan["group"] == "ml" and plan["gpu"] is True
+    assert plan["module"] == "cloudlabeller.ml.predict_cli"
+    assert plan["args"] == [str(root), "--model", "m1"]
+    assert plan["log"].endswith("predict.log") and plan["stop_file"] is None
+    assert pipe.call("jobs.list") == {"jobs": [plan]}
+
+    result_line = json.dumps({"predicted": ["b.png"]})
+    done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0,
+                                     "results": {"RESULT": result_line}})
+    assert done == {"plan": plan["plan"], "kind": "predict", "ok": True,
+                    "result": {"predicted": ["b.png"]}, "stopped": False}
+    statuses = {i["name"]: i["status"] for i in pipe.call("project.state")["images"]}
+    assert statuses["b.png"] == "ml"
+    assert any(n["params"].get("images") == ["b.png"] for n in pipe.drained("project.changed"))
+    assert Project.open(root).labels.status_of("b.png") == "ml"   # persisted
+    assert pipe.call("jobs.list") == {"jobs": []}
 
 
-def test_failed_job_carries_stderr(inproc, monkeypatch, tmp_path):
+def test_outstanding_plans_guard_the_project(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
-    inproc.call("project.open", {"root": str(root)})
-    _fake_kind(monkeypatch, tmp_path, ["3"])
-    job = inproc.call("jobs.start", {"kind": "fake"})["job"]
-    done = inproc.wait_notification("job.finished", job=job)["params"]
-    assert done["ok"] is False and done["error"]["code"] == "job.failed"
-    assert done["error"]["params"]["exit"] == 3
-    assert "warning on stderr" in done["error"]["params"]["stderr"]
-
-
-def test_one_job_per_group_and_kill_on_cancel(inproc, monkeypatch, tmp_path):
-    root = make_project(tmp_path / "p.clproj")
-    inproc.call("project.open", {"root": str(root)})
-    _fake_kind(monkeypatch, tmp_path, ["0", "30"])
-    job = inproc.call("jobs.start", {"kind": "fake"})["job"]
-    with pytest.raises(RpcError) as err:
-        inproc.call("jobs.start", {"kind": "fake"})
+    _fake_model(root)
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})["plan"]
+    with pytest.raises(RpcError) as err:                    # same group: ml
+        pipe.call("jobs.plan", {"kind": "train", "options": {"resume": True}})
     assert err.value.data["code"] == "job.busy"
     with pytest.raises(RpcError) as err:
-        inproc.call("project.close")
+        pipe.call("project.close")
     assert err.value.data["code"] == "project.jobs_running"
-    assert inproc.call("jobs.cancel", {"job": job}) == {"cancelled": True}
-    done = inproc.wait_notification("job.finished", job=job, timeout=20)["params"]
-    assert done["ok"] is False and done["error"]["code"] == "job.cancelled"
+    other = pipe.call("jobs.plan", {"kind": "georef"})       # another group is fine
+    pipe.call("jobs.finish", {"plan": other["plan"], "exit": None})
+
+    done = pipe.call("jobs.finish", {"plan": plan, "exit": 3})
+    assert done["ok"] is False and done["error"]["code"] == "job.failed"
+    assert done["error"]["params"]["exit"] == 3
+    assert pipe.call("project.state")["images"][1]["status"] == "none"   # nothing applied
+    with pytest.raises(RpcError) as err:
+        pipe.call("jobs.finish", {"plan": plan, "exit": 0})
+    assert err.value.data["code"] == "job.unknown_plan"
+    pipe.call("project.close")                               # nothing outstanding now
 
 
-def test_stop_file_job_stops_gracefully_and_keeps_its_result(inproc, monkeypatch, tmp_path):
+def test_finish_reports_lost_and_cancelled_jobs(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
-    inproc.call("project.open", {"root": str(root)})
-    stop = tmp_path / "train.stop"
-    _fake_kind(monkeypatch, tmp_path, ["0", "30", str(stop)], stop_file=stop)
-    job = inproc.call("jobs.start", {"kind": "fake"})["job"]
-    inproc.wait_notification("job.progress", job=job)
-    inproc.call("jobs.cancel", {"job": job})
-    done = inproc.wait_notification("job.finished", job=job, timeout=20)["params"]
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "georef"})["plan"]
+    lost = pipe.call("jobs.finish", {"plan": plan, "exit": None})
+    assert lost["error"]["code"] == "job.lost"
+    plan = pipe.call("jobs.plan", {"kind": "georef"})["plan"]
+    killed = pipe.call("jobs.finish", {"plan": plan, "exit": 1, "cancelled": True})
+    assert killed["error"]["code"] == "job.cancelled"
+    with pytest.raises(RpcError) as err:
+        pipe.call("jobs.finish", {"plan": 1, "exit": "0"})
+    assert err.value.code == protocol.INVALID_PARAMS
+
+
+def test_stopped_training_still_counts(pipe, tmp_path):
+    """Cancelling through the stop file ends training gracefully: the model
+    is saved, so the result is applied and the stop file cleared."""
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "train", "options": {"resume": True}})
+    stop = Path(plan["stop_file"])
+    assert plan["gpu"] is True and stop.name == "train.stop"
+    stop.touch()                                             # what the core does to cancel
+    summary = json.dumps({"name": "unet", "epochs_run": 2})
+    done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0, "cancelled": True,
+                                     "results": {"RESULT": summary}})
     assert done["ok"] is True and done["stopped"] is True
-    assert done["result"] == {"answer": 42}
+    assert done["result"] == {"name": "unet", "epochs_run": 2}
     assert not stop.exists()

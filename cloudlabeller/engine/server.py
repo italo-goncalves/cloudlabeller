@@ -29,9 +29,6 @@ Threading model — one rule: **only the loop thread touches the Project.**
   is also where cancellation lands), and its ``finish`` runs back on the
   loop thread to fold the result into the Project. The response is sent
   after ``finish``.
-- Job processes are watched by their own threads, which post back to the
-  loop the same way.
-
 So requests can overlap (a cancel arrives while a transfer runs) without the
 Project ever being touched from two threads.
 """
@@ -101,7 +98,7 @@ class Engine:
                  workers: int = 2) -> None:
         # Importing the handlers registers them (and keeps this module light).
         from cloudlabeller.engine import methods as _methods  # noqa: F401
-        from cloudlabeller.engine.jobs import JobRunner
+        from cloudlabeller.engine.jobs import JobPlans
 
         self._write = write
         self._write_lock = threading.Lock()
@@ -114,7 +111,7 @@ class Engine:
 
         self.project = None          # cloudlabeller.core.project.Project | None
         self.dirty = False           # label arrays changed since the last full save
-        self.jobs = JobRunner(self)
+        self.jobs = JobPlans(self)
 
     # -- output (any thread) ----------------------------------------------
     def send(self, message: dict) -> None:
@@ -186,9 +183,10 @@ class Engine:
         self._running = False
 
     def shutdown(self) -> None:
-        """Stop Jobs, save a dirty Project, release the pool."""
+        """Save a dirty Project, release the pool. Running Jobs are the
+        Tauri core's (ADR-0004) and keep running."""
         self._running = False
-        self.jobs.kill_all()
+        self.jobs.forget_project()
         if self.project is not None:
             try:
                 self.close_project()

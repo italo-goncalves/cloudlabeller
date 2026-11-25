@@ -42,7 +42,8 @@ spike is done: all of COLMAP runs in WSL, see ADR-0003.)
      works there, otherwise native on the CPU;
    - uv with Python 3.12, from a committed lockfile, keeping TensorFlow 2.19;
    - pycolmap moved from 4.1 to 4.2;
-   - the GPU Lease, Workspace staging for WSL COLMAP Jobs, the per-user NSIS
+   - running the Jobs the Engine plans ([ADR-0004](adr/0004-the-tauri-core-starts-every-job.md)),
+     the GPU Lease, Workspace staging for WSL COLMAP Jobs, the per-user NSIS
      installer and the updater.
 4. **Screens to parity** with the Qt app: import, SfM/MVS, georeferencing,
    painting masks on photos in the page, labelling on the cloud, training,

@@ -69,6 +69,8 @@ Rules:
   changed method is documented there in the same change, and
   `tests/test_engine_contract.py` fails when the two disagree. Only the
   Engine's loop thread touches the Project: slow work returns a `Deferred`.
+  The Engine runs no processes: it plans Jobs and applies their results,
+  and the Tauri core starts them (ADR-0004).
   The Engine reads and writes the protocol on private copies of stdin and
   stdout. Don't use `sys.stdin`/`sys.stdout` there: on Windows a native
   library probing fd 0 hung it (diagnosed 2026-11-25).

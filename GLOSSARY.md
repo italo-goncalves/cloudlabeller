@@ -13,7 +13,8 @@ _Avoid_: venv, runtime, backend
 
 **Engine**:
 The Python side of an open Project, living in the active Environment, that
-answers the window's requests and starts its Jobs; one per open Project.
+answers the window's requests and plans its Jobs (the Tauri core starts
+them); one per open Project.
 _Avoid_: backend, server, kernel
 
 **Array file**:

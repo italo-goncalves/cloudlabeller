@@ -14,7 +14,9 @@ python -m cloudlabeller.engine
 
 The window starts one Engine per open Project, inside the active
 Environment. The Engine runs until `engine.shutdown` or until its stdin
-closes. Either way it saves a dirty Project and kills its running Jobs first.
+closes. Either way it saves a dirty Project first. It runs no processes:
+Jobs are started by the Tauri core ([ADR-0004](adr/0004-the-tauri-core-starts-every-job.md)),
+and they keep running if the Engine stops.
 
 ## Framing
 
@@ -77,10 +79,9 @@ Label ids are `int32`. Unlabelled is `-1` and the classes are `0..N-1`.
 | `engine.log` | `{level, message}`: an internal failure the user didn't ask about. |
 | `project.changed` | `{parts, images?}`. `parts` are drawn from `schema`, `images`, `status`, `sparse`, `dense`, `mesh`, `labels` and `settings`. `images` names the photos whose mask or status changed. |
 | `request.progress` | `{id, fraction, message}` for a long request still running. |
-| `job.started` | `{job, kind, gpu, log}` |
-| `job.progress` | `{job, fraction, message}` |
-| `job.log` | `{job, line}`: one line of the Job's output. The same line is in its log file. |
-| `job.finished` | `{job, kind, ok, result?, stopped?, error?}`. `error` is a Problem's data: `job.failed` (`params.exit`, `params.stderr`), `job.cancelled`, `project.closed` or the kind's own. |
+
+A Job's progress and log reach the window from the Tauri core, which runs
+the Job, not from the Engine.
 
 ## Methods
 
@@ -216,17 +217,29 @@ at for this Project's photos, and why that size won't work (or null).
 ### `jobs.kinds`
 → `{kinds: [{kind, group, description}]}`
 
-### `jobs.start`
-`{kind, options?}` → `{job, kind, gpu, log}`. Starts a Job process. Its
-progress and outcome arrive as `job.*` notifications. When it ends well,
-the Engine updates the open Project and sends `project.changed` before
-`job.finished`. Two Jobs of the same group can't run at once (Problem:
-`job.busy`). The kinds, and their options:
+### `jobs.plan`
+`{kind, options?}` → `{plan, kind, group, gpu, module, args, log, stop_file,
+project}`. Checks that a Job can run, saves what it will read, and says how
+to run it. The Tauri core then runs `<Environment python> -m <module>
+<args…>`, with the Environment's own interpreter and paths as the Engine
+sees them. While it runs, the core:
+
+- takes the GPU Lease first when `gpu` is true;
+- writes the Job's output to `log`;
+- reads its `PROGRESS <fraction> <message>` lines;
+- keeps its `RESULT…` lines for `jobs.finish`;
+- cancels it by creating `stop_file` when there is one (training stops
+  after its epoch and still saves the model), and kills it otherwise.
+
+Until `jobs.finish`, a second plan of the same group is refused (Problem:
+`job.busy`), and so is opening or closing a Project
+(`project.jobs_running`). The kinds, their options, and the Problems
+`jobs.plan` raises (or, marked †, the `error` of `jobs.finish`):
 
 | Kind | Group | GPU | Options | Problems |
 |---|---|---|---|---|
 | `ingest` | reconstruction | no | `folder`, `on_conflict` (`skip` or `overwrite`) | `job.ingest.no_folder` |
-| `sfm` | reconstruction | when `gpu` | `matcher`, `gpu`, `single_camera`, `camera_model`, `max_image_size` | `job.sfm.no_images`, `job.sfm.no_cloud` |
+| `sfm` | reconstruction | when `gpu` | `matcher`, `gpu`, `single_camera`, `camera_model`, `max_image_size` | `job.sfm.no_images`, `job.sfm.no_cloud` † |
 | `georef` | reconstruction | no | `max_error` | `job.no_reconstruction` |
 | `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced` |
 | `mvs` | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
@@ -235,13 +248,24 @@ the Engine updates the open Project and sends `project.changed` before
 | `predict` | ml | yes | `model` | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing` |
 
 The Engine doesn't chain stages (SfM → georeferencing → MVS → mesh). The
-window does. The GPU Lease is not taken here either (step 3): `gpu` says
-which Jobs will need it.
+window does.
 
-### `jobs.cancel`
-`{job}` → `{cancelled}`. Training stops after its current epoch and still
-saves the model (`job.finished` has `ok: true, stopped: true`). Every other
-kind is killed (`job.cancelled`).
+### `jobs.finish`
+`{plan, exit, results?, cancelled?}` → `{plan, kind, ok, result?, stopped?,
+error?}`. The core reports that a planned Job has ended:
+
+- `exit` is its exit code, or null if it never ran or was lost.
+- `results` maps each `RESULT…` line's first word to the rest of the line,
+  for example `{"RESULT": "{\"predicted\": [\"a.jpg\"]}"}`.
+- `cancelled` says the core cancelled it.
+
+When the Job ended well, the Engine updates the open Project, sends
+`project.changed`, and answers `ok: true` with the kind's summary. A
+training run stopped through its stop file also ends well, with
+`stopped: true`. Otherwise `error` is a Problem's data: `job.failed`
+(`params.exit`), `job.cancelled`, `job.lost`, `project.closed`, or the
+kind's own. Problem: `job.unknown_plan`, for example after the Engine
+restarted. The core then reopens the Project to pick up what the Job wrote.
 
 ### `jobs.list`
-→ `{jobs}`: the running Jobs, as `jobs.start` describes them.
+→ `{jobs}`: the plans not yet finished, as `jobs.plan` describes them.

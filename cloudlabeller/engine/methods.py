@@ -52,7 +52,7 @@ def engine_hello(engine: Engine, params: dict) -> dict:
 
 @method("engine.shutdown", needs_project=False)
 def engine_shutdown(engine: Engine, params: dict) -> dict:
-    """Save, stop the Jobs and exit after answering."""
+    """Save and exit after answering."""
     engine.stop()
     return {}
 
@@ -104,7 +104,7 @@ def project_create(engine: Engine, params: dict) -> dict:
     root = Path(require(params, "root", str))
     if (root / MANIFEST).exists():
         raise Problem("project.exists", "A Project already exists there.", root=str(root))
-    _no_running_jobs(engine)
+    _no_outstanding_jobs(engine)
     schema = LabelSchema()
     for c in optional(params, "classes", list, []):
         if not isinstance(c, dict):
@@ -123,22 +123,22 @@ def project_open(engine: Engine, params: dict) -> dict:
     root = Path(require(params, "root", str))
     if not (root / MANIFEST).is_file():
         raise Problem("project.not_found", "No Project there.", root=str(root))
-    _no_running_jobs(engine)
+    _no_outstanding_jobs(engine)
     engine.close_project()
     engine.project = Project.open(root)
     arrays.clear(root)
     return project_state(engine)
 
 
-def _no_running_jobs(engine: Engine) -> None:
-    if engine.jobs.running:
+def _no_outstanding_jobs(engine: Engine) -> None:
+    if engine.jobs.outstanding:
         raise Problem("project.jobs_running", "Jobs are still running.",
                       jobs=engine.jobs.list())
 
 
 @method("project.close")
 def project_close(engine: Engine, params: dict) -> dict:
-    _no_running_jobs(engine)
+    _no_outstanding_jobs(engine)
     engine.close_project()
     return {}
 
@@ -647,17 +647,29 @@ def jobs_kinds(engine: Engine, params: dict) -> dict:
                       for k in KINDS.values()]}
 
 
-@method("jobs.start")
-def jobs_start(engine: Engine, params: dict) -> dict:
-    return engine.jobs.start(require(params, "kind", str),
-                             optional(params, "options", dict, {}))
+@method("jobs.plan")
+def jobs_plan(engine: Engine, params: dict) -> dict:
+    """Check a Job can run and say how to run it (the core starts it)."""
+    return engine.jobs.plan(require(params, "kind", str),
+                            optional(params, "options", dict, {}))
 
 
-@method("jobs.cancel", needs_project=False)
-def jobs_cancel(engine: Engine, params: dict) -> dict:
-    return {"cancelled": engine.jobs.cancel(require(params, "job", int))}
+@method("jobs.finish")
+def jobs_finish(engine: Engine, params: dict) -> dict:
+    """The core reports a planned Job's end; apply it to the Project."""
+    exit_code = params.get("exit")
+    if exit_code is not None and (isinstance(exit_code, bool)
+                                  or not isinstance(exit_code, int)):
+        raise InvalidParams("param 'exit' must be an integer or null", param="exit")
+    results = optional(params, "results", dict, {})
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in results.items()):
+        raise InvalidParams("results maps each RESULT key to the rest of its line",
+                            param="results")
+    return engine.jobs.finish(require(params, "plan", int), exit_code, results,
+                              optional(params, "cancelled", bool, False))
 
 
 @method("jobs.list", needs_project=False)
 def jobs_list(engine: Engine, params: dict) -> dict:
+    """The plans not yet finished."""
     return {"jobs": engine.jobs.list()}

@@ -18,7 +18,7 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Jobs: the ``*_cli.py`` processes, started and watched by the Engine.
+"""Jobs: the Engine plans them, the Tauri core runs them (ADR-0004).
 
 A Job kind knows three things: how to build its command line from the
 window's options (refusing with a Problem when it can't run), whether it is
@@ -26,16 +26,15 @@ a GPU Job, and what to do to the open Project when it ends well (reload
 products, record a new frame, mark predicted images). That last part is
 what the Qt window's ``_on_*_done`` handlers did.
 
-The child's protocol is the one ``ProcessJob`` reads: ``PROGRESS <frac>
-<msg>`` lines on stdout, ``RESULT…`` lines with the outcome, everything else
-is log. Every line also goes to the Job's log file in the Project.
+The core runs ``<Environment python> -m <module> <args…>``, writes the
+output to the plan's log file, and reads the ``*_cli`` line protocol:
+``PROGRESS <frac> <msg>`` lines, ``RESULT…`` lines with the outcome. It
+hands the ``RESULT…`` lines back to :meth:`JobPlans.finish` as
+``{key: rest of line}``.
 
-Two Jobs may run at once only if they are in different groups:
+Two Jobs may be outstanding at once only if they are in different groups:
 ``reconstruction`` Jobs rewrite the Project's products, ``ml`` Jobs read
 labels and write models and predictions.
-
-The GPU Lease (ADR-0003) is not taken here: it is held by the Tauri core,
-which arrives in step 3. ``job.started`` says whether the Job wants the GPU.
 """
 
 from __future__ import annotations
@@ -44,9 +43,6 @@ import itertools
 import json
 import logging
 import shutil
-import subprocess
-import sys
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -396,171 +392,91 @@ def _apply_predict(engine, project, results, plan):
     return {"predicted": names}
 
 
-# -- the runner -----------------------------------------------------------------
+# -- plans ----------------------------------------------------------------------
 @dataclass
-class RunningJob:
-    id: int
+class Outstanding:
+    """A plan the core has (or will have) started and not yet finished."""
+
+    token: int
     kind: JobKind
     plan: Plan
-    proc: subprocess.Popen
     project: "Project"
-    results: dict = field(default_factory=dict)
-    stderr_tail: list[str] = field(default_factory=list)
-    cancelled: bool = False
 
     def describe(self) -> dict:
-        return {"job": self.id, "kind": self.kind.name, "gpu": self.plan.gpu,
-                "log": str(self.plan.log_path)}
+        root = Path(self.project.root)
+        return {"plan": self.token, "kind": self.kind.name, "group": self.kind.group,
+                "gpu": self.plan.gpu, "module": self.kind.module, "args": self.plan.args,
+                "log": str(self.plan.log_path),
+                "stop_file": str(self.plan.stop_file) if self.plan.stop_file else None,
+                "project": str(root)}
 
 
-class JobRunner:
-    """Starts Job processes and reports on them (loop thread, except the
-    per-Job watcher threads, which only post back)."""
+class JobPlans:
+    """The Engine's half of Jobs (ADR-0004): plan them, apply their results.
+
+    The Tauri core starts the process the plan describes, holds the GPU
+    Lease, streams the log and cancels; then it reports back with
+    :meth:`finish`. Loop thread only.
+    """
 
     def __init__(self, engine: "Engine") -> None:
         self._engine = engine
-        self._ids = itertools.count(1)
-        self.running: dict[int, RunningJob] = {}
-        # How a Job's module is run: ``<command…> <module> <args…>``. The
-        # Environment's own interpreter, unbuffered, so progress arrives live.
-        self.command: list[str] = [sys.executable, "-u", "-m"]
+        self._tokens = itertools.count(1)
+        self.outstanding: dict[int, Outstanding] = {}
 
-    def start(self, kind_name: str, options: dict) -> dict:
+    def plan(self, kind_name: str, options: dict) -> dict:
         engine = self._engine
         project = engine.require_project()
         kind_ = KINDS.get(kind_name)
         if kind_ is None:
             raise InvalidParams(f"no Job kind {kind_name!r}", kind=kind_name,
                                 kinds=sorted(KINDS))
-        busy = next((j for j in self.running.values() if j.kind.group == kind_.group), None)
+        busy = next((o for o in self.outstanding.values() if o.kind.group == kind_.group),
+                    None)
         if busy is not None:
-            raise Problem("job.busy", "Another Job of this group is running.",
-                          group=kind_.group, job=busy.id, kind=busy.kind.name)
+            raise Problem("job.busy", "Another Job of this group hasn't finished.",
+                          group=kind_.group, plan=busy.token, kind=busy.kind.name)
         plan = kind_.prepare(engine, project, options)
-
         plan.log_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [*self.command, kind_.module, *plan.args]
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NO_WINDOW
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, creationflags=creationflags)
-        job = RunningJob(next(self._ids), kind_, plan, proc, project)
-        self.running[job.id] = job
-        engine.notify("job.started", job.describe())
-        self._watch(job, "$ " + " ".join(cmd))
-        return job.describe()
+        entry = Outstanding(next(self._tokens), kind_, plan, project)
+        self.outstanding[entry.token] = entry
+        return entry.describe()
 
-    def _watch(self, job: RunningJob, header: str) -> None:
+    def finish(self, token: int, exit_code: int | None, results: dict,
+               cancelled: bool) -> dict:
+        """Apply a finished Job. ``exit_code`` None: it never ran or was lost."""
         engine = self._engine
-        log_fh = open(job.plan.log_path, "w", encoding="utf-8")
-        lock = threading.Lock()
-
-        def record(line: str) -> None:
-            with lock:
-                log_fh.write(line + "\n")
-                log_fh.flush()
-            engine.notify("job.log", {"job": job.id, "line": line})
-
-        record(header)
-
-        def read_stdout() -> None:
-            for raw in iter(job.proc.stdout.readline, b""):
-                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                if line.startswith("PROGRESS "):
-                    parts = line.split(" ", 2)
-                    try:
-                        frac = float(parts[1])
-                    except (IndexError, ValueError):
-                        frac = None
-                    if frac is not None:
-                        engine.notify("job.progress", {
-                            "job": job.id, "fraction": frac,
-                            "message": parts[2] if len(parts) > 2 else ""})
-                elif line.startswith("RESULT"):
-                    key, _, rest = line.partition(" ")
-                    job.results[key] = rest.strip()
-                record(line)
-
-        def read_stderr() -> None:
-            for raw in iter(job.proc.stderr.readline, b""):
-                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                if line.strip():
-                    job.stderr_tail.append(line)
-                    del job.stderr_tail[:-200]
-                    record(line)
-
-        def wait() -> None:
-            readers = [threading.Thread(target=read_stdout, daemon=True),
-                       threading.Thread(target=read_stderr, daemon=True)]
-            for t in readers:
-                t.start()
-            code = job.proc.wait()
-            for t in readers:
-                t.join()
-            with lock:
-                log_fh.close()
-            engine.post(lambda: self._finished(job, code))
-
-        threading.Thread(target=wait, name=f"job-{job.id}", daemon=True).start()
-
-    def _finished(self, job: RunningJob, code: int) -> None:
-        engine = self._engine
-        self.running.pop(job.id, None)
-        if job.plan.stop_file is not None:
-            job.plan.stop_file.unlink(missing_ok=True)
-        params: dict = {"job": job.id, "kind": job.kind.name}
-        graceful = job.cancelled and job.plan.stop_file is not None
-        if code == 0 and (not job.cancelled or graceful):
-            if engine.project is not job.project:
-                params.update(ok=False, error={"code": "project.closed",
-                                               "english": "The Project was closed.",
-                                               "params": {}})
+        entry = self.outstanding.pop(token, None)
+        if entry is None:
+            raise Problem("job.unknown_plan", "No plan has that number.", plan=token)
+        if entry.plan.stop_file is not None:
+            entry.plan.stop_file.unlink(missing_ok=True)
+        graceful = cancelled and entry.plan.stop_file is not None
+        out: dict = {"plan": token, "kind": entry.kind.name}
+        if exit_code != 0 or (cancelled and not graceful):
+            if cancelled:
+                code, english = "job.cancelled", "Cancelled."
+            elif exit_code is None:
+                code, english = "job.lost", "The Job didn't run to its end."
             else:
-                try:
-                    result = job.kind.apply(engine, job.project, job.results, job.plan)
-                    params.update(ok=True, result=result, stopped=job.cancelled)
-                except Problem as problem:
-                    params.update(ok=False, error=problem.to_data())
-                except Exception as exc:
-                    log.exception("applying Job %s failed", job.id)
-                    params.update(ok=False, error={
-                        "code": "job.apply_failed", "english": f"{type(exc).__name__}: {exc}",
-                        "params": {}})
-        elif job.cancelled:
-            params.update(ok=False, error={"code": "job.cancelled", "english": "Cancelled.",
-                                           "params": {}})
-        else:
-            params.update(ok=False, error={
-                "code": "job.failed", "english": f"The Job failed (exit {code}).",
-                "params": {"exit": code, "stderr": job.stderr_tail[-15:]}})
-        engine.notify("job.finished", params)
+                code, english = "job.failed", f"The Job failed (exit {exit_code})."
+            out.update(ok=False, error={"code": code, "english": english,
+                                        "params": {"exit": exit_code}})
+            return out
+        if engine.project is not entry.project:
+            out.update(ok=False, error={"code": "project.closed",
+                                        "english": "The Project was closed.", "params": {}})
+            return out
+        try:
+            result = entry.kind.apply(engine, entry.project, results, entry.plan)
+        except Problem as problem:
+            out.update(ok=False, error=problem.to_data())
+            return out
+        out.update(ok=True, result=result, stopped=cancelled)
+        return out
 
-    def cancel(self, job_id: int) -> bool:
-        """Stop a Job: training finishes its epoch and still saves (stop
-        file); every other Job is killed."""
-        job = self.running.get(job_id)
-        if job is None:
-            return False
-        job.cancelled = True
-        if job.plan.stop_file is not None:
-            job.plan.stop_file.touch(exist_ok=True)
-        else:
-            _kill(job.proc)
-        return True
-
-    def kill_all(self) -> None:
-        for job in list(self.running.values()):
-            job.cancelled = True
-            _kill(job.proc)
+    def forget_project(self) -> None:
+        self.outstanding.clear()
 
     def list(self) -> list[dict]:
-        return [j.describe() for j in self.running.values()]
-
-
-def _kill(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        return [o.describe() for o in self.outstanding.values()]
