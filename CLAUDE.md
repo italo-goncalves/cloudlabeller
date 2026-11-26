@@ -82,6 +82,13 @@ Rules:
   NEVER run TensorFlow on an in-process thread — it deadlocks the GIL against
   Qt's event loop (frozen app, diagnosed 2026-07-08).
 - Unlabelled label id is -1; user classes are contiguous 0..N-1.
+- Dependencies: the base list in `pyproject.toml` is the desktop app's
+  Environment (Engine + Jobs, no Qt); the 0.2.x Qt app needs the `qt` extra
+  (the dev env has `[qt,dev]`). After changing any dependency, run
+  `uv run --no-project tools/lock_environment.py` and commit both `uv.lock`
+  and `apps/desktop/environment/requirements.lock` (`--check` says whether
+  they are stale). No module that a `*_cli` or the Engine imports may import
+  PySide6, pyvista or vtk (`tests/test_qt_free_imports.py`).
 - PySide6 is pinned == 6.7.3 (6.8+ links ICU and fails to import on this
   machine — see requirements.txt).
 - The user's U-Net code lives in `cloudlabeller/ml/` and is typically LOCKED.
