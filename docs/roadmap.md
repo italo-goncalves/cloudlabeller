@@ -8,72 +8,20 @@ does. **Later** is unordered. **Dropped** records what was taken off, and
 why, so it isn't proposed again. An item moves by editing this file, and
 leaves the file when it is built.*
 
-Last released: **0.2.1** (2026-07-21). It was built on 0.2.0: georeferencing
-from EXIF GPS, CRS-aware export, reprojection to any projected CRS.
+Last released: **0.3.0** (2026-11-26), the Desktop app. The Qt window is
+replaced by a Tauri app ([desktop.md](desktop.md)) over a JSON-RPC Engine
+([engine.md](engine.md)); it shares geokit with GeoScape, installs per user,
+updates itself, and sets up its Python Environment unattended, in WSL on the
+GPU when it can ([ADR-0001](adr/0001-shared-permissive-kit-from-geoscape.md)
+to [ADR-0004](adr/0004-the-tauri-core-starts-every-job.md)).
 
 ---
 
-## Now — 0.3.0: the Desktop app
+## Now
 
-The PySide6/PyVista UI is replaced by a Tauri app that shares its UI system
-with GeoScape, and the Environment installs itself
-([ADR-0001](adr/0001-shared-permissive-kit-from-geoscape.md),
-[ADR-0002](adr/0002-tauri-webview-with-a-json-rpc-engine.md),
-[ADR-0003](adr/0003-wsl-environment-and-one-gpu-lease.md)). 0.2.x keeps
-shipping the Qt app until this is done.
+Not chosen yet: by default, the first theme in **Next**.
 
-The steps, in order. Each step depends only on the ones before it, except
-steps 1 and 2, which share no files and can run side by side. (The GPU SIFT
-spike is done: all of COLMAP runs in WSL, see ADR-0003.)
-
-1. **The kit.** Create `rockanalytica/geokit` (Apache-2.0, © RockAnalytica) by
-   extracting GeoScape's tokens, its three.js-only viewer layers and its
-   Environment manager, then add the GPU Lease. GeoScape switches to the kit
-   and releases before CloudLabeller takes anything from it.
-2. **The Engine.** JSON-RPC over stdin/stdout on top of `core/`,
-   `photogrammetry/` and `ml/`, with contract tests. Large arrays go as files.
-   Jobs stay `*_cli.py` processes.
-   *Built 2026-11-25:* `cloudlabeller/engine/`, with its contract in
-   [engine.md](engine.md). Left for step 4, added as the screens need them:
-   export, cleaning the sparse cloud, the COLMAP download, the viewer's
-   thinned flat buffer, and the multi-stage pipeline (run by the window).
-3. **The Tauri shell.** Includes:
-   - the Environment setup screen: WSL when a distro exists and `nvidia-smi`
-     works there, otherwise native on the CPU;
-   - uv with Python 3.12, from a committed lockfile, keeping TensorFlow 2.19;
-   - pycolmap moved from 4.1 to 4.2;
-   - *Under way (2026-11-25): the shell, the Environment setup, the Engine
-     host, the Job runner and the release pipeline are in `apps/`
-     ([desktop.md](desktop.md)), checked by `pnpm check`. Still to do: the
-     lockfile and Python 3.12 (Part A), the signing key, and an
-     end-to-end run on the installer.*
-   - running the Jobs the Engine plans ([ADR-0004](adr/0004-the-tauri-core-starts-every-job.md)),
-     the GPU Lease, Workspace staging for WSL COLMAP Jobs, the per-user NSIS
-     installer and the updater.
-4. **Screens to parity** with the Qt app: import, SfM/MVS, georeferencing,
-   painting masks on photos in the page, labelling on the cloud, training,
-   prediction, export. Along the way the kit gains camera frusta,
-   single-point picking and lasso selection. Clouds reach the viewer as one
-   flat buffer, thinned by the detail level.
-   *Built 2026-11-26: geokit 0.3.0 has the frusta, the lasso, and marks and
-   class-colour blending on clouds. The window's screens are in
-   `apps/web/src` ([desktop.md](desktop.md#the-window)); the Engine methods
-   they need are in [engine.md](engine.md). Tested in the installed app: the
-   full pipeline, transfers, training (and stopping it), prediction, the
-   Image view, labelling on the cloud, the Labels pane and export. Still to
-   test: Align to EXIF GPS and Reproject, on photos with GPS.*
-5. **Release.** Qt and its tests are removed, the Windows installer is
-   published, and Zenodo mints the new version's DOI.
-   *Under way (2026-11-26): the Qt app, its tests, the portable build and
-   the `qt` extra are gone, and the version is 0.3.0. Still to do: merge
-   `dev` into `main`, tag `v0.3.0` (CI builds the signed installer into a
-   draft release), publish the release, and record the new DOI in
-   `CITATION.cff`.*
-
-**Done when:** a new user on Windows runs the installer, the app sets up its
-Environment unattended (on the GPU when WSL allows it), and the whole workflow
-works without the Qt app. COLMAP and the CNNs never hold the GPU at the same
-time.
+---
 
 ## Next
 
