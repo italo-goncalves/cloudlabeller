@@ -797,4 +797,5 @@ def models_delete(engine: Engine, params: dict) -> dict:
 # own modules; importing them registers them.
 from cloudlabeller.engine import geo as _geo  # noqa: F401
 from cloudlabeller.engine import scene as _scene  # noqa: F401
+from cloudlabeller.engine import gcps as _gcps  # noqa: F401
 from cloudlabeller.engine import surveys as _surveys  # noqa: F401

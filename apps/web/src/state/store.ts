@@ -11,7 +11,7 @@ import type { CloudName, ProjectState } from "../engine/api";
 export type Representation = "sparse" | "dense" | "mesh";
 /** How thinned the cloud is on screen (see `detail.ts`'s `VIEW_DETAIL`). */
 export type ViewDetail = "low" | "medium" | "high" | "full";
-export type ImageTool = "pan" | "polygon" | "brush" | "eraser";
+export type ImageTool = "pan" | "polygon" | "brush" | "eraser" | "gcp";
 
 export interface ViewSettings {
   representation: Representation;
@@ -25,6 +25,8 @@ export interface ViewSettings {
   /** The class shown on its own (others dimmed), or null. */
   isolate: number | null;
   lasso: boolean;
+  /** A click on the cloud places the active GCP's Mark (not with the lasso). */
+  gcpPick: boolean;
 }
 
 export interface Panes {
@@ -75,6 +77,8 @@ export type DialogName =
   | "about"
   | "survey"
   | "reconstructions"
+  | "gcp"
+  | "gcp_import"
   | "confirm"
   | "message";
 
@@ -102,6 +106,10 @@ export interface AppState {
   labelsVersion: number;
   /** Bumped when a cloud or the mesh changes shape: the viewer reloads it. */
   geometryVersion: number;
+  /** The GCP whose Marks a click places (GCPs tab, Image and 3D views). */
+  activeGcp: string | null;
+  /** Bumped when GCPs, their Marks or where they fall change. */
+  gcpVersion: number;
   /** Bumped when photos' masks change, with the photos named (empty: any). */
   masks: { version: number; images: string[] };
   busy: Busy | null;
@@ -121,6 +129,7 @@ export const initialView: ViewSettings = {
   frustumScale: 0.2,
   isolate: null,
   lasso: false,
+  gcpPick: false,
 };
 
 export const initialState: AppState = {
@@ -136,6 +145,8 @@ export const initialState: AppState = {
   cleanPreview: null,
   labelsVersion: 0,
   geometryVersion: 0,
+  activeGcp: null,
+  gcpVersion: 0,
   masks: { version: 0, images: [] },
   busy: null,
   log: [],
@@ -152,6 +163,7 @@ export type Action =
   /** The Engine's `project.changed`. */
   | { type: "changed"; parts: string[]; images?: string[] }
   | { type: "active_class"; id: number }
+  | { type: "active_gcp"; id: string | null }
   | { type: "select_image"; name: string | null }
   | { type: "step_image"; by: 1 | -1 }
   | { type: "view"; patch: Partial<ViewSettings> }
@@ -200,8 +212,10 @@ export function reduce(s: AppState, a: Action): AppState {
           representation: available(a.project, "dense"),
           isolate: null,
           lasso: false,
+          gcpPick: false,
         },
         project: a.project,
+        gcpVersion: s.gcpVersion + 1,
         activeClass: a.project.schema[0]?.id ?? -1,
         selected: a.project.images[0]?.name ?? null,
         labelsVersion: s.labelsVersion + 1,
@@ -223,6 +237,7 @@ export function reduce(s: AppState, a: Action): AppState {
           representation: available(a.project, s.view.representation),
           lasso: false,
         },
+        gcpVersion: s.gcpVersion + 1,
         labelsVersion: s.labelsVersion + 1,
         geometryVersion: s.geometryVersion + 1,
         masks: { version: s.masks.version + 1, images: [] },
@@ -261,6 +276,7 @@ export function reduce(s: AppState, a: Action): AppState {
       return {
         ...s,
         geometryVersion: geometry ? s.geometryVersion + 1 : s.geometryVersion,
+        gcpVersion: geometry || a.parts.includes("gcps") ? s.gcpVersion + 1 : s.gcpVersion,
         labelsVersion: labels ? s.labelsVersion + 1 : s.labelsVersion,
         masks: masks ? { version: s.masks.version + 1, images: a.images ?? [] } : s.masks,
         // a cloud that changed shape: its old indices mean nothing
@@ -270,6 +286,8 @@ export function reduce(s: AppState, a: Action): AppState {
     }
     case "active_class":
       return inSchema(s.project, a.id) ? { ...s, activeClass: a.id } : s;
+    case "active_gcp":
+      return { ...s, activeGcp: a.id };
     case "select_image":
       return { ...s, selected: a.name };
     case "step_image": {
@@ -286,7 +304,12 @@ export function reduce(s: AppState, a: Action): AppState {
       const representationChanged = view.representation !== s.view.representation;
       return {
         ...s,
-        view: { ...view, lasso: view.representation === "mesh" ? false : view.lasso },
+        view: {
+          ...view,
+          // the lasso and placing GCP Marks both take the left button: one at a time
+          lasso: view.representation === "mesh" ? false : a.patch.gcpPick ? false : view.lasso,
+          gcpPick: view.representation === "mesh" || a.patch.lasso ? false : view.gcpPick,
+        },
         selection: representationChanged ? null : s.selection,
       };
     }

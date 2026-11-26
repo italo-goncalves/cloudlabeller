@@ -237,6 +237,96 @@ export const transferReconstruction = (from: string, ticket: string) =>
     ticket,
   );
 
+// -- GCPs and Marks ------------------------------------------------------------
+
+export type GcpUse = "control" | "check";
+
+export interface Gcp {
+  id: string;
+  name: string;
+  /** Surveyed coordinates in `epsg` (x = longitude for a geographic CRS), or null. */
+  xyz: [number, number, number] | null;
+  epsg: number | null;
+  orthometric: boolean;
+  accuracy: number | null;
+  use: GcpUse;
+  /** Where it is marked: per Survey, the photos and whether the cloud. */
+  marks: Record<string, { photos: string[]; cloud: boolean }>;
+}
+
+export interface GcpFit {
+  surveys: Record<
+    string,
+    { aligned: boolean; how: "gcp" | "reference" | "kept"; n_gcps: number; rms: number | null }
+  >;
+  /** Per GCP, per Survey: [dx, dy, dz] in metres. */
+  residuals: Record<string, Record<string, [number, number, number]>>;
+  located: Record<
+    string,
+    Record<string, { from: "cloud" | "photos"; photos: number; rms_px?: number }>
+  >;
+  frame_created: boolean;
+}
+
+export interface Gcps {
+  gcps: Gcp[];
+  fit: GcpFit | null;
+}
+
+export type GcpFields = Partial<
+  Pick<Gcp, "name" | "xyz" | "epsg" | "orthometric" | "accuracy" | "use">
+>;
+
+export const gcps = () => engineCall<Gcps>("gcp.list");
+export const gcpCreate = (fields: GcpFields = {}) =>
+  engineCall<Gcps & { id: string }>("gcp.create", { ...fields });
+export const gcpUpdate = (id: string, fields: GcpFields) =>
+  engineCall<Gcps>("gcp.update", { id, ...fields });
+export const gcpDelete = (id: string) => engineCall<Gcps>("gcp.delete", { id });
+export const gcpImportCsv = (path: string, epsg: number, orthometric: boolean, use: GcpUse) =>
+  engineCall<Gcps & { added: number; updated: number }>("gcp.import_csv", {
+    path,
+    epsg,
+    orthometric,
+    use,
+  });
+
+export const markPhoto = (gcp: string, name: string, uv: [number, number]) =>
+  engineCall<{ gcp: Gcp }>("mark.set", { ...sv(), gcp, name, uv });
+export const markCloud = (gcp: string, cloud: CloudName, index: number) =>
+  engineCall<{ gcp: Gcp }>("mark.set", { ...sv(), gcp, cloud, index });
+export const markDelete = (gcp: string, name?: string) =>
+  engineCall<{ gcp: Gcp }>("mark.delete", { ...sv(), gcp, ...(name ? { name } : {}) });
+
+export interface PhotoMarks {
+  marks: { gcp: string; uv: [number, number] }[];
+  hints: { gcp: string; uv: [number, number] }[];
+}
+export const marksPhoto = (name: string) =>
+  engineCall<PhotoMarks>("marks.photo", { ...sv(), name });
+export const marksCloud = () =>
+  engineCall<{ marks: { gcp: string; xyz: [number, number, number]; from: "cloud" | "photos" }[] }>(
+    "marks.cloud",
+    sv(),
+  );
+
+/** The cloud point a click snaps to (null: none near it). */
+export const cloudPick = (
+  cloud: CloudName,
+  viewProjection: ArrayLike<number>,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) =>
+  engineCall<{ cloud: CloudName; index: number | null; xyz: [number, number, number] | null }>(
+    "cloud.pick",
+    { ...sv(), cloud, view_projection: Array.from(viewProjection), x, y, width, height },
+  );
+
+export const alignFit = (ticket: string, reference?: string) =>
+  engineCall<GcpFit>("align.fit", reference ? { reference } : {}, ticket);
+
 /** Bytes as the window says them: "1.2 GB". */
 export function sizeText(bytes: number): string {
   const units = ["B", "KB", "MB", "GB", "TB"];

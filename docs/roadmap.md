@@ -32,7 +32,11 @@ Steps, in order (step 4 can run beside 2 and 3):
 2. **Several Surveys and Reconstructions, in the window.** Built: a step
    run again makes a child Reconstruction sharing the earlier products;
    Surveys are made, described, switched and deleted in the Dataset pane.
-3. GCPs and Marks.
+3. **GCPs and Marks.** Built: GCPs imported from coordinates files or
+   added by hand; Marks placed on photos and (snapped) on the cloud; photo
+   Marks triangulated; Surveys fitted to surveyed GCPs and to each other
+   through shared ones, with residuals and hints. A Mark is moved by
+   placing it again rather than by dragging.
 4. Tiles and the Survey picker.
 5. Docs and the release.
 

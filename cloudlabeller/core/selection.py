@@ -130,3 +130,24 @@ def select_in_polygon(xyz: np.ndarray, view_projection, polygon,
         if progress is not None:
             progress(min(1.0, (start + _CHUNK) / n))
     return np.concatenate(hits).astype(np.uint32)
+
+
+def pick_nearest(xyz: np.ndarray, view_projection, x: float, y: float,
+                 width: float, height: float, radius: float = 8.0) -> int | None:
+    """The point drawn nearest the viewer among those within ``radius`` CSS
+    pixels of ``(x, y)``, or None: the cloud point a click snaps to."""
+    m = view_projection
+    if not isinstance(m, np.ndarray) or m.shape != (4, 4):
+        m = matrix_from_column_major(m)
+    screen, in_front = project_to_css(xyz, m, width, height)
+    d2 = (screen[:, 0] - x) ** 2 + (screen[:, 1] - y) ** 2
+    near = np.flatnonzero(in_front & (d2 <= radius * radius))
+    if near.size == 0:
+        return None
+    clip = np.asarray(xyz, np.float64)[near] @ m[:, :3].T + m[:, 3]
+    w = clip[:, 3]                                     # distance along the view
+    # the front surface: of the points within 1% of the nearest depth, the
+    # one closest to the click
+    front = w <= w.min() * 1.01
+    best = np.flatnonzero(front)[np.argmin(d2[near][front])]
+    return int(near[best])

@@ -6,6 +6,7 @@
 import { useApp } from "../state/app";
 import { AboutDialog, ConfirmDialog, MessageDialog, ProjectInfoDialog } from "./common";
 import { ExportDialog, ReprojectDialog } from "./crs";
+import { GcpDialog, GcpImportDialog } from "./gcps";
 import { ModelSpecDialog, PredictDialog, TrainDialog } from "./model";
 import {
   CleanDialog,
@@ -41,6 +42,10 @@ export function DialogHost() {
       return <SurveyDialog create={d.create === true} />;
     case "reconstructions":
       return <ReconstructionsDialog />;
+    case "gcp":
+      return <GcpDialog id={String(d.id ?? "")} />;
+    case "gcp_import":
+      return <GcpImportDialog />;
     case "sfm":
       return <SfmDialog />;
     case "mvs":

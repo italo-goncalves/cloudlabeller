@@ -497,3 +497,56 @@ def enu_to_frame_similarity(geo: dict, origin_lla, enu_samples: np.ndarray):
     offset = np.asarray(crs_info.get("offset") or (0.0, 0.0, 0.0), np.float64)
     samples = np.asarray(enu_samples, np.float64).reshape(-1, 3)
     return umeyama_similarity(samples, fn(samples) - offset)
+
+
+GEOGRAPHIC_EPSG = (4326, 4979)                   # WGS 84 longitude, latitude (degrees)
+
+
+def _user_crs(epsg: int, orthometric: bool):
+    """A CRS for coordinates the user typed: projected or WGS 84 geographic
+    (x = longitude, y = latitude), with ellipsoidal or EGM96 heights."""
+    import pyproj
+
+    epsg = int(epsg)
+    if epsg in GEOGRAPHIC_EPSG:
+        return (pyproj.CRS.from_user_input(f"EPSG:4326+{GEOID_EPSG}") if orthometric
+                else pyproj.CRS.from_epsg(4979))
+    return _compound_crs(epsg) if orthometric else pyproj.CRS.from_epsg(epsg)
+
+
+def to_project_frame(geo: dict, epsg: int, orthometric: bool, xyz) -> np.ndarray:
+    """(N, 3) coordinates in CRS ``epsg`` as the Project frame stores them:
+    local ENU about the frame's origin, or its CRS minus its offset. Raises
+    RuntimeError when a grid (the geoid) is missing."""
+    xyz = np.asarray(xyz, np.float64).reshape(-1, 3)
+    src = _user_crs(epsg, orthometric)
+    crs_info = geo.get("crs")
+    if crs_info:
+        dst = _user_crs(int(crs_info["epsg"]), bool(crs_info.get("orthometric")))
+        t = _checked_transformer(src, dst)
+        x, y, z = _transform_arrays(t, xyz[:, 0], xyz[:, 1], xyz[:, 2])
+        offset = np.asarray(crs_info.get("offset") or (0.0, 0.0, 0.0), np.float64)
+        return np.column_stack([x, y, z]) - offset
+    import pyproj
+
+    t = _checked_transformer(src, pyproj.CRS.from_epsg(4979))
+    lon, lat, h = _transform_arrays(t, xyz[:, 0], xyz[:, 1], xyz[:, 2])
+    return lla_to_enu_transform(geo["origin_lla"])(np.column_stack([lat, lon, h]))
+
+
+def frame_from_coordinates(epsg: int, orthometric: bool, xyz) -> dict:
+    """A Project frame for coordinates surveyed in CRS ``epsg``: that CRS
+    (minus a km offset) when it is projected, else local ENU about them."""
+    import pyproj
+
+    xyz = np.asarray(xyz, np.float64).reshape(-1, 3)
+    centre = xyz.mean(axis=0)
+    t = _checked_transformer(_user_crs(epsg, orthometric), pyproj.CRS.from_epsg(4979))
+    lon, lat, h = _transform_arrays(t, centre[None, 0], centre[None, 1], centre[None, 2])
+    geo = {"frame": "ENU", "origin_lla": [float(lat[0]), float(lon[0]), float(h[0])],
+           "origin_convention": "gcp"}
+    if int(epsg) not in GEOGRAPHIC_EPSG:
+        geo["crs"] = {"epsg": int(epsg), "name": pyproj.CRS.from_epsg(int(epsg)).name,
+                      "orthometric": bool(orthometric),
+                      "offset": [float(v) for v in choose_offset(xyz)]}
+    return geo

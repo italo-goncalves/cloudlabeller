@@ -96,7 +96,7 @@ Survey `s1`; `project.json` from before is kept as `project.v1.json`.
 |---|---|
 | `engine.ready` | Same as `engine.hello`. |
 | `engine.log` | `{level, message}`: an internal failure the user didn't ask about. |
-| `project.changed` | `{parts, survey?, images?}`. `parts` are drawn from `schema`, `surveys`, `images`, `status`, `sparse`, `dense`, `mesh`, `labels` and `settings`. `survey` names the Survey the change is in; absent, it is Project-wide (the schema, the frame, the models). `images` names that Survey's photos whose mask or status changed. |
+| `project.changed` | `{parts, survey?, images?}`. `parts` are drawn from `schema`, `surveys`, `gcps`, `images`, `status`, `sparse`, `dense`, `mesh`, `labels` and `settings`. `survey` names the Survey the change is in; absent, it is Project-wide (the schema, the frame, the models). `images` names that Survey's photos whose mask or status changed. |
 | `request.progress` | `{id, fraction, message}` for a long request still running. |
 
 A Job's progress and log reach the window from the Tauri core, which runs
@@ -367,6 +367,85 @@ undoable edit; the counts are the points labelled. The two must share
 their SfM product, or both be aligned. Problems: `reconstruction.not_found`,
 `transfer.same_reconstruction`, `transfer.not_comparable`,
 `transfer.cloud_unlabelled`.
+
+### `gcp.list`
+→ `{gcps, fit}`. Each GCP is `{id, name, xyz, epsg, orthometric, accuracy,
+use, marks}`: `xyz` its surveyed coordinates in CRS `epsg` (null when not
+surveyed; for a geographic CRS, x is the longitude), `use` `control` or
+`check`, `marks` `{<survey>: {photos: [names], cloud}}` where it is marked.
+`fit` is the last `align.fit` summary, or null.
+
+### `gcp.create`
+`{name?, xyz?, epsg?, orthometric?, accuracy?, use?}` → `{id, gcps, fit}`.
+
+### `gcp.update`
+`{id, name?, xyz?, epsg?, orthometric?, accuracy?, use?}` → `{gcps, fit}`.
+`xyz` null clears the coordinates; coordinates need `epsg`. Problem:
+`gcp.not_found`.
+
+### `gcp.delete`
+`{id}` → `{gcps, fit}`. Its Marks go too, in every Survey.
+
+### `gcp.import_csv`
+`{path, epsg, orthometric?, use?}` → `{added, updated, gcps, fit}`. Reads
+`name, x, y, z[, accuracy]` lines (commas, semicolons or tabs; a header
+line is skipped; with semicolons or tabs a decimal comma is fine). A name
+already there takes the new coordinates. Problems: `gcp.no_file`,
+`gcp.bad_csv` (`params.line`).
+
+### `mark.set`
+`{survey, gcp, name, uv}` places the GCP's Mark on photo `name` at pixel
+`uv` (`[u, v]`, in the photo's pixels); `{survey, gcp, cloud?, index}`
+places its cloud Mark on point `index` of the active Reconstruction's
+cloud (as `cloud.pick` found it), kept in that Reconstruction's own
+frame. Placing a Mark again moves it. → `{gcp}`. Problems:
+`gcp.not_found`, `image.not_found`, `cloud.bad_indices`.
+
+### `mark.delete`
+`{survey, gcp, name?}` → `{gcp}`. Removes the Mark on photo `name`, or,
+without `name`, the cloud Mark.
+
+### `marks.photo`
+`{survey, name}` → `{marks: [{gcp, uv}], hints: [{gcp, uv}]}`. The photo's
+Marks, and where each other GCP falls in it: from where the active
+Reconstruction locates it (its cloud Mark, else two or more photo Marks
+triangulated) or, once the Survey is aligned, from its surveyed
+coordinates.
+
+### `marks.cloud`
+`{survey}` → `{marks: [{gcp, xyz, from}]}`: where the active Reconstruction
+locates each GCP, in the Project frame; `from` is `cloud` or `photos`.
+
+### `cloud.pick`
+`{survey, cloud?, view_projection, x, y, width, height, radius?: 8}` →
+`{cloud, index, xyz}`: the point a click at CSS pixel `(x, y)` snaps to,
+the front-most of the cloud's points within `radius` pixels (`index` and
+`xyz` null when there is none). `view_projection` is as `cloud.select`'s.
+
+### `align.fit`
+`{reference?}` → `{surveys, residuals, located, frame_created}`. A long
+request. Fits each Survey's active Reconstruction to the GCPs:
+
+- Each Reconstruction locates each GCP (a cloud Mark, else its photo
+  Marks triangulated). Surveyed control GCPs are targets in the Project
+  frame. A Project with no frame takes one from them: their CRS minus a
+  km offset when it is projected, else local ENU about them
+  (`frame_created`).
+- A Survey that sees three or more targets gets a similarity fitted to
+  them. A GCP without coordinates becomes a target, once aligned Surveys
+  see it, at the mean of where they put it, which can align further
+  Surveys. With no coordinates at all, Survey `reference` (default: the
+  first) keeps its frame.
+- A Survey with fewer than three keeps its Alignment (EXIF GPS, say).
+  Check GCPs never take part; they are measured.
+
+`surveys` maps each Survey to `{aligned, how: "gcp"|"reference"|"kept",
+n_gcps, rms}`; `residuals[gcp][survey]` is `[dx, dy, dz]` in metres from
+its coordinates (or, for a GCP without them, from where the other
+Surveys put it); `located[survey][gcp]` is `{from, photos, rms_px?}`.
+The Alignment is stored with `source: "gcp"`. Problems: `align.no_gcps`,
+`export.needs_geoid` (orthometric coordinates need the EGM96 grid),
+`project.jobs_running`.
 
 ### `model.spec`
 → `{spec, training_size, problem}`: the U-Net settings, the size it trains

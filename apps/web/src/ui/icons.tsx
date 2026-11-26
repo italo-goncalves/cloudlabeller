@@ -61,3 +61,11 @@ export const ClearIcon = () => (
     <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
   </Icon>
 );
+
+/** Place a GCP's Mark: a survey target. */
+export const GcpIcon = () => (
+  <Icon>
+    <path d="M12 3.5 20.5 12 12 20.5 3.5 12z" />
+    <path d="M12 8.5v7M8.5 12h7" />
+  </Icon>
+);

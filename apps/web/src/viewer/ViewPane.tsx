@@ -11,7 +11,7 @@ import * as api from "../engine/api";
 import { useApp } from "../state/app";
 import type { Representation, ViewDetail, ViewSettings } from "../state/store";
 import { Check, IconButton, PaneTitle, Radios, Select, Slider } from "../ui/controls";
-import { ClearIcon, HomeIcon, LabelIcon, LassoIcon, TrashIcon } from "../ui/icons";
+import { ClearIcon, GcpIcon, HomeIcon, LabelIcon, LassoIcon, TrashIcon } from "../ui/icons";
 import { pointsLabel } from "./adapt";
 import { goHome } from "./home";
 
@@ -93,6 +93,18 @@ export function ViewPane() {
           onClick={() => set({ lasso: !view.lasso })}
         >
           <LassoIcon />
+        </IconButton>
+        <IconButton
+          title={
+            view.representation === "mesh"
+              ? "Place a GCP (on a cloud only)"
+              : "Place the chosen GCP: a click snaps its Mark to the nearest cloud point"
+          }
+          pressed={view.gcpPick}
+          disabled={view.representation === "mesh"}
+          onClick={() => set({ gcpPick: !view.gcpPick })}
+        >
+          <GcpIcon />
         </IconButton>
         <IconButton
           title={

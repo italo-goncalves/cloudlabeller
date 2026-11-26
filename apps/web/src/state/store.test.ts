@@ -137,6 +137,23 @@ describe("the store", () => {
     expect(t.masks.version).toBe(s.masks.version + 1);
   });
 
+  it("lets the lasso or the GCP tool have the left button, not both", () => {
+    let s = opened();
+    s = reduce(s, { type: "view", patch: { lasso: true } });
+    s = reduce(s, { type: "view", patch: { gcpPick: true } });
+    expect(s.view).toMatchObject({ lasso: false, gcpPick: true });
+    s = reduce(s, { type: "view", patch: { lasso: true } });
+    expect(s.view).toMatchObject({ lasso: true, gcpPick: false });
+  });
+
+  it("re-reads the GCPs when they or the geometry change", () => {
+    const s = opened();
+    expect(reduce(s, { type: "changed", parts: ["gcps"] }).gcpVersion).toBe(s.gcpVersion + 1);
+    expect(reduce(s, { type: "changed", parts: ["sparse"] }).gcpVersion).toBe(s.gcpVersion + 1);
+    expect(reduce(s, { type: "changed", parts: ["status"] }).gcpVersion).toBe(s.gcpVersion);
+    expect(reduce(s, { type: "active_gcp", id: "g2" }).activeGcp).toBe("g2");
+  });
+
   it("clamps the brush and the overlay", () => {
     expect(reduce(initialState, { type: "brush_size", size: 0 }).brushSize).toBe(1);
     expect(reduce(initialState, { type: "overlay", opacity: 2 }).overlayOpacity).toBe(1);

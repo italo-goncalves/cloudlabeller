@@ -134,7 +134,7 @@ class Engine:
                 images: Iterable[str] = ()) -> None:
         """Tell the window which parts of the Project changed.
 
-        Parts: ``schema``, ``surveys``, ``images``, ``status``, ``sparse``,
+        Parts: ``schema``, ``surveys``, ``gcps``, ``images``, ``status``, ``sparse``,
         ``dense``, ``mesh``, ``labels``, ``settings``. ``survey`` names the
         Survey the change is in (absent: Project-wide); ``images`` names its
         photos whose masks or status changed.

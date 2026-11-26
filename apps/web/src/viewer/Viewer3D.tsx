@@ -128,6 +128,33 @@ export function Viewer3D() {
       }
     };
 
+    // a GCP's cloud Mark, on the point the click snaps to
+    const placeGcp = async (cloud: api.CloudName, x: number, y: number) => {
+      const app = live.current;
+      const gcp = app.state.activeGcp;
+      if (!gcp) {
+        app.tell("GCP tool", "Choose a GCP in the GCPs tab of the Dataset pane first.");
+        return;
+      }
+      try {
+        const hit = await api.cloudPick(
+          cloud,
+          rig.worldViewProjection(),
+          x,
+          y,
+          rig.width,
+          rig.height,
+        );
+        if (hit.index === null) {
+          app.dispatch({ type: "log", text: "No cloud point under the click: try closer." });
+          return;
+        }
+        await api.markCloud(gcp, cloud, hit.index);
+      } catch (e) {
+        app.fail(e, "Couldn't place the Mark");
+      }
+    };
+
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       if (live.current.state.view.lasso && rig.geometry?.cloud) {
@@ -159,6 +186,10 @@ export function Viewer3D() {
       if (!start || e.button !== 0) return;
       const [x, y] = at(e);
       if (Math.hypot(x - start[0], y - start[1]) > CLICK_SLOP) return;
+      if (live.current.state.view.gcpPick && rig.geometry?.cloud) {
+        void placeGcp(rig.geometry.cloud, x, y);
+        return;
+      }
       const i = rig.pickFrustum(x, y);
       const name = i === null ? undefined : camsRef.current?.list[i]?.name;
       if (name !== undefined) live.current.dispatch({ type: "select_image", name });
@@ -192,6 +223,25 @@ export function Viewer3D() {
       rigRef.current = null;
     };
   }, []);
+
+  // where the GCPs are, in this Survey's active Reconstruction
+  const { gcpVersion, activeGcp } = app.state;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloaded when the GCPs or the geometry change
+  useEffect(() => {
+    const rig = rigRef.current;
+    if (!rig || !project) return;
+    let alive = true;
+    api
+      .marksCloud()
+      .then(
+        (r) =>
+          alive && rig.setGcps(r.marks.map((m) => ({ xyz: m.xyz, active: m.gcp === activeGcp }))),
+      )
+      .catch(() => alive && rig.setGcps([]));
+    return () => {
+      alive = false;
+    };
+  }, [gcpVersion, activeGcp, project?.survey]);
 
   // the lasso takes the left button while it is on
   useEffect(() => {

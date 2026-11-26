@@ -11,6 +11,7 @@ import * as api from "../engine/api";
 import { deleteSurvey, switchSurvey, whenText } from "../shell/surveys";
 import { useApp } from "../state/app";
 import { PaneTitle } from "../ui/controls";
+import { GcpPanel } from "./GcpPanel";
 
 export const STATUS_COLOUR: Record<api.Status, string> = {
   user: "#3fb950",
@@ -35,6 +36,7 @@ export function DatasetPane() {
   const { project, selected, geometryVersion } = app.state;
   const [where, setWhere] = useState<Map<string, [number, number, number]>>(new Map());
   const list = useRef<HTMLUListElement>(null);
+  const [tab, setTab] = useState<"photos" | "gcps">("photos");
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: cameras move only when the reconstruction does
   useEffect(() => {
@@ -72,7 +74,32 @@ export function DatasetPane() {
         Dataset
       </PaneTitle>
       <SurveyLine />
-      <ul ref={list} className="min-h-0 flex-1 overflow-auto py-1" aria-label="Photos">
+      <div className="flex border-b border-border px-2" role="tablist">
+        {(["photos", "gcps"] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            role="tab"
+            aria-selected={tab === t}
+            className={cn(
+              "-mb-px border-b-2 px-2 py-1",
+              tab === t
+                ? "border-accent text-fg"
+                : "border-transparent text-fg-muted hover:text-fg",
+            )}
+            onClick={() => setTab(t)}
+          >
+            {t === "photos" ? "Photos" : "GCPs"}
+          </button>
+        ))}
+      </div>
+      {tab === "gcps" && <GcpPanel />}
+      <ul
+        hidden={tab !== "photos"}
+        ref={list}
+        className="min-h-0 flex-1 overflow-auto py-1"
+        aria-label="Photos"
+      >
         {project.images.map((im) => {
           const p = where.get(im.name);
           return (

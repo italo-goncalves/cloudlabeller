@@ -57,6 +57,7 @@ class Project:
     schema: LabelSchema = field(default_factory=LabelSchema)
     settings: dict = field(default_factory=dict)
     surveys: dict[str, Survey] = field(default_factory=dict)
+    gcps: dict = field(default_factory=dict)          # id -> GCP (core.gcp)
 
     # -- paths ------------------------------------------------------------------
     @property
@@ -206,6 +207,9 @@ class Project:
         for sid in order:
             if (proj.surveys_dir / sid / "survey.json").exists():
                 proj.surveys[sid] = Survey.load(proj.surveys_dir / sid)
+        from cloudlabeller.core.gcp import load_gcps
+
+        proj.gcps = load_gcps(root)
         return proj
 
     def _write_manifest(self) -> None:
@@ -213,6 +217,9 @@ class Project:
                     "settings": self.settings, "surveys": list(self.surveys)}
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        from cloudlabeller.core.gcp import save_gcps
+
+        save_gcps(self.root, self.gcps)
 
     def save_manifest(self) -> None:
         """``project.json`` and every Survey's manifest: cheap, used for

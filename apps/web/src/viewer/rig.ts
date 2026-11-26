@@ -23,12 +23,16 @@ import {
 } from "@geokit/viewer";
 import {
   AmbientLight,
+  BufferGeometry,
   Color,
   DirectionalLight,
+  Float32BufferAttribute,
   LinearSRGBColorSpace,
   Matrix4,
   MOUSE,
   PerspectiveCamera,
+  Points,
+  PointsMaterial,
   Scene,
   Vector3,
   WebGLRenderer,
@@ -98,6 +102,8 @@ export class Rig {
   private cloud: PointCloudLayer | null = null;
   private mesh: MeshLayer | null = null;
   private frusta: FrustumLayer | null = null;
+  private gcpPoints: Points | null = null;
+  private gcpList: { xyz: Vec3; active: boolean }[] = [];
   private classification: Float32Array | null = null;
   private look: GkCloudView = {
     colourBy: "classification",
@@ -260,6 +266,7 @@ export class Rig {
     );
     this.origin = next;
     this.setFrusta(null, null);
+    this.setGcps(this.gcpList);
     if (first) return;
     this.camera.position.add(d);
     this.controls.target.add(d);
@@ -409,6 +416,43 @@ export class Rig {
     this.invalidate();
   }
 
+  // -- GCPs ------------------------------------------------------------------
+
+  /** Where the GCPs are (world coordinates), drawn over everything; the
+   *  active one stands out. */
+  setGcps(list: { xyz: Vec3; active: boolean }[]): void {
+    this.gcpList = list;
+    if (this.gcpPoints) {
+      this.scene.remove(this.gcpPoints);
+      this.gcpPoints.geometry.dispose();
+      (this.gcpPoints.material as PointsMaterial).dispose();
+      this.gcpPoints = null;
+    }
+    if (list.length > 0) {
+      const pos = new Float32Array(list.length * 3);
+      const col = new Float32Array(list.length * 3);
+      list.forEach((g, i) => {
+        for (let k = 0; k < 3; k++) pos[i * 3 + k] = (g.xyz[k] ?? 0) - (this.origin[k] ?? 0);
+        const c = g.active ? [1, 0.83, 0.24] : [1, 0.48, 0.45];
+        col.set(c, i * 3);
+      });
+      const geometry = new BufferGeometry();
+      geometry.setAttribute("position", new Float32BufferAttribute(pos, 3));
+      geometry.setAttribute("color", new Float32BufferAttribute(col, 3));
+      const material = new PointsMaterial({
+        size: 11 * this.ratio,
+        sizeAttenuation: false,
+        vertexColors: true,
+        depthTest: false,
+        transparent: true,
+      });
+      this.gcpPoints = new Points(geometry, material);
+      this.gcpPoints.renderOrder = 10;
+      this.scene.add(this.gcpPoints);
+    }
+    this.invalidate();
+  }
+
   // -- cameras ---------------------------------------------------------------
 
   /** Replace the frusta (null or none: remove them). */
@@ -476,6 +520,7 @@ export class Rig {
     this.controls.dispose();
     this.dropGeometry();
     this.setFrusta(null, null);
+    this.setGcps([]);
     this.host.dispose();
     this.lasso.dispose();
     this.renderer.dispose();

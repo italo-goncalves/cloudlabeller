@@ -2,12 +2,14 @@
 // Copyright (C) 2026 Ítalo Gomes Gonçalves
 
 // The Image pane: a photo with its mask over it, and the tools to label it
-// (polygon, brush, eraser), as the 0.2.x Qt `ui/image_view.py` did. The pixel
+// (polygon, brush, eraser), as the 0.2.x Qt `ui/image_view.py` did, and the
+// GCP tool, which places the chosen GCP's Mark on the photo. The pixel
 // work is in `raster.ts`, the mask's life in `useMask`, the view in `useViewport`.
 
 import { cn } from "@geokit/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { propagate } from "../engine/api";
+import { markDelete, markPhoto, marksPhoto, type PhotoMarks, propagate } from "../engine/api";
+import { useGcps } from "../panes/GcpPanel";
 import { useApp } from "../state/app";
 import type { ImageTool } from "../state/store";
 import { Button, PaneTitle, Slider } from "../ui/controls";
@@ -32,6 +34,7 @@ const TOOLS: { tool: ImageTool; label: string }[] = [
   { tool: "polygon", label: "Polygon (D)" },
   { tool: "brush", label: "Brush (B)" },
   { tool: "eraser", label: "Eraser (E)" },
+  { tool: "gcp", label: "GCP (G)" },
 ];
 
 type Drag =
@@ -49,6 +52,23 @@ export function ImageView() {
   const row = project?.images.find((i) => i.name === name);
 
   const photo = usePhoto(name, project?.survey ?? null);
+  const { activeGcp, gcpVersion } = state;
+  const gcpNames = new Map((useGcps()?.gcps ?? []).map((g) => [g.id, g.name]));
+  const [gcpMarks, setGcpMarks] = useState<PhotoMarks>({ marks: [], hints: [] });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the Marks change with their version
+  useEffect(() => {
+    if (!name) {
+      setGcpMarks({ marks: [], hints: [] });
+      return;
+    }
+    let live = true;
+    marksPhoto(name)
+      .then((m) => live && setGcpMarks(m))
+      .catch(() => live && setGcpMarks({ marks: [], hints: [] }));
+    return () => {
+      live = false;
+    };
+  }, [name, gcpVersion, project?.survey]);
   const editor = useMask(name);
   const { size } = editor;
   const overlay = useOverlay(editor, schema);
@@ -98,6 +118,19 @@ export function ImageView() {
       return;
     }
     if (!size) return;
+    if (tool === "gcp" && name) {
+      if (!activeGcp) {
+        tell("GCP tool", "Choose a GCP in the GCPs tab of the Dataset pane first.");
+        return;
+      }
+      const at: [number, number] = [
+        Math.min(Math.max(here[0], 0), size.w),
+        Math.min(Math.max(here[1], 0), size.h),
+      ];
+      if (e.button === 0) markPhoto(activeGcp, name, at).catch((err) => fail(err));
+      else if (e.button === 2) markDelete(activeGcp, name).catch((err) => fail(err));
+      return;
+    }
     if (tool === "polygon") {
       if (e.button === 0) setPolygon((p) => [...p, clamp(here)]);
       else if (e.button === 2) setPolygon((p) => p.slice(0, -1));
@@ -156,6 +189,10 @@ export function ImageView() {
       case "e":
       case "E":
         toggle("eraser");
+        break;
+      case "g":
+      case "G":
+        toggle("gcp");
         break;
       case "Enter":
         if (tool !== "polygon" || polygon.length < 3) return;
@@ -356,6 +393,62 @@ export function ImageView() {
               stroke="white"
             />
           ))}
+          {gcpMarks.hints.map((h) => {
+            const [x, y] = imageToScreen(view, h.uv[0], h.uv[1]);
+            return (
+              <g key={`h-${h.gcp}`} opacity={0.85}>
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={14}
+                  fill="none"
+                  stroke="#58a6ff"
+                  strokeWidth={2}
+                  strokeDasharray="4 3"
+                />
+                <text
+                  x={x + 17}
+                  y={y + 4}
+                  fill="#58a6ff"
+                  fontSize={12}
+                  stroke="black"
+                  strokeWidth={3}
+                  paintOrder="stroke"
+                >
+                  {gcpNames.get(h.gcp) ?? h.gcp}?
+                </text>
+              </g>
+            );
+          })}
+          {gcpMarks.marks.map((m) => {
+            const [x, y] = imageToScreen(view, m.uv[0], m.uv[1]);
+            const colour = m.gcp === activeGcp ? "#ffd33d" : "#ff7b72";
+            return (
+              <g key={`m-${m.gcp}`}>
+                <path
+                  d={`M${x - 10} ${y}H${x + 10}M${x} ${y - 10}V${y + 10}`}
+                  stroke="black"
+                  strokeWidth={4}
+                />
+                <path
+                  d={`M${x - 10} ${y}H${x + 10}M${x} ${y - 10}V${y + 10}`}
+                  stroke={colour}
+                  strokeWidth={2}
+                />
+                <text
+                  x={x + 12}
+                  y={y - 8}
+                  fill={colour}
+                  fontSize={12}
+                  stroke="black"
+                  strokeWidth={3}
+                  paintOrder="stroke"
+                >
+                  {gcpNames.get(m.gcp) ?? m.gcp}
+                </text>
+              </g>
+            );
+          })}
           {hover && (tool === "brush" || tool === "eraser") && (
             <circle
               cx={hover[0]}

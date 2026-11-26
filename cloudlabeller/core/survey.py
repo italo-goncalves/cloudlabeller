@@ -79,6 +79,7 @@ class Survey:
     settings: dict = field(default_factory=dict)
     reconstructions: dict[str, Reconstruction] = field(default_factory=dict)
     active_id: str | None = None
+    marks: dict = field(default_factory=dict)     # gcp id -> {photo: [u, v]}
     dataset: Dataset = field(default_factory=Dataset)
     labels: LabelStore = field(default_factory=LabelStore)
     loaded: bool = False
@@ -185,6 +186,7 @@ class Survey:
                 child.products[s] = parent.products.get(s)
             if "sfm" in shared:
                 child.alignment = parent.alignment
+                child.marks = {g: list(x) for g, x in parent.marks.items()}
                 child.save_keep(parent.load_keep())
             files = {"sfm": "sparse.npy", "mvs": "dense.npy"}
             self.save()                              # the parent's labels, as they are
@@ -555,7 +557,7 @@ class Survey:
         out = {"id": self.id}
         out.update({k: getattr(self, k) for k in META_KEYS})
         out.update(settings=self.settings, active=self.active_id,
-                   image_status=self.labels.image_status)
+                   image_status=self.labels.image_status, marks=self.marks)
         return out
 
     def save_manifest(self) -> None:
@@ -618,6 +620,7 @@ class Survey:
             if data.get(k) is not None:
                 setattr(survey, k, data[k])
         survey.labels.image_status = dict(data.get("image_status") or {})
+        survey.marks = {g: dict(m) for g, m in (data.get("marks") or {}).items()}
         rdir = survey.reconstructions_dir
         if rdir.exists():
             for p in sorted(rdir.iterdir()):

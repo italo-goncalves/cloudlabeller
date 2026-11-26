@@ -113,6 +113,7 @@ class Reconstruction:
     alignment: dict | None = None
     created: str = field(default_factory=now_iso)
     options: dict = field(default_factory=dict)
+    marks: dict = field(default_factory=dict)     # gcp id -> [x, y, z], own frame
 
     @property
     def labels_dir(self) -> Path:
@@ -154,7 +155,7 @@ class Reconstruction:
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "parent": self.parent,
                 "products": dict(self.products), "alignment": self.alignment,
-                "created": self.created, "options": self.options}
+                "created": self.created, "options": self.options, "marks": self.marks}
 
     def save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -169,4 +170,4 @@ class Reconstruction:
         return cls(id=data.get("id", path.name), dir=path, name=data.get("name", ""),
                    parent=data.get("parent"), products=products,
                    alignment=data.get("alignment"), created=data.get("created", ""),
-                   options=data.get("options") or {})
+                   options=data.get("options") or {}, marks=data.get("marks") or {})
