@@ -1,5 +1,7 @@
-# Normalize text files; store LF in the repo.
-* text=auto
+# Normalize text files: LF in the repo *and* in every working copy, whatever
+# core.autocrlf says. Biome and rustfmt expect LF; a Windows CI checkout
+# with CRLF failed `pnpm check` on every line (2026-11-26). As in geokit.
+* text=auto eol=lf
 
 # Shell scripts must check out with LF — bash chokes on CRLF.
 *.sh text eol=lf
@@ -7,6 +9,7 @@
 # Binary assets
 *.png binary
 *.ico binary
+*.icns binary
 
 # Lock files are byte-compared with uv's (LF) output by
 # tools/lock_environment.py --check.
