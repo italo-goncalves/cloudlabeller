@@ -26,10 +26,11 @@ Usage::
         [--method poisson|delaunay] [--depth N] [--trim 10] \
         [--point-weight 1.0] [--workspace DENSE_DIR] [--colmap-binary PATH]
 
-Reads the dense cloud, meshes it via colmap.exe (Screened Poisson by default;
-``--depth`` omitted = matched to the cloud's density), writes ``mesh.npz`` and
-prints ``RESULT_MESH <n_vertices> <n_faces>``. ``--method delaunay`` needs
-``--workspace`` (the dense MVS folder with ``fused.ply`` + ``fused.ply.vis``).
+Reads the dense cloud, meshes it (Screened Poisson by default, through
+colmap.exe or else pycolmap; ``--depth`` omitted = matched to the cloud's
+density), writes ``mesh.npz`` and prints ``RESULT_MESH <n_vertices>
+<n_faces>``. ``--method delaunay`` needs colmap.exe and ``--workspace`` (the
+dense MVS folder with ``fused.ply`` + ``fused.ply.vis``).
 """
 
 from __future__ import annotations

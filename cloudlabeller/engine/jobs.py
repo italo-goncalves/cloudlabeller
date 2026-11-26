@@ -32,6 +32,13 @@ output to the plan's log file, and reads the ``*_cli`` line protocol:
 hands the ``RESULT…`` lines back to :meth:`JobPlans.finish` as
 ``{key: rest of line}``.
 
+A plan's ``stage`` names the Project directories (relative to its root) the
+Job reads (``in``) and writes (``out``). In the WSL Environment the core
+copies the ``in`` dirs to WSL's own disk, runs the Job there with the
+Project-root prefix of ``args`` rewritten, and copies the ``out`` dirs back
+(WSL reads and writes Windows files slowly). Kinds without heavy file I/O
+have no stage and run on the Project in place.
+
 Two Jobs may be outstanding at once only if they are in different groups:
 ``reconstruction`` Jobs rewrite the Project's products, ``ml`` Jobs read
 labels and write models and predictions.
@@ -65,6 +72,7 @@ class Plan:
     gpu: bool = False
     stop_file: Path | None = None        # graceful cancel: touch instead of kill
     context: dict = field(default_factory=dict)
+    stage: dict | None = None            # {"in": [dirs], "out": [dirs]}, root-relative
 
 
 @dataclass
@@ -128,6 +136,24 @@ def _colmap_binary() -> str | None:
     return find_colmap_binary(AppConfig.load().colmap_binary)
 
 
+def _pycolmap_has_cuda() -> bool:
+    """Whether this Environment's pycolmap is a CUDA build (WSL)."""
+    try:
+        import pycolmap
+    except ImportError:
+        return False
+    return bool(pycolmap.has_cuda)
+
+
+def _stage(project: "Project", reads: list[Path], writes: list[Path]) -> dict:
+    """A plan's ``stage``: the directories as POSIX paths relative to the root."""
+    root = Path(project.root)
+
+    def rel(paths):
+        return [p.relative_to(root).as_posix() for p in paths]
+    return {"in": rel(reads), "out": rel(writes)}
+
+
 def parse_result(results: dict, key: str = "RESULT") -> dict:
     """The JSON payload of a ``RESULT <json>`` line, or ``{}``."""
     text = results.get(key, "")
@@ -188,7 +214,9 @@ def _prepare_sfm(engine, project, options):
     binary = _colmap_binary()
     if binary:
         args += ["--colmap-binary", binary]
-    return Plan(args, project.reconstruction_dir / "sfm.log", gpu=opts.use_gpu)
+    return Plan(args, project.reconstruction_dir / "sfm.log", gpu=opts.use_gpu,
+                stage=_stage(project, [project.images_dir, project.reconstruction_dir],
+                             [project.reconstruction_dir]))
 
 
 @applies("sfm")
@@ -271,13 +299,18 @@ def _prepare_mvs(engine, project, options):
     if project.dataset.cloud is None:
         raise Problem("job.no_reconstruction", "Run SfM first.")
     binary = _colmap_binary()
-    if binary is None:
-        raise Problem("job.mvs.no_colmap", "Dense MVS needs the CUDA COLMAP executable.")
+    if binary is None and not _pycolmap_has_cuda():
+        raise Problem("job.mvs.no_colmap",
+                      "Dense MVS needs CUDA: the CUDA COLMAP executable or a CUDA "
+                      "build of pycolmap.")
     args = [str(project.reconstruction_dir), str(project.images_dir),
             "--max-image-size", str(_opt(options, "max_image_size", int, 2000)),
-            "--quality", _choice(options, "quality", ("standard", "draft"), "standard"),
-            "--colmap-binary", binary]
-    return Plan(args, project.reconstruction_dir / "mvs.log", gpu=True)
+            "--quality", _choice(options, "quality", ("standard", "draft"), "standard")]
+    if binary:
+        args += ["--colmap-binary", binary]
+    return Plan(args, project.reconstruction_dir / "mvs.log", gpu=True,
+                stage=_stage(project, [project.images_dir, project.reconstruction_dir],
+                             [project.reconstruction_dir]))
 
 
 @applies("mvs")
@@ -294,6 +327,12 @@ def _prepare_mesh(engine, project, options):
     if project.dataset.dense_cloud is None or not project.dense_cloud_path.exists():
         raise Problem("job.mesh.no_dense", "Meshing needs the dense cloud.")
     method = _choice(options, "method", ("poisson", "delaunay"), "poisson")
+    binary = _colmap_binary()
+    if method == "delaunay" and binary is None:
+        # pycolmap binds Delaunay meshing only when built with CGAL, and the
+        # 4.2 wheels (Windows CPU, Linux CUDA) are not.
+        raise Problem("job.mesh.no_delaunay",
+                      "Delaunay meshing needs the COLMAP executable; use Poisson.")
     args = [str(project.dense_cloud_path), str(project.mesh_path), "--method", method]
     if method == "delaunay":
         args += ["--workspace", str(project.reconstruction_dir / "dense")]
@@ -303,10 +342,10 @@ def _prepare_mesh(engine, project, options):
             args += ["--depth", str(depth)]
         args += ["--trim", str(float(_opt(options, "trim", (int, float), 10.0))),
                  "--point-weight", str(float(_opt(options, "point_weight", (int, float), 1.0)))]
-    binary = _colmap_binary()
     if binary:
         args += ["--colmap-binary", binary]
-    return Plan(args, project.reconstruction_dir / "mesh.log")
+    return Plan(args, project.reconstruction_dir / "mesh.log",
+                stage=_stage(project, [project.reconstruction_dir], [project.products_dir]))
 
 
 @applies("mesh")
@@ -408,7 +447,7 @@ class Outstanding:
                 "gpu": self.plan.gpu, "module": self.kind.module, "args": self.plan.args,
                 "log": str(self.plan.log_path),
                 "stop_file": str(self.plan.stop_file) if self.plan.stop_file else None,
-                "project": str(root)}
+                "project": str(root), "stage": self.plan.stage}
 
 
 class JobPlans:

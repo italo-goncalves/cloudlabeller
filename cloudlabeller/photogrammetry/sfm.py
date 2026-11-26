@@ -18,7 +18,7 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Structure-from-Motion wrapper around pycolmap (verified against pycolmap 4.0.4).
+"""Structure-from-Motion wrapper around pycolmap (verified against pycolmap 4.2).
 
 A single SfM run yields BOTH a sparse point cloud and the solved camera poses,
 so no dense/MVS step (and no CUDA) is required to get a first cloud + cameras.
@@ -50,6 +50,15 @@ class SfMResult:
         self.database = database
         self.sparse_dir = sparse_dir
         self.reconstruction = reconstruction  # pycolmap.Reconstruction
+
+
+def feature_device(pycolmap, use_gpu: bool):
+    """The ``device`` for pycolmap's ``extract_features`` / ``match_*``.
+
+    Always explicit: pycolmap 4.2's default ``Device.auto`` means CUDA on a
+    CUDA build and *overrides* ``options.use_gpu``, so a CPU run would
+    silently take the GPU (outside the GPU Lease)."""
+    return pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
 
 # Matcher name -> colmap.exe subcommand (the GPU extraction/matching path).
@@ -101,6 +110,51 @@ def _extract_and_match_exe(exe: str, database: Path, image_dir: Path,
             progress, ("Matching", 0.35, 0.70))
 
 
+def _extract_and_match_pycolmap(pycolmap, database: Path, image_dir: Path,
+                                image_names: list[str], matcher: str,
+                                camera_model: str, single_camera: bool,
+                                max_image_size: int, n_threads: int, use_gpu: bool,
+                                progress: ProgressFn) -> None:
+    """Feature extraction + matching in-process (GPU only on a CUDA pycolmap)."""
+    device = feature_device(pycolmap, use_gpu)
+    where = " (GPU)" if use_gpu else ""
+    reader_options = pycolmap.ImageReaderOptions()
+    reader_options.camera_model = camera_model
+    camera_mode = (pycolmap.CameraMode.SINGLE if single_camera
+                   else pycolmap.CameraMode.AUTO)
+
+    extraction_options = pycolmap.FeatureExtractionOptions()
+    extraction_options.use_gpu = use_gpu
+    if max_image_size and max_image_size > 0:
+        extraction_options.max_image_size = max_image_size
+    extraction_options.num_threads = n_threads
+    # CPU SIFT runs one extractor per thread, each preallocating buffers
+    # sized to the (possibly full-res) image — many cores × large images
+    # can exhaust RAM and crash. Cap threads above the default size to
+    # bound peak memory.
+    large = max_image_size == 0 or max_image_size > 3200
+    if not use_gpu and large:
+        extraction_options.num_threads = min(4, n_threads)
+    matching_options = pycolmap.FeatureMatchingOptions()
+    matching_options.use_gpu = use_gpu
+    matching_options.num_threads = n_threads
+
+    note = (" (capped at 4 threads for large images)"
+            if (not use_gpu and large) else "")
+    progress(0.05, f"Extracting features from {len(image_names)} images{where}{note}…")
+    pycolmap.extract_features(database, image_dir, image_names=image_names,
+                              camera_mode=camera_mode,
+                              reader_options=reader_options,
+                              extraction_options=extraction_options,
+                              device=device)
+
+    progress(0.35, f"Matching features{where}…")
+    match = {"exhaustive": pycolmap.match_exhaustive,
+             "vocab_tree": pycolmap.match_vocabtree,
+             "spatial": pycolmap.match_spatial}.get(matcher, pycolmap.match_sequential)
+    match(database, matching_options=matching_options, device=device)
+
+
 def run_sfm(
     image_dir: str | Path,
     workspace: str | Path,
@@ -118,10 +172,12 @@ def run_sfm(
     points3D). Convert it with :func:`cloudlabeller.photogrammetry.pipeline.reconstruct`.
 
     Options:
-      * ``use_gpu`` — run SIFT extraction + matching on the GPU through the
-        CUDA ``colmap.exe`` (``colmap_binary``, auto-located when None); the
-        mapper stays in pycolmap on the shared database. Falls back to CPU
-        pycolmap when the executable is missing or fails. Defaults to
+      * ``use_gpu`` — run SIFT extraction + matching on the GPU: in-process
+        when pycolmap is a CUDA build (``pycolmap.has_cuda``, the WSL
+        Environment), else through the CUDA ``colmap.exe`` (``colmap_binary``,
+        auto-located when None; the mapper stays in pycolmap on the shared
+        database). Falls back to CPU SIFT when neither is there or the GPU
+        run fails. Defaults to
         **False**; the caller must be isolated in a subprocess — GPU SIFT
         creates its own GL/CUDA context, which crashes next to a live
         in-process VTK context.
@@ -156,10 +212,22 @@ def run_sfm(
             f"(looked for: {', '.join(sorted(IMAGE_EXTENSIONS))})"
         )
 
-    # GPU path: extraction + matching through the CUDA colmap.exe (the two
-    # stages that dominate SfM wall time); on any failure fall back to CPU.
+    # GPU path: extraction + matching (the two stages that dominate SfM wall
+    # time) in-process on a CUDA pycolmap, else through the CUDA colmap.exe;
+    # on any failure fall back to CPU.
     extracted = False
-    if use_gpu:
+    if use_gpu and pycolmap.has_cuda:
+        try:
+            _extract_and_match_pycolmap(pycolmap, database, image_dir, image_names,
+                                        matcher, camera_model, single_camera,
+                                        max_image_size, n_threads, True, progress)
+            extracted = True
+        except Exception as exc:
+            progress(0.05, f"GPU extraction failed ({exc}) — "
+                           "falling back to CPU SIFT…")
+            database.unlink(missing_ok=True)
+            use_gpu = False
+    elif use_gpu:
         from cloudlabeller.photogrammetry.mvs import find_colmap_binary
 
         exe = find_colmap_binary(colmap_binary)
@@ -180,44 +248,9 @@ def run_sfm(
             use_gpu = False
 
     if not extracted:
-        reader_options = pycolmap.ImageReaderOptions()
-        reader_options.camera_model = camera_model
-        camera_mode = (pycolmap.CameraMode.SINGLE if single_camera
-                       else pycolmap.CameraMode.AUTO)
-
-        extraction_options = pycolmap.FeatureExtractionOptions()
-        extraction_options.use_gpu = use_gpu
-        if max_image_size and max_image_size > 0:
-            extraction_options.max_image_size = max_image_size
-        extraction_options.num_threads = n_threads
-        # CPU SIFT runs one extractor per thread, each preallocating buffers
-        # sized to the (possibly full-res) image — many cores × large images
-        # can exhaust RAM and crash. Cap threads above the default size to
-        # bound peak memory.
-        large = max_image_size == 0 or max_image_size > 3200
-        if not use_gpu and large:
-            extraction_options.num_threads = min(4, n_threads)
-        matching_options = pycolmap.FeatureMatchingOptions()
-        matching_options.use_gpu = use_gpu
-        matching_options.num_threads = n_threads
-
-        note = (" (capped at 4 threads for large images)"
-                if (not use_gpu and large) else "")
-        progress(0.05, f"Extracting features from {len(image_names)} images{note}…")
-        pycolmap.extract_features(database, image_dir, image_names=image_names,
-                                  camera_mode=camera_mode,
-                                  reader_options=reader_options,
-                                  extraction_options=extraction_options)
-
-        progress(0.35, "Matching features…")
-        if matcher == "exhaustive":
-            pycolmap.match_exhaustive(database, matching_options=matching_options)
-        elif matcher == "vocab_tree":
-            pycolmap.match_vocabtree(database, matching_options=matching_options)
-        elif matcher == "spatial":
-            pycolmap.match_spatial(database, matching_options=matching_options)
-        else:
-            pycolmap.match_sequential(database, matching_options=matching_options)
+        _extract_and_match_pycolmap(pycolmap, database, image_dir, image_names,
+                                    matcher, camera_model, single_camera,
+                                    max_image_size, n_threads, False, progress)
 
     progress(0.70, "Incremental mapping… (global bundle adjustment is silent "
                    "while solving — large models can take many minutes)")

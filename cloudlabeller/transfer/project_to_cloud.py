@@ -28,7 +28,7 @@ import numpy as np
 
 from cloudlabeller.core.dataset import Dataset, PointCloud
 from cloudlabeller.core.label_schema import UNLABELLED_ID
-from cloudlabeller.transfer import hylite_bridge as hb
+from cloudlabeller.transfer import projection as hb
 
 ProgressFn = Callable[[float, str], None]
 

@@ -21,8 +21,8 @@
 """Dataset model: images, cameras, point cloud and mesh.
 
 These are plain data containers. Heavy numerical payloads (point coordinates,
-image arrays) are held as numpy arrays or loaded lazily from disk; conversion to
-hylite objects happens in :mod:`cloudlabeller.transfer`.
+image arrays) are held as numpy arrays or loaded lazily from disk; projection
+between them happens in :mod:`cloudlabeller.transfer`.
 """
 
 from __future__ import annotations

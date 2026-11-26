@@ -130,7 +130,7 @@ def export_cloud_ply(cloud: PointCloud, labels: np.ndarray | None,
                      transform: TransformFn | None = None) -> None:
     """Binary PLY with per-vertex colour, optional normals and a ``label``
     (int32) property; float64 coordinates when a transform is applied."""
-    from plyfile import PlyData, PlyElement
+    from cloudlabeller.io.ply import write_ply
 
     rgb, lab = _cloud_columns(cloud, labels)
     # Projected coordinates (~1e6 m) need f8 — f4 rounds to ~0.5 m there.
@@ -151,7 +151,7 @@ def export_cloud_ply(cloud: PointCloud, labels: np.ndarray | None,
         data[k] = rgb[:, i]
     data["label"] = lab
     progress(0.6, "PLY: writing…")
-    PlyData([PlyElement.describe(data, "vertex")]).write(str(path))
+    write_ply(path, data)
     progress(1.0, "PLY written")
 
 
@@ -179,7 +179,7 @@ def export_cloud(cloud: PointCloud, labels: np.ndarray | None,
 def _export_mesh_ply_f8(mesh: Mesh, vertices: np.ndarray, path: str | Path) -> None:
     """Binary PLY with float64 vertices (trimesh writes f4, which loses
     ~0.5 m at projected magnitudes)."""
-    from plyfile import PlyData, PlyElement
+    from cloudlabeller.io.ply import write_ply
 
     fields = [("x", "f8"), ("y", "f8"), ("z", "f8")]
     if mesh.vertex_colors is not None:
@@ -190,10 +190,7 @@ def _export_mesh_ply_f8(mesh: Mesh, vertices: np.ndarray, path: str | Path) -> N
     if mesh.vertex_colors is not None:
         for i, k in enumerate(("red", "green", "blue")):
             vdata[k] = mesh.vertex_colors[:, i]
-    faces = np.empty(len(mesh.faces), dtype=[("vertex_indices", "i4", (3,))])
-    faces["vertex_indices"] = np.asarray(mesh.faces, np.int32)
-    PlyData([PlyElement.describe(vdata, "vertex"),
-             PlyElement.describe(faces, "face")]).write(str(path))
+    write_ply(path, vdata, np.asarray(mesh.faces, np.int32))
 
 
 def export_mesh(mesh: Mesh, path: str | Path, progress: ProgressFn = _NOOP,

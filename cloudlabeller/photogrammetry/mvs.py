@@ -174,7 +174,8 @@ def run_mvs(
         return _run_mvs_cli(exe, images, sparse, dense, max_image_size, build_mesh,
                             quality, kept, progress)
 
-    # No CUDA executable found — try in-process pycolmap (also CUDA-gated).
+    # No CUDA executable — in-process pycolmap, when it is a CUDA build (the
+    # WSL Environment's pycolmap-cuda12).
     import pycolmap
     if not pycolmap.has_cuda:
         raise RuntimeError(
@@ -182,7 +183,7 @@ def run_mvs(
             "installed pycolmap is CPU-only. Install a CUDA build of COLMAP "
             "(colmap.exe) and set its path in the app config.")
     return _run_mvs_pycolmap(pycolmap, images, sparse, dense, max_image_size,
-                             build_mesh, progress)
+                             build_mesh, quality, kept, progress)
 
 
 # -- COLMAP CUDA executable backend ---------------------------------------
@@ -286,28 +287,64 @@ def _run_mvs_cli(exe, images, sparse, dense, max_image_size, build_mesh,
     return cloud, mesh
 
 
-# -- in-process pycolmap backend (only if it ever ships with CUDA) --------
-def _run_mvs_pycolmap(pycolmap, images, sparse, dense, max_image_size, build_mesh, progress):
-    """Same MVS chain through pycolmap's in-process bindings (used only when
-    no CUDA executable is available AND pycolmap ships CUDA support)."""
-    progress(0.05, "Undistorting images…")
-    pycolmap.undistort_images(dense, sparse, images)
-    progress(0.30, "Patch-match stereo (GPU)…")
-    opts = pycolmap.PatchMatchOptions()
-    if max_image_size and max_image_size > 0:
-        opts.max_image_size = max_image_size
+# -- in-process pycolmap backend (a CUDA pycolmap: WSL) ------------------
+def _run_mvs_pycolmap(pycolmap, images, sparse, dense, max_image_size, build_mesh,
+                      quality, kept, progress):
+    """The same MVS chain as :func:`_run_mvs_cli` through pycolmap's bindings
+    (needs ``pycolmap.has_cuda``): undistort (skipped on a same-settings
+    resume) -> patch-match stereo -> fusion [-> Poisson mesh]."""
     from cloudlabeller.workers.resources import worker_threads
-    opts.num_threads = worker_threads()
-    pycolmap.patch_match_stereo(dense, options=opts)
-    progress(0.80, "Stereo fusion…")
+    n = worker_threads()
+
+    done = dense / UNDISTORT_DONE
+    fingerprint = sparse_model_fingerprint(sparse)
+    reusable = (kept and done.exists()
+                and done.read_text(encoding="utf-8") == fingerprint)
+    if reusable:
+        progress(0.25, "Reusing undistorted images from the previous run")
+    else:
+        done.unlink(missing_ok=True)
+        progress(0.05, "Undistorting images…")
+        undistort = pycolmap.UndistortCameraOptions()
+        if max_image_size and max_image_size > 0:
+            undistort.max_image_size = max_image_size
+        pycolmap.undistort_images(dense, sparse, images, output_type="COLMAP",
+                                  undistort_options=undistort, num_threads=n)
+        done.write_text(fingerprint, encoding="utf-8")
+
+    opts = pycolmap.PatchMatchOptions()
+    opts.num_threads = n
+    fusion_input = "geometric"
+    if quality == "draft":
+        set_patch_match_sources(dense, DRAFT_SRC_IMAGES)
+        opts.geom_consistency = False
+        opts.window_radius = 3
+        opts.num_iterations = 3
+        fusion_input = "photometric"
+        progress(0.25, f"Draft quality: {DRAFT_SRC_IMAGES} source images, "
+                       "single stereo pass")
+    else:
+        opts.geom_consistency = True
+    progress(0.25, "Patch-match stereo (GPU)…")
+    pycolmap.patch_match_stereo(dense, workspace_format="COLMAP", options=opts)
+
+    progress(0.78, "Stereo fusion…")
     fused = dense / "fused.ply"
-    pycolmap.stereo_fusion(fused, dense)
+    fusion = pycolmap.StereoFusionOptions()
+    fusion.num_threads = n
+    # output_type "ply" also writes fused.ply.vis (what Delaunay meshing needs);
+    # pycolmap's default "bin" writes a sparse-model folder instead.
+    pycolmap.stereo_fusion(fused, dense, workspace_format="COLMAP",
+                           input_type=fusion_input, options=fusion, output_type="ply")
     cloud = load_cloud(fused)
+
     mesh = None
     if build_mesh:
-        progress(0.95, "Poisson meshing…")
+        progress(0.96, "Poisson meshing…")
         meshed = dense / "meshed.ply"
-        pycolmap.poisson_meshing(fused, meshed)
+        poisson = pycolmap.PoissonMeshingOptions()
+        poisson.num_threads = n
+        pycolmap.poisson_meshing(fused, meshed, options=poisson)
         mesh = load_mesh(meshed)
     progress(1.0, f"Dense complete: {cloud.n_points} points")
     return cloud, mesh

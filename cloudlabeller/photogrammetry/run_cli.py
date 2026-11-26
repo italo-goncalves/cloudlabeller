@@ -65,7 +65,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--camera-model", choices=CAMERA_MODELS, default="SIMPLE_RADIAL")
     p.add_argument("--max-image-size", type=int, default=3200)
     p.add_argument("--colmap-binary", default=None,
-                   help="CUDA colmap.exe for GPU SIFT/matching (with --gpu)")
+                   help="CUDA colmap.exe for GPU SIFT/matching (with --gpu, used "
+                        "only when pycolmap is not a CUDA build)")
     return p.parse_args(argv[1:])
 
 

@@ -7,3 +7,8 @@
 # Binary assets
 *.png binary
 *.ico binary
+
+# Lock files are byte-compared with uv's (LF) output by
+# tools/lock_environment.py --check.
+uv.lock text eol=lf
+apps/desktop/environment/requirements.lock text eol=lf

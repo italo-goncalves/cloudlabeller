@@ -18,9 +18,8 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Reconstruction + visualisation tests (require the venv: pycolmap, pyvista).
-
-Run with the project venv:  .venv/Scripts/python -m pytest tests/test_reconstruction.py
+"""Reconstruction + visualisation tests (need pycolmap; the visualisation ones
+also need the ``qt`` extra and are skipped without it — see conftest.py).
 """
 
 import numpy as np
@@ -29,7 +28,12 @@ import pytest
 from cloudlabeller.core.dataset import Camera, PointCloud
 
 pycolmap = pytest.importorskip("pycolmap")
-pv = pytest.importorskip("pyvista")
+try:
+    import pyvista as pv
+except ModuleNotFoundError:          # an Environment without the qt extra
+    from conftest import missing_module
+
+    pv = missing_module("pyvista")
 
 
 def _app_camera(tx: float = 0.0) -> Camera:
@@ -781,17 +785,23 @@ def test_save_cloud_ply_roundtrip(tmp_path):
     np.testing.assert_allclose(back.normals, cloud.normals, atol=1e-6)
 
 
-def test_create_mesh_end_to_end():
-    """Real Poisson meshing via colmap.exe on a synthetic coloured sphere."""
+@pytest.mark.parametrize("backend", ["colmap", "pycolmap"])
+def test_create_mesh_end_to_end(backend, monkeypatch):
+    """Real Poisson meshing on a synthetic coloured sphere, through colmap.exe
+    (native Windows) and through pycolmap (the WSL Environment has no exe)."""
     from cloudlabeller.core.dataset import PointCloud
+    from cloudlabeller.photogrammetry import meshing
     from cloudlabeller.photogrammetry.meshing import create_mesh
     from cloudlabeller.photogrammetry.mvs import find_colmap_binary
 
-    if find_colmap_binary() is None:
+    if backend == "colmap" and find_colmap_binary() is None:
         pytest.skip("COLMAP executable not installed")
+    if backend == "pycolmap":
+        monkeypatch.setattr(meshing, "find_colmap_binary", lambda *a: None)
 
-    sphere = pv.Sphere(radius=1.0, theta_resolution=60, phi_resolution=60)
-    pts = np.asarray(sphere.points, np.float32)
+    import trimesh
+
+    pts = np.asarray(trimesh.creation.icosphere(subdivisions=5).vertices, np.float32)
     normals = pts / np.linalg.norm(pts, axis=1, keepdims=True)   # exact for a sphere
     rgb = np.zeros((len(pts), 3), np.uint8)
     rgb[:, 0] = ((pts[:, 2] + 1) * 127).astype(np.uint8)         # red gradient in z
@@ -816,17 +826,20 @@ def test_create_mesh_requires_normals():
 
 
 def test_import_cloud_and_mesh_from_ply(tmp_path):
+    """External PLY written by another tool (trimesh) imports as cloud and mesh."""
+    import trimesh
+
     from cloudlabeller.io.geometry import load_cloud, load_mesh
 
     cloud_ply = tmp_path / "c.ply"
-    pc = pv.PolyData(np.random.rand(10, 3))
-    pc["RGB"] = np.random.randint(0, 255, (10, 3)).astype(np.uint8)
-    pc.save(str(cloud_ply))
+    rgba = np.random.randint(0, 255, (10, 4)).astype(np.uint8)
+    trimesh.PointCloud(np.random.rand(10, 3), colors=rgba).export(str(cloud_ply))
     cloud = load_cloud(cloud_ply)
     assert cloud.n_points == 10
+    assert np.array_equal(cloud.rgb, rgba[:, :3])
 
     mesh_ply = tmp_path / "m.ply"
-    pv.Sphere().save(str(mesh_ply))
+    trimesh.creation.icosphere().export(str(mesh_ply))
     mesh = load_mesh(mesh_ply)
     assert len(mesh.vertices) > 0 and mesh.faces.shape[1] == 3
 
@@ -890,9 +903,8 @@ def test_paint_dense_cloud_undoable():
 
 
 def test_normals_backface_culling_in_bridge():
-    pytest.importorskip("hylite")
     from cloudlabeller.core.dataset import PointCloud
-    from cloudlabeller.transfer.hylite_bridge import visible_point_pixels
+    from cloudlabeller.transfer.projection import visible_point_pixels
 
     # horizontal patch with +z (up) normals
     rng = np.random.default_rng(0)
@@ -918,7 +930,6 @@ def test_normals_backface_culling_in_bridge():
 def test_auto_masks_are_virtual(tmp_path):
     """Auto-labelled images get their overlay rendered from the cloud on demand;
     no full-res mask is materialised until the user draws on the image."""
-    pytest.importorskip("hylite")
     from PIL import Image
     from PySide6.QtCore import QPointF
     from PySide6.QtWidgets import QApplication
@@ -1033,7 +1044,7 @@ def test_distorted_projection_matches_pycolmap():
     import pycolmap
 
     from cloudlabeller.photogrammetry.cameras import extract_distortion
-    from cloudlabeller.transfer.hylite_bridge import project_points
+    from cloudlabeller.transfer.projection import project_points
 
     cases = [
         ("SIMPLE_RADIAL", [1000.0, 400.0, 300.0, -0.06]),
@@ -1060,7 +1071,7 @@ def test_distorted_projection_matches_pycolmap():
 
 def test_distortion_shifts_border_pixels():
     """With k=-0.06, a border point moves tens of px vs pinhole (the bug)."""
-    from cloudlabeller.transfer.hylite_bridge import project_points
+    from cloudlabeller.transfer.projection import project_points
 
     K = np.array([[1000., 0, 400], [0, 1000., 300], [0, 0, 1]])
     base = dict(K=K, R=np.eye(3), t=np.zeros(3), width=800, height=600)
@@ -1112,9 +1123,8 @@ def test_cameras_json_roundtrips_distortion(tmp_path):
     assert loaded.model == "SIMPLE_RADIAL"
 
 
-def test_hylite_camera_matches_direct_projection():
-    pytest.importorskip("hylite")
-    from cloudlabeller.transfer.hylite_bridge import project_points
+def test_projection_matches_pinhole():
+    from cloudlabeller.transfer.projection import project_points
 
     cam = _app_camera(0.0)                    # centred principal point, R=I, t=0
     rng = np.random.default_rng(0)
@@ -1127,14 +1137,13 @@ def test_hylite_camera_matches_direct_projection():
 
     pp, vis = project_points(cam, X)
     assert vis.sum() > 30
-    assert np.allclose(pp[vis, 0], u[vis], atol=1e-3)   # hylite (px,py) == COLMAP (u,v)
+    assert np.allclose(pp[vis, 0], u[vis], atol=1e-3)   # (px, py) == COLMAP (u, v)
     assert np.allclose(pp[vis, 1], v[vis], atol=1e-3)
 
 
 def test_visible_point_pixels_occlusion():
-    pytest.importorskip("hylite")
     from cloudlabeller.core.dataset import PointCloud
-    from cloudlabeller.transfer.hylite_bridge import visible_point_pixels
+    from cloudlabeller.transfer.projection import visible_point_pixels
 
     cam = _app_camera(0.0)
     cloud = PointCloud(xyz=np.array([[0, 0, 5.0], [0, 0, 9.0]], np.float32))  # same ray
@@ -1143,7 +1152,6 @@ def test_visible_point_pixels_occlusion():
 
 
 def test_transfer_round_trip():
-    pytest.importorskip("hylite")
     from pathlib import Path
 
     from cloudlabeller.core.dataset import Dataset, ImageRecord, PointCloud
@@ -1460,7 +1468,7 @@ def test_distortion_foldback_points_not_visible():
     as false occluders, punching a cone-shaped hole (apex at the principal
     point) into image->cloud label transfer."""
     from cloudlabeller.core.dataset import PointCloud
-    from cloudlabeller.transfer.hylite_bridge import project_points, visible_point_pixels
+    from cloudlabeller.transfer.projection import project_points, visible_point_pixels
 
     K = np.array([[1000.0, 0, 320], [0, 1000.0, 240], [0, 0, 1]])
     cam = Camera(K=K, R=np.eye(3), t=np.zeros(3), width=640, height=480,
@@ -1589,7 +1597,7 @@ class TestGeoref:
         from cloudlabeller.photogrammetry.georef import (
             transform_camera, transform_points,
         )
-        from cloudlabeller.transfer.hylite_bridge import project_points
+        from cloudlabeller.transfer.projection import project_points
 
         s, R, t = self._sim3()
         cam = Camera(K=np.array([[1000.0, 0, 320], [0, 1000.0, 240], [0, 0, 1]]),
@@ -1634,3 +1642,53 @@ class TestGeoref:
         assert parse_gps_info(gps)[2] == 320.5
         gps[5] = b"\x01"
         assert parse_gps_info(gps)[2] == -320.5
+
+
+class _StopAfterExtraction(BaseException):   # not caught by the GPU fallback
+    pass
+
+
+def _sfm_devices(tmp_path, monkeypatch, *, use_gpu, has_cuda):
+    """Run run_sfm up to feature extraction; return the ``device`` it passed
+    to pycolmap (and whether colmap.exe was looked for)."""
+    from PIL import Image
+
+    from cloudlabeller.photogrammetry import mvs, sfm
+
+    images = tmp_path / "images"
+    images.mkdir()
+    Image.new("RGB", (64, 48)).save(images / "a.jpg")
+    seen = {}
+
+    def fake_extract(*args, **kwargs):
+        seen["device"] = kwargs.get("device")
+        seen["use_gpu"] = kwargs["extraction_options"].use_gpu
+        raise _StopAfterExtraction
+
+    monkeypatch.setattr(pycolmap, "has_cuda", has_cuda, raising=False)
+    monkeypatch.setattr(pycolmap, "extract_features", fake_extract)
+    monkeypatch.setattr(mvs, "find_colmap_binary",
+                        lambda *a: seen.setdefault("looked_for_exe", True) and None)
+    with pytest.raises(_StopAfterExtraction):
+        sfm.run_sfm(images, tmp_path / "ws", use_gpu=use_gpu)
+    return seen
+
+
+def test_cpu_sfm_never_takes_the_gpu_on_a_cuda_pycolmap(tmp_path, monkeypatch):
+    """Regression: pycolmap 4.2's default device=auto means CUDA on a CUDA
+    build and overrides options.use_gpu, so a CPU SfM ran SIFT on the GPU
+    outside the GPU Lease. The device is now always explicit."""
+    seen = _sfm_devices(tmp_path, monkeypatch, use_gpu=False, has_cuda=True)
+    assert seen["device"] == pycolmap.Device.cpu and seen["use_gpu"] is False
+    assert "looked_for_exe" not in seen
+
+
+def test_gpu_sfm_on_a_cuda_pycolmap_needs_no_colmap_exe(tmp_path, monkeypatch):
+    seen = _sfm_devices(tmp_path, monkeypatch, use_gpu=True, has_cuda=True)
+    assert seen["device"] == pycolmap.Device.cuda and seen["use_gpu"] is True
+    assert "looked_for_exe" not in seen
+
+
+def test_gpu_sfm_without_cuda_or_exe_falls_back_to_cpu(tmp_path, monkeypatch):
+    seen = _sfm_devices(tmp_path, monkeypatch, use_gpu=True, has_cuda=False)
+    assert seen["looked_for_exe"] and seen["device"] == pycolmap.Device.cpu

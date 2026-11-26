@@ -24,19 +24,7 @@ The projection applies the **full COLMAP camera model** (pinhole + lens
 distortion, validated against pycolmap's ``img_from_cam``) so that pixels match
 the original photos the user labels — ignoring distortion shifted transfers by
 up to ~100 px at the image corners. Occlusion combines per-point normal
-back-face culling (hylite-style) with a coarse z-buffer.
-
-Interop note: for distortion-free cameras this projection is pixel-identical to
-``hylite.project.proj_persp`` under the conversion below (calibrated to 0 px —
-see ``camera_to_hylite`` and its regression test); hylite's model cannot express
-lens distortion, which is why the projection itself is computed here.
-
-COLMAP -> hylite camera:
-    C   = -R^T t                                  (camera centre)
-    R_h = R^T @ diag(1, -1, -1)                   (proper rotation)
-    ori = -euler_XYZ(R_h) in degrees              (hylite pitch/roll/yaw)
-    fov = 2*atan(H / (2*fy)) in degrees           (vertical fov)
-hylite's proj_persp then returns (px, py) == COLMAP's (u, v), top-left origin.
+back-face culling with a coarse z-buffer.
 """
 
 from __future__ import annotations
@@ -44,20 +32,6 @@ from __future__ import annotations
 import numpy as np
 
 from cloudlabeller.core.dataset import Camera, PointCloud
-
-
-def camera_to_hylite(camera: Camera):
-    """Convert a COLMAP-convention camera into a hylite ``Camera`` (see the
-    module docstring for the derivation, verified against proj_persp)."""
-    from hylite.project import Camera as HCamera
-    from scipy.spatial.transform import Rotation
-
-    center = -camera.R.T @ camera.t
-    r_h = camera.R.T @ np.diag([1.0, -1.0, -1.0])
-    ori = -Rotation.from_matrix(r_h).as_euler("XYZ", degrees=True)
-    fov = np.degrees(2.0 * np.arctan(camera.height / (2.0 * camera.K[1, 1])))
-    return HCamera(np.asarray(center, float), np.asarray(ori, float),
-                   "persp", float(fov), (int(camera.width), int(camera.height)))
 
 
 def _apply_distortion(x: np.ndarray, y: np.ndarray, dist: np.ndarray | None,
@@ -92,9 +66,8 @@ def project_points(camera: Camera, xyz: np.ndarray, normals: np.ndarray | None =
 
     Applies the **full COLMAP camera model** — pinhole + lens distortion — so
     projections match the original (distorted) photos that the user labels.
-    (The previous hylite ``proj_persp`` path is pixel-identical for pinhole
-    cameras but cannot express distortion, which shifted transfers by up to
-    ~100 px at the image corners.)
+    (A pinhole-only projection cannot express distortion, which shifted
+    transfers by up to ~100 px at the image corners.)
 
     If ``normals`` are given, back-face culling marks points whose surface faces
     away from the camera as not visible.

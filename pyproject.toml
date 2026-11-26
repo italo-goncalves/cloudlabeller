@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cloudlabeller"
 version = "0.2.1"
-description = "Photogrammetry + bidirectional 2D/3D labelling with hylite transfer and U-Net propagation."
+description = "Photogrammetry + bidirectional 2D/3D labelling with label transfer and U-Net propagation."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Italo Goncalves", email = "italogoncalves.igg@gmail.com" }]
@@ -13,25 +13,33 @@ authors = [{ name = "Italo Goncalves", email = "italogoncalves.igg@gmail.com" }]
 # (see README.md § License).
 license = { text = "GPL-3.0-or-later" }
 
-# Mirror of requirements.txt (the authoritative, commented list).
+# Mirror of requirements.txt (the authoritative, commented list). The base
+# dependencies are what the Engine and the Jobs need: they are the desktop
+# app's Environment (apps/desktop/environment/requirements.lock, made by
+# tools/lock_environment.py). The 0.2.x Qt app needs the `qt` extra on top.
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "opencv-python>=4.8",
+    "opencv-python-headless>=4.8",
     "pillow>=10",
-    "PySide6==6.7.3",  # 6.8+ links ICU (icuuc.dll) -> WinError 127 with Anaconda/Windows ICU
-    "pyvista>=0.43",
-    "pyvistaqt>=0.11",
     "trimesh>=4.0",
     "laspy>=2.5",
     "pyproj>=3.6",
-    "pycolmap>=4,<5",
-    "hylite>=1.36",
-    "tensorflow==2.19.*",
     "scikit-image>=0.22",
+    "tensorflow==2.19.*",
+    "tensorflow[and-cuda]==2.19.*; sys_platform == 'linux'",
+    # Same `pycolmap` module either way: CPU build on Windows (GPU work there
+    # goes through colmap.exe), CUDA 12 build on Linux/WSL.
+    "pycolmap==4.2.*; sys_platform == 'win32'",
+    "pycolmap-cuda12==4.2.*; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
+qt = [
+    "PySide6==6.7.3",  # 6.8+ links ICU (icuuc.dll) -> WinError 127 with Anaconda/Windows ICU
+    "pyvista>=0.43",
+    "pyvistaqt>=0.11",
+]
 dev = [
     "pytest>=7.4",
     "ruff>=0.4",
@@ -45,6 +53,27 @@ cloudlabeller = "cloudlabeller.app:main"
 # package goes into the wheel the desktop app's Environment installs.
 [tool.setuptools.packages.find]
 include = ["cloudlabeller*"]
+
+[tool.setuptools.package-data]
+cloudlabeller = ["assets/*"]
+
+# `uv lock` resolves only for the two platforms the Environment runs on:
+# native Windows (CPU) and WSL Ubuntu (GPU), both on Python 3.12.
+[tool.uv]
+environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64' and python_version == '3.12'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+]
+# tensorflow[and-cuda] 2.19 pins the CUDA 12.5 runtime and cuRAND exactly;
+# pycolmap-cuda12 4.2 wants them through cuda-toolkit 12.x, whose releases pin
+# other builds — no version satisfies both. Take cuda-toolkit 12.9's: CUDA 12.x
+# runtimes are backward compatible, and TF 2.19 trains on them in WSL (checked
+# 2026-11-25). Only uv applies overrides, so the Environment must come from the
+# lock, not a bare `pip install cloudlabeller` on Linux.
+override-dependencies = [
+    "nvidia-cuda-runtime-cu12==12.9.79.*; sys_platform == 'linux'",
+    "nvidia-curand-cu12==10.3.10.19.*; sys_platform == 'linux'",
+]
 
 [tool.ruff]
 line-length = 100

@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.core.dataset import Camera, PointCloud
-from cloudlabeller.transfer.hylite_bridge import VISIBILITY_VERSION, visible_point_pixels
+from cloudlabeller.transfer.projection import VISIBILITY_VERSION, visible_point_pixels
 
 _RAM_ENTRIES = 8          # small LRU of decoded entries kept in memory
 
