@@ -115,3 +115,35 @@ def ingest_images(
         seen.add(base)
         progress(i / total, f"Ingested {i}/{len(names)} images")
     return result
+
+
+def exif_time(path: str | Path) -> str | None:
+    """When a photo was taken, from its EXIF (DateTimeOriginal, else
+    DateTime), as ``YYYY-MM-DDTHH:MM:SS``; None when it doesn't say."""
+    from PIL import Image
+
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            text = exif.get_ifd(0x8769).get(36867) or exif.get(306)
+    except Exception:
+        return None
+    if not text or not isinstance(text, str):
+        return None
+    text = text.strip().replace("\x00", "")
+    try:
+        date, time = text.split(" ", 1)
+        return f"{date.replace(':', '-')}T{time[:8]}"
+    except ValueError:
+        return None
+
+
+def median_photo_time(image_dir: str | Path, limit: int = 200) -> str | None:
+    """The median EXIF time of the photos in ``image_dir`` (at most ``limit``
+    of them, spread evenly), or None when none says."""
+    files = list_image_files(image_dir)
+    if len(files) > limit:
+        step = len(files) / limit
+        files = [files[int(i * step)] for i in range(limit)]
+    times = sorted(t for f in files if (t := exif_time(Path(image_dir) / Path(f).name)))
+    return times[len(times) // 2] if times else None

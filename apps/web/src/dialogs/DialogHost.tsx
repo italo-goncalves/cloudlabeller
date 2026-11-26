@@ -15,6 +15,7 @@ import {
   PipelineDialog,
   SfmDialog,
 } from "./reconstruction";
+import { ReconstructionsDialog, SurveyDialog } from "./surveys";
 
 export function DialogHost() {
   const { dialog } = useApp().state;
@@ -36,6 +37,10 @@ export function DialogHost() {
       return <ProjectInfoDialog />;
     case "about":
       return <AboutDialog />;
+    case "survey":
+      return <SurveyDialog create={d.create === true} />;
+    case "reconstructions":
+      return <ReconstructionsDialog />;
     case "sfm":
       return <SfmDialog />;
     case "mvs":

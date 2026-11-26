@@ -115,6 +115,28 @@ describe("the store", () => {
     ).toEqual(["a", "b"]);
   });
 
+  it("shows another Survey's first photo, with nothing chosen and every view reloaded", () => {
+    let s = opened();
+    s = reduce(s, { type: "select_image", name: "b.jpg" });
+    s = reduce(s, {
+      type: "selection",
+      selection: { cloud: "sparse", indices: new Uint32Array([1, 2]) },
+    });
+    s = reduce(s, { type: "active_class", id: 1 });
+    const other = project({
+      survey: "s2",
+      images: [{ name: "x.jpg", status: "none", solved: false, user_mask: false }],
+      sparse: null,
+    });
+    const t = reduce(s, { type: "switched", project: other });
+    expect(t.selected).toBe("x.jpg");
+    expect(t.selection).toBeNull();
+    expect(t.activeClass).toBe(1);
+    expect(t.view.representation).toBe("sparse");
+    expect(t.geometryVersion).toBe(s.geometryVersion + 1);
+    expect(t.masks.version).toBe(s.masks.version + 1);
+  });
+
   it("clamps the brush and the overlay", () => {
     expect(reduce(initialState, { type: "brush_size", size: 0 }).brushSize).toBe(1);
     expect(reduce(initialState, { type: "overlay", opacity: 2 }).overlayOpacity).toBe(1);

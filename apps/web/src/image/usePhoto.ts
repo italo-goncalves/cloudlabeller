@@ -5,7 +5,6 @@
 
 import { useEffect, useState } from "react";
 import { readPhoto } from "../desktop/bridge";
-import { currentSurvey } from "../engine/api";
 
 const MIME: Record<string, string> = {
   jpg: "image/jpeg",
@@ -39,11 +38,12 @@ export interface Photo {
 
 const NONE: Photo = { url: null, loading: false, problem: null };
 
-export function usePhoto(name: string | null): Photo {
+/** Survey `survey`'s photo `name` (the same name may be in two Surveys). */
+export function usePhoto(name: string | null, survey: string | null): Photo {
   const [photo, setPhoto] = useState<Photo>(NONE);
 
   useEffect(() => {
-    if (!name) {
+    if (!name || !survey) {
       setPhoto(NONE);
       return;
     }
@@ -53,7 +53,7 @@ export function usePhoto(name: string | null): Photo {
     (async () => {
       let decoding = false;
       try {
-        const bytes = await readPhoto(currentSurvey(), name);
+        const bytes = await readPhoto(survey, name);
         if (!live) return;
         decoding = true;
         url = URL.createObjectURL(new Blob([bytes], { type: mimeFor(name) }));
@@ -77,7 +77,7 @@ export function usePhoto(name: string | null): Photo {
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [name]);
+  }, [name, survey]);
 
   return photo;
 }

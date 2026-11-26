@@ -261,9 +261,15 @@ def test_a_new_sfm_starts_unaligned_and_georef_goes_into_a_crs_frame(tmp_path):
     proj.frame["crs"] = {"epsg": 32722, "name": "UTM 22S", "orthometric": False,
                          "offset": [700000.0, 6600000.0, 0.0]}
     plan = KINDS["sfm"].prepare(engine, proj, {"survey": "s1"})
-    assert plan.args[1].endswith("sfm-1")              # step 1: a re-run replaces it
+    assert plan.args[1].endswith("sfm-2")              # a re-run never overwrites
+    from cloudlabeller.photogrammetry.pipeline import ReconstructResult, load_result, save_result
+
+    old = load_result(proj.survey("s1").sfm_dir, proj.survey("s1").images_dir)
+    save_result(ReconstructResult(old.cloud, old.images), plan.args[1])   # what SfM wrote
     out = KINDS["sfm"].apply(engine, proj, {}, plan)
-    assert out["georeferencing_cleared"] and not proj.survey("s1").aligned
+    sv = proj.survey("s1")
+    assert out["georeferencing_cleared"] and not sv.aligned
+    assert sv.active_id == "r2" and sv.reconstructions["r1"].aligned   # r1 keeps its own
 
     plan = KINDS["georef"].prepare(engine, proj, {"survey": "s1"})
     i = plan.args.index("--origin")
@@ -294,3 +300,159 @@ def test_methods_name_their_survey(tmp_path):
     with pytest.raises(Problem) as err:
         _survey(engine, {"survey": "s9"})
     assert err.value.code == "survey.not_found"
+
+
+# -- several Reconstructions (step 2) ------------------------------------------------
+def _run_step(engine, slot: str, write) -> dict:
+    """Plan a step, write its product as the CLI would, and finish it."""
+    from cloudlabeller.engine.jobs import KINDS
+
+    plan = KINDS[slot].prepare(engine, engine.project, {"survey": "s1"})
+    out = Path(plan.context["product"])
+    write(engine.project.survey("s1").products_dir / out)
+    return KINDS[slot].apply(engine, engine.project, {}, plan), plan
+
+
+def _write_dense(n: int):
+    from cloudlabeller.io.geometry import save_cloud_npz
+
+    def write(d: Path):
+        xyz = (np.random.default_rng(n).uniform(-1, 1, (n, 3)) + [0, 0, 5]).astype(np.float32)
+        save_cloud_npz(PointCloud(xyz=xyz), d / "dense.npz")
+    return write
+
+
+def test_running_a_step_again_makes_a_child_that_shares_the_rest(tmp_path, monkeypatch):
+    from cloudlabeller.engine import jobs
+
+    monkeypatch.setattr(jobs, "_colmap_binary", lambda: None)
+    monkeypatch.setattr(jobs, "_pycolmap_has_cuda", lambda: True)
+    root = _v1_project(tmp_path / "p", georeferenced=True)
+    engine = _engine_with(root)
+    sv = engine.project.survey("s1")
+    sv.labels.cloud_labels[:] = 1
+    before = (sv.products_dir / "mvs-1" / "dense.npz").read_bytes()
+
+    _out, plan = _run_step(engine, "mvs", _write_dense(30))
+    assert plan.context["fork"] and plan.context["product"] == "mvs-2"
+    child, parent = sv.active, sv.reconstructions["r1"]
+    assert child.id == "r2" and child.parent == "r1"
+    assert child.products == {"sfm": "sfm-1", "mvs": "mvs-2", "mesh": None}
+    assert child.alignment == parent.alignment                  # shares the SfM frame
+    assert sv.dataset.dense_cloud.n_points == 30 and sv.dataset.mesh is None
+    assert (sv.labels.cloud_labels == 1).all()                  # shared sparse labels
+    assert sv.labels.dense_cloud_labels is None                 # the new dense: none yet
+    assert (sv.products_dir / "mvs-1" / "dense.npz").read_bytes() == before
+
+    # Filling the child's empty mesh slot keeps it the same Reconstruction.
+    from cloudlabeller.io.geometry import save_mesh_npz
+
+    def mesh(d: Path):
+        save_mesh_npz(Mesh(vertices=np.zeros((3, 3), np.float32),
+                           faces=np.array([[0, 1, 2]], np.int32)), d / "mesh.npz")
+    _out, plan = _run_step(engine, "mesh", mesh)
+    assert not plan.context["fork"] and sv.active.id == "r2"
+    assert sv.active.products["mesh"] == "mesh-2"
+
+    # Switching back brings r1's own labels and geometry.
+    engine.save_project()
+    sv.activate("r1")
+    assert sv.dataset.dense_cloud.n_points == 20 and (sv.labels.dense_cloud_labels == 1).all()
+    rows = {r["id"]: r for r in sv.reconstruction_rows()}
+    assert rows["r1"]["active"] and rows["r2"]["parent"] == "r1"
+
+
+def test_deleting_a_reconstruction_keeps_shared_products(tmp_path, monkeypatch):
+    from cloudlabeller.engine import jobs
+
+    monkeypatch.setattr(jobs, "_colmap_binary", lambda: None)
+    monkeypatch.setattr(jobs, "_pycolmap_has_cuda", lambda: True)
+    root = _v1_project(tmp_path / "p")
+    engine = _engine_with(root)
+    sv = engine.project.survey("s1")
+    _run_step(engine, "mvs", _write_dense(30))                  # r2 shares sfm-1
+    products = sv.products_dir
+    freed = sv.delete_reconstruction("r2")
+    assert freed > 0 and not (products / "mvs-2").exists()
+    assert (products / "sfm-1").exists() and (products / "mvs-1").exists()
+    assert sv.active_id == "r1" and sv.dataset.dense_cloud.n_points == 20
+
+    freed = sv.delete_reconstruction("r1")                      # the last one
+    assert not (products / "sfm-1").exists() and sv.active is None
+    assert sv.dataset.cloud is None and sv.reconstruction_rows() == []
+
+
+def test_surveys_are_made_described_and_deleted_over_the_engine(tmp_path):
+    from PIL import Image
+
+    from cloudlabeller.engine.methods import project_state
+    from cloudlabeller.engine.server import METHODS
+
+    root = _v1_project(tmp_path / "p")
+    engine = _engine_with(root)
+    call = lambda m, **p: METHODS[m].fn(engine, p)          # noqa: E731
+    made = call("survey.create", name="Flight 2", operator="Ana", camera="Mavic 3")
+    assert made["id"] == "s2" and made["images"] == [] and made["active"] is None
+    s2 = engine.project.surveys["s2"]
+    exif = Image.Exif()
+    exif[306] = "2026:11:20 10:15:00"
+    Image.new("RGB", (8, 8)).save(s2.images_dir / "x.jpg", exif=exif)
+    assert s2.timestamp is None
+    from cloudlabeller.core.images import median_photo_time
+
+    assert median_photo_time(s2.images_dir) == "2026-11-20T10:15:00"
+
+    got = call("survey.update", survey="s2", notes="windy", timestamp="2026-11-21T09:00:00")
+    assert got["notes"] == "windy" and got["timestamp"] == "2026-11-21T09:00:00"
+    again = Project.open(root)
+    assert list(again.surveys) == ["s1", "s2"] and again.surveys["s2"].operator == "Ana"
+
+    state = project_state(engine)
+    assert [s["id"] for s in state["surveys"]] == ["s1", "s2"]
+    out = call("survey.delete", survey="s2")
+    assert out["surveys"] == ["s1"] and not (root / "surveys" / "s2").exists()
+    from cloudlabeller.engine.protocol import Problem
+
+    with pytest.raises(Problem) as err:
+        call("survey.delete", survey="s1")
+    assert err.value.code == "survey.last"
+
+
+def test_an_unloaded_survey_is_described_without_loading(tmp_path):
+    from cloudlabeller.engine.methods import survey_state
+
+    root = _v1_project(tmp_path / "p")
+    sv = Project.open(root).surveys["s1"]
+    assert not sv.loaded
+    state = survey_state(sv)
+    assert not sv.loaded
+    assert state["sparse"] == 50 and state["dense"] == 20
+    assert state["mesh"] == {"vertices": 3, "faces": 1}
+    assert [(i["name"], i["solved"], i["user_mask"]) for i in state["images"]] == [
+        ("a.png", True, True), ("b.png", True, False)]
+    assert state["source_resolution"] == [W, H] or state["source_resolution"] == (W, H)
+
+
+def test_labels_copy_between_reconstructions(tmp_path, monkeypatch):
+    from cloudlabeller.engine import jobs
+    from cloudlabeller.engine.server import METHODS
+
+    monkeypatch.setattr(jobs, "_colmap_binary", lambda: None)
+    monkeypatch.setattr(jobs, "_pycolmap_has_cuda", lambda: True)
+    root = _v1_project(tmp_path / "p")
+    engine = _engine_with(root)
+    sv = engine.project.survey("s1")
+    sv.labels.dense_cloud_labels[:] = 1
+    engine.save_project()
+    dense_r1 = sv.dataset.dense_cloud.xyz.copy()
+
+    def same_points(d: Path):
+        from cloudlabeller.io.geometry import save_cloud_npz
+
+        save_cloud_npz(PointCloud(xyz=dense_r1 + 1e-4), d / "dense.npz")
+    _run_step(engine, "mvs", same_points)
+    assert sv.active.id == "r2" and sv.labels.dense_cloud_labels is None
+    deferred = METHODS["transfer.reconstruction"].fn(engine, {"survey": "s1", "from": "r1"})
+    out = deferred.finish(deferred.work(lambda f, m="": None))
+    assert out["dense"] == 20 and (sv.labels.dense_cloud_labels == 1).all()
+    assert sv.labels.can_undo()

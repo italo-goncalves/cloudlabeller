@@ -8,6 +8,7 @@
 import { cn } from "@geokit/ui";
 import { useEffect, useRef, useState } from "react";
 import * as api from "../engine/api";
+import { deleteSurvey, switchSurvey, whenText } from "../shell/surveys";
 import { useApp } from "../state/app";
 import { PaneTitle } from "../ui/controls";
 
@@ -70,6 +71,7 @@ export function DatasetPane() {
       >
         Dataset
       </PaneTitle>
+      <SurveyLine />
       <ul ref={list} className="min-h-0 flex-1 overflow-auto py-1" aria-label="Photos">
         {project.images.map((im) => {
           const p = where.get(im.name);
@@ -97,6 +99,83 @@ export function DatasetPane() {
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+const LINK = "rounded px-1.5 text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-40";
+
+/** Which Survey is shown, and its Reconstruction: one compact line while
+ * the Project has one Survey, a chooser once it has more. */
+function SurveyLine() {
+  const app = useApp();
+  const { project, busy } = app.state;
+  if (!project) return null;
+  const current = project.surveys.find((s) => s.id === project.survey);
+  const many = project.surveys.length > 1;
+  const dialog = (name: "survey" | "reconstructions", data?: Record<string, unknown>) =>
+    app.dispatch({ type: "dialog", dialog: { name, ...(data ? { data } : {}) } });
+  return (
+    <div className="flex flex-col gap-1 border-b border-border px-3 py-1.5">
+      <div className="flex items-center gap-1">
+        {many ? (
+          <select
+            aria-label="Survey"
+            className="h-control min-w-0 flex-1 rounded-md border border-border bg-surface-0 px-1"
+            value={project.survey}
+            disabled={busy !== null}
+            onChange={(e) => void switchSurvey(app, e.target.value)}
+          >
+            {project.surveys.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+                {s.timestamp ? ` · ${whenText(s.timestamp)}` : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="min-w-0 flex-1 truncate" title={whenText(current?.timestamp ?? null)}>
+            {current?.name}
+          </span>
+        )}
+        <button
+          type="button"
+          className={LINK}
+          title="Survey details"
+          onClick={() => dialog("survey")}
+        >
+          Details
+        </button>
+        <button
+          type="button"
+          className={LINK}
+          title="New Survey"
+          disabled={busy !== null}
+          onClick={() => dialog("survey", { create: true })}
+        >
+          New
+        </button>
+        {many && (
+          <button
+            type="button"
+            className={LINK}
+            title="Delete this Survey"
+            disabled={busy !== null}
+            onClick={() => void deleteSurvey(app)}
+          >
+            Delete
+          </button>
+        )}
+      </div>
+      {current && current.reconstructions > 0 && (
+        <button
+          type="button"
+          className="truncate text-left text-fg-faint hover:text-fg"
+          onClick={() => dialog("reconstructions")}
+        >
+          {`Reconstruction ${current.active?.slice(1) ?? "—"} of ${current.reconstructions}${current.aligned ? ", aligned" : ""}`}
+        </button>
+      )}
     </div>
   );
 }

@@ -214,8 +214,12 @@ def _apply_ingest(engine, project, results, plan):
     if changed and survey.dataset.cloud is not None:
         survey.mark_reconstruction_outdated()
     survey.load_products()
+    if not survey.timestamp:
+        from cloudlabeller.core.images import median_photo_time
+
+        survey.timestamp = median_photo_time(survey.images_dir)
     engine.save_project()
-    engine.changed("images", "settings", survey=survey.id)
+    engine.changed("images", "settings", "surveys", survey=survey.id)
     return {"copied": int(fields_.get("copied", 0)),
             "overwritten": int(fields_.get("overwritten", 0)),
             "changed": changed,
@@ -224,17 +228,20 @@ def _apply_ingest(engine, project, results, plan):
 
 
 def _product_plan(survey, slot: str) -> tuple[Path, dict]:
-    """Where a step writes, and the plan context that records it."""
-    out = survey.output_dir(slot)
+    """Where a step writes (always a new product folder), and the plan
+    context that says how finishing it records it."""
+    out, fork = survey.plan_step(slot)
     out.mkdir(parents=True, exist_ok=True)
-    return out, {"survey": survey.id, "slot": slot, "product": out.name}
+    return out, {"survey": survey.id, "slot": slot, "product": out.name, "fork": fork}
 
 
 def _record_product(survey, plan: Plan, clear: tuple[str, ...]) -> None:
-    """Point the active Reconstruction at the product a step wrote; the
-    labels of what it replaced start again."""
-    rec = survey.ensure_active()
-    rec.products[plan.context["slot"]] = plan.context["product"]
+    """Record the product a step wrote: in the active Reconstruction when
+    its slot was empty, else in a new child of it (ADR-0005). Labels of the
+    new product start empty."""
+    ctx = plan.context
+    rec = survey.fork(ctx["slot"]) if ctx.get("fork") else survey.ensure_active()
+    rec.products[ctx["slot"]] = ctx["product"]
     for attr in clear:
         setattr(survey.labels, attr, None)
 
@@ -260,17 +267,18 @@ def _prepare_sfm(engine, project, options):
     if binary:
         args += ["--colmap-binary", binary]
     return Plan(args, _logs(survey) / "sfm.log", gpu=opts.use_gpu, context=context,
-                stage=_stage(project, [survey.images_dir, out], [out]))
+                stage=_stage(project, [survey.images_dir], [out]))
 
 
 @applies("sfm")
 def _apply_sfm(engine, project, results, plan):
     survey = _planned(project, plan)
+    # A fresh solve is a new local frame: the earlier Reconstruction keeps
+    # its Alignment, the new one has none until it is aligned.
+    cleared = survey.aligned
     _record_product(survey, plan, ("cloud_labels",))
     rec = survey.active
-    rec.save_keep(None)                   # a new solve: every point again
-    # A fresh solve is a new local frame: an earlier Alignment no longer fits.
-    cleared = rec.alignment is not None
+    rec.save_keep(None)
     rec.alignment = None
     survey.load_products()
     if survey.dataset.cloud is None:
@@ -411,7 +419,7 @@ def _prepare_mvs(engine, project, options):
     if binary:
         args += ["--colmap-binary", binary]
     return Plan(args, _logs(survey) / "mvs.log", gpu=True, context=context,
-                stage=_stage(project, [survey.images_dir, survey.sfm_dir, out], [out]))
+                stage=_stage(project, [survey.images_dir, survey.sfm_dir], [out]))
 
 
 @applies("mvs")

@@ -73,6 +73,8 @@ export type DialogName =
   | "predict"
   | "project_info"
   | "about"
+  | "survey"
+  | "reconstructions"
   | "confirm"
   | "message";
 
@@ -145,6 +147,7 @@ export type Action =
   | { type: "kept"; kept: Kept }
   | { type: "opened"; project: ProjectState }
   | { type: "closed" }
+  | { type: "switched"; project: ProjectState }
   | { type: "project"; project: ProjectState }
   /** The Engine's `project.changed`. */
   | { type: "changed"; parts: string[]; images?: string[] }
@@ -207,6 +210,23 @@ export function reduce(s: AppState, a: Action): AppState {
       };
     case "closed":
       return { ...initialState, kept: s.kept, panes: s.panes, log: s.log };
+    case "switched":
+      // another Survey: its own photos and geometry, nothing chosen in it yet
+      return {
+        ...s,
+        project: a.project,
+        selected: a.project.images[0]?.name ?? null,
+        selection: null,
+        cleanPreview: null,
+        view: {
+          ...s.view,
+          representation: available(a.project, s.view.representation),
+          lasso: false,
+        },
+        labelsVersion: s.labelsVersion + 1,
+        geometryVersion: s.geometryVersion + 1,
+        masks: { version: s.masks.version + 1, images: [] },
+      };
     case "project": {
       const project = a.project;
       const selected =

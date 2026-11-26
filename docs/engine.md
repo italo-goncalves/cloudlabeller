@@ -138,11 +138,12 @@ version doesn't read).
 Project frame (`{frame, origin_lla, origin_convention, crs?}`), or null.
 Each Survey in `surveys`, in the Project's order, is `{id, name, timestamp,
 operator, camera, notes, images: [{name, status, solved, user_mask}],
-reconstruction, active, aligned, sparse, dense, mesh, source_resolution,
+reconstruction, active, reconstructions, aligned, sparse, dense, mesh, source_resolution,
 can_undo, can_redo}`.
 
-- `active` is the active Reconstruction's id, null before SfM. `aligned`:
-  it has an Alignment into the Project frame.
+- `active` is the active Reconstruction's id, null before SfM, and
+  `reconstructions` how many the Survey has. `aligned`: the active one has
+  an Alignment into the Project frame.
 - `status` is `user`, `auto`, `ml` or `none`.
 - `reconstruction` is `none`, `outdated` or `current`.
 - `sparse` and `dense` are point counts, or null. `mesh` is
@@ -165,6 +166,44 @@ the Project's first, then each Survey's (labels indented by two spaces).
 ### `schema.delete`
 `{id}` → `{schema}`. The class's points and pixels become unlabelled, the
 ids above it shift down by one, and the undo history is cleared.
+
+### `survey.create`
+`{name?, timestamp?, operator?, camera?, notes?}` → the new Survey, as
+`project.state` lists it. It goes after the others; `name` defaults to
+"Survey n". Its `timestamp`, when not given, is set from its photos' EXIF
+once photos are added.
+
+### `survey.update`
+`{survey, name?, timestamp?, operator?, camera?, notes?}` → the Survey.
+`timestamp` is `YYYY-MM-DDTHH:MM:SS`; empty clears it.
+
+### `survey.delete`
+`{survey}` → `{freed_bytes, surveys}`. Deletes the Survey's folder: its
+photos, Masks, predictions, products and Reconstructions. GCPs and models
+are the Project's and stay. Problems: `survey.last` (a Project keeps one),
+`project.jobs_running`.
+
+### `reconstruction.list`
+`{survey}` → `{reconstructions: [{id, name, parent, products, aligned,
+created, active, freed_bytes}], active}`, oldest first. `products` maps
+`sfm`, `mvs` and `mesh` to product folders (null when not run); a child
+shares its parent's earlier ones. `freed_bytes` is what deleting it would
+free.
+
+### `reconstruction.activate`
+`{survey, reconstruction}` → as `reconstruction.list`. Shows, labels and
+exports that one from now on; the labels of the one before are saved, and
+the undo history is cleared. Problems: `reconstruction.not_found`,
+`project.jobs_running`.
+
+### `reconstruction.rename`
+`{survey, reconstruction, name}` → as `reconstruction.list`.
+
+### `reconstruction.delete`
+`{survey, reconstruction}` → `{freed_bytes, reconstructions, active}`.
+Deletes it and the products no other Reconstruction uses. Deleting the
+active one activates its parent, else the newest left. Problems:
+`reconstruction.not_found`, `project.jobs_running`.
 
 ### `labels.undo`
 `{survey}` → `{changed: {modality: "cloud"|"image", image} | null}`. Each
@@ -319,6 +358,16 @@ photo's labels through the cloud to the photos that overlap it. A neighbour
 needs 500 labelled pixels to be marked `auto`. Problems:
 `transfer.image_unlabelled`, `transfer.image_unsolved`, `transfer.no_cloud`.
 
+### `transfer.reconstruction`
+`{survey, from}` → `{sparse, dense?}`. A long request. Copies labels from
+Reconstruction `from` into the active one: each point takes the label of
+the nearest labelled point of the same kind of cloud there (the other kind
+when that has none), within three times its spacing. Merged as one
+undoable edit; the counts are the points labelled. The two must share
+their SfM product, or both be aligned. Problems: `reconstruction.not_found`,
+`transfer.same_reconstruction`, `transfer.not_comparable`,
+`transfer.cloud_unlabelled`.
+
 ### `model.spec`
 → `{spec, training_size, problem}`: the U-Net settings, the size it trains
 at for this Project's photos, and why that size won't work (or null).
@@ -442,14 +491,17 @@ the Job, and copies the `out` dirs back before `jobs.finish`. Every path in
 `args` under the Project root lies inside an `in` or an `out` dir. `log`
 stays where it is: the core writes it.
 
-With `S` = `surveys/<survey>` and the active Reconstruction's products
-(running a step again replaces its product; a new one is `<slot>-1`):
+With `S` = `surveys/<survey>`: each step writes a new product folder
+(`<slot>-<n>`, the next free number). Finishing it fills the active
+Reconstruction's slot when that is empty; otherwise it makes a child of
+the active Reconstruction that shares the earlier steps' products (and
+their labels and Alignment) and makes it active. Nothing is overwritten.
 
 | Kind | `in` | `out` |
 |---|---|---|
-| `sfm` | `S/images`, `S/products/sfm-n` | `S/products/sfm-n` |
-| `mvs` | `S/images`, `S/products/sfm-n`, `S/products/mvs-n` | `S/products/mvs-n` |
-| `mesh` | `S/products/mvs-n` | `S/products/mesh-n` |
+| `sfm` | `S/images` | `S/products/sfm-<new>` |
+| `mvs` | `S/images`, the active `S/products/sfm-n` | `S/products/mvs-<new>` |
+| `mesh` | the active `S/products/mvs-n` | `S/products/mesh-<new>` |
 
 Until `jobs.finish`, a second plan of the same group is refused (Problem:
 `job.busy`), and so is opening or closing a Project

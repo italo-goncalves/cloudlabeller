@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,24 +143,188 @@ class Survey:
         rec = self.active
         return rec.labels_dir / "mesh_nn.npz" if rec is not None else None
 
-    def output_dir(self, slot: str) -> Path:
-        """Where a step writes: the active Reconstruction's product for
-        ``slot`` (running a step again replaces it), else a new product."""
-        current = self.product_dir(slot)
-        if current is not None:
-            return current
+    def new_product_dir(self, slot: str) -> Path:
+        """A fresh product folder for ``slot`` (``sfm-3``); not made yet."""
         taken = [p.name for p in self.products_dir.iterdir()] if self.products_dir.exists() else []
         return self.products_dir / next_id(slot, taken, sep="-")
+
+    def plan_step(self, slot: str) -> tuple[Path, bool]:
+        """Where a step writes, and whether finishing it makes a new
+        Reconstruction. A step whose slot the active Reconstruction hasn't
+        filled fills it; one it has filled makes a child that shares the
+        earlier steps' products (nothing is overwritten, ADR-0005)."""
+        rec = self.active
+        fork = rec is not None and rec.products.get(slot) is not None
+        return self.new_product_dir(slot), fork
+
+    def _new_reconstruction(self, parent: str | None = None) -> Reconstruction:
+        rid = next_id("r", self.reconstructions)
+        rec = Reconstruction(id=rid, dir=self.reconstructions_dir / rid,
+                             name=f"Reconstruction {rid[1:]}", parent=parent)
+        self.reconstructions[rid] = rec
+        return rec
 
     def ensure_active(self) -> Reconstruction:
         """The active Reconstruction, made (empty) when there is none."""
         if self.active is None:
-            rid = next_id("r", self.reconstructions)
-            rec = Reconstruction(id=rid, dir=self.reconstructions_dir / rid,
-                                 name=f"Reconstruction {rid[1:]}")
-            self.reconstructions[rid] = rec
-            self.active_id = rid
+            self.active_id = self._new_reconstruction().id
         return self.active
+
+    def fork(self, slot: str) -> Reconstruction:
+        """A child of the active Reconstruction sharing the products of the
+        steps before ``slot`` (and their labels, kept points and Alignment),
+        made active. Re-running SfM shares nothing: a new solve is a new
+        frame."""
+        from cloudlabeller.core.reconstruction import SLOTS
+
+        parent = self.active
+        shared = SLOTS[:SLOTS.index(slot)]
+        child = self._new_reconstruction(parent.id if parent is not None and shared else None)
+        if parent is not None:
+            for s in shared:
+                child.products[s] = parent.products.get(s)
+            if "sfm" in shared:
+                child.alignment = parent.alignment
+                child.save_keep(parent.load_keep())
+            files = {"sfm": "sparse.npy", "mvs": "dense.npy"}
+            self.save()                              # the parent's labels, as they are
+            for s in shared:
+                src = parent.labels_dir / files.get(s, "")
+                if s in files and src.exists():
+                    child.labels_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(src, child.labels_dir / files[s])
+        child.save()
+        self.activate(child.id, save=False)
+        return child
+
+    def activate(self, rid: str, save: bool = True) -> None:
+        """Make ``rid`` the active Reconstruction: the current one's labels
+        are saved, the new one's geometry and labels loaded. The undo
+        history is cleared (it refers to the other one's arrays)."""
+        if rid not in self.reconstructions:
+            raise KeyError(rid)
+        if save:
+            self.save()
+        self.active_id = rid
+        lb = self.labels
+        lb.cloud_labels = lb.dense_cloud_labels = lb.mesh_labels = None
+        lb._undo_stack.clear()
+        lb._redo_stack.clear()
+        rec = self.active
+        for attr, fname in (("cloud_labels", "sparse.npy"),
+                            ("dense_cloud_labels", "dense.npy"),
+                            ("mesh_labels", "mesh.npy")):
+            if (rec.labels_dir / fname).exists():
+                setattr(lb, attr, np.load(rec.labels_dir / fname))
+        self.load_products()
+        self.save_manifest()
+
+    # -- sizes and deleting ----------------------------------------------------------
+    def used_products(self, but: str | None = None) -> set[str]:
+        """The product folders some Reconstruction (other than ``but``) uses."""
+        return {pid for rid, rec in self.reconstructions.items() if rid != but
+                for pid in rec.products.values() if pid}
+
+    def freed_by_deleting(self, rid: str) -> int:
+        """Bytes deleting Reconstruction ``rid`` would free: its own folder
+        and the products no other Reconstruction uses."""
+        rec = self.reconstructions[rid]
+        others = self.used_products(but=rid)
+        total = dir_size(rec.dir)
+        for pid in set(rec.products.values()) - others - {None}:
+            total += dir_size(self.products_dir / pid)
+        return total
+
+    def delete_reconstruction(self, rid: str) -> int:
+        """Delete Reconstruction ``rid`` and the products only it used;
+        returns the bytes freed. Deleting the active one activates its
+        parent, else the newest left, else none."""
+        rec = self.reconstructions[rid]
+        freed = self.freed_by_deleting(rid)
+        others = self.used_products(but=rid)
+        was_active = rid == self.active_id
+        del self.reconstructions[rid]
+        for pid in set(rec.products.values()) - others - {None}:
+            shutil.rmtree(self.products_dir / pid, ignore_errors=True)
+        shutil.rmtree(rec.dir, ignore_errors=True)
+        for other in self.reconstructions.values():
+            if other.parent == rid:
+                other.parent = rec.parent
+        if was_active:
+            nxt = rec.parent if rec.parent in self.reconstructions else (
+                max(self.reconstructions, key=lambda r: int(r[1:])) if self.reconstructions
+                else None)
+            self.active_id = None
+            if nxt is not None:
+                self.activate(nxt, save=False)
+            else:
+                lb = self.labels
+                lb.cloud_labels = lb.dense_cloud_labels = lb.mesh_labels = None
+                self.load_products()
+        self.save_manifest()
+        return freed
+
+    def reconstruction_rows(self) -> list[dict]:
+        """Each Reconstruction as the window lists it, oldest first."""
+        rows = []
+        for rid in sorted(self.reconstructions, key=lambda r: int(r[1:])):
+            rec = self.reconstructions[rid]
+            rows.append({"id": rid, "name": rec.name, "parent": rec.parent,
+                         "products": dict(rec.products), "aligned": rec.aligned,
+                         "created": rec.created, "active": rid == self.active_id,
+                         "freed_bytes": self.freed_by_deleting(rid)})
+        return rows
+
+    # -- a look without loading -------------------------------------------------------
+    def peek_images(self) -> list[tuple[str, bool]]:
+        """(name, solved) of each photo, as :meth:`load_products` would list
+        them, reading only the photo folder and ``cameras.json``."""
+        if self.loaded:
+            return [(r.name, r.camera is not None) for r in self.dataset.images]
+        from cloudlabeller.core.images import list_image_files
+
+        solved: set[str] = set()
+        if self.sfm_dir and (self.sfm_dir / "cameras.json").exists():
+            for c in json.loads((self.sfm_dir / "cameras.json").read_text(encoding="utf-8")):
+                solved.add(c.get("name") or Path(c.get("path", "")).name)
+        store = ({Path(n).name for n in list_image_files(self.images_dir)}
+                 if self.images_dir.exists() else set())
+        return [(n, n in solved) for n in sorted(store | solved)]
+
+    def peek_resolution(self) -> tuple[int, int] | None:
+        """The photos' size without loading: cached, else the first solved
+        camera's."""
+        if self.loaded:
+            return self.source_resolution(cache=False)
+        cached = self.settings.get("source_resolution")
+        if cached:
+            return (int(cached[0]), int(cached[1]))
+        if self.sfm_dir and (self.sfm_dir / "cameras.json").exists():
+            cams = json.loads((self.sfm_dir / "cameras.json").read_text(encoding="utf-8"))
+            if cams:
+                return (int(cams[0]["width"]), int(cams[0]["height"]))
+        return None
+
+    def peek_counts(self) -> dict:
+        """Point and vertex counts of the active Reconstruction, read from
+        the files' headers when the Survey isn't loaded."""
+        if self.loaded:
+            ds = self.dataset
+            return {"sparse": ds.cloud.n_points if ds.cloud is not None else None,
+                    "dense": ds.dense_cloud.n_points if ds.dense_cloud is not None else None,
+                    "mesh": ({"vertices": len(ds.mesh.vertices), "faces": len(ds.mesh.faces)}
+                             if ds.mesh is not None else None)}
+        sparse = npz_rows(self.sfm_dir / CLOUD_FILE, "xyz") if self.sfm_dir else None
+        if sparse is not None and self.active is not None:
+            keep = self.active.load_keep()
+            if keep is not None and len(keep) == sparse:
+                sparse = int(keep.sum())
+        dense = npz_rows(self.dense_cloud_path, "xyz") if self.dense_cloud_path else None
+        mesh = None
+        if self.mesh_path:
+            v, f = npz_rows(self.mesh_path, "vertices"), npz_rows(self.mesh_path, "faces")
+            mesh = {"vertices": v, "faces": f} if v is not None else None
+        return {"sparse": sparse, "dense": dense, "mesh": mesh}
 
     # -- the frame ------------------------------------------------------------------
     @property
@@ -497,4 +663,31 @@ class Survey:
         return rows
 
 
-__all__ = ["Survey", "SLOTS", "next_id", "now_iso"]
+def dir_size(path: Path) -> int:
+    """Bytes in the files under ``path`` (0 when it doesn't exist)."""
+    path = Path(path)
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def npz_rows(path: Path | None, key: str) -> int | None:
+    """The first dimension of array ``key`` in an ``.npz``, read from its
+    header without loading it; None when the file or array isn't there."""
+    import numpy.lib.format as fmt
+
+    if path is None or not Path(path).exists():
+        return None
+    try:
+        with zipfile.ZipFile(path) as z, z.open(f"{key}.npy") as f:
+            version = fmt.read_magic(f)
+            read = fmt.read_array_header_1_0 if version == (1, 0) else fmt.read_array_header_2_0
+            shape, _, _ = read(f)
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return None
+    return int(shape[0]) if shape else 0
+
+
+__all__ = ["Survey", "SLOTS", "dir_size", "next_id", "now_iso", "npz_rows"]

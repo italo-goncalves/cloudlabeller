@@ -21,6 +21,7 @@ const survey = (id: string, over: Partial<SurveyState> = {}): SurveyState => ({
   images: [{ name: `${id}.jpg`, status: "none", solved: true, user_mask: false }],
   reconstruction: "current",
   active: "r1",
+  reconstructions: 1,
   aligned: false,
   sparse: 10,
   dense: null,

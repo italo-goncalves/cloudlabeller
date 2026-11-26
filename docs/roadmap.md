@@ -29,7 +29,9 @@ Steps, in order (step 4 can run beside 2 and 3):
 1. **Layout v2, Surveys under the hood, the stored Alignment.** Built:
    one Survey per Project for now, a 0.3.0 Project migrated on open,
    georeferencing and reprojection as stored transforms.
-2. Several Surveys and Reconstructions, in the window.
+2. **Several Surveys and Reconstructions, in the window.** Built: a step
+   run again makes a child Reconstruction sharing the earlier products;
+   Surveys are made, described, switched and deleted in the Dataset pane.
 3. GCPs and Marks.
 4. Tiles and the Survey picker.
 5. Docs and the release.

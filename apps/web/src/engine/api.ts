@@ -37,6 +37,8 @@ export interface SurveyState {
   reconstruction: Reconstruction;
   /** The active Reconstruction's id, null before SfM. */
   active: string | null;
+  /** How many Reconstructions the Survey has. */
+  reconstructions: number;
   /** Whether the active Reconstruction is aligned into the Project frame. */
   aligned: boolean;
   sparse: number | null;
@@ -115,6 +117,11 @@ export function view(raw: RawProjectState, survey?: string): ProjectState {
   };
 }
 
+/** Make Survey `id` the current one (the next `state` shows it). */
+export function setSurvey(id: string) {
+  current = id;
+}
+
 /** The current Survey's id, or null when no Project is open. */
 export function currentSurveyOrNull(): string | null {
   return current;
@@ -180,6 +187,68 @@ export const schemaDelete = (id: number) =>
 export const undo = () => engineCall<{ changed: Changed }>("labels.undo", sv());
 export const redo = () => engineCall<{ changed: Changed }>("labels.redo", sv());
 
+// -- Surveys and Reconstructions ------------------------------------------------
+
+export interface SurveyMeta {
+  name?: string;
+  /** `YYYY-MM-DDTHH:MM:SS`; empty clears it. */
+  timestamp?: string;
+  operator?: string;
+  camera?: string;
+  notes?: string;
+}
+
+export const surveyCreate = (meta: SurveyMeta) =>
+  engineCall<SurveyState>("survey.create", { ...meta });
+export const surveyUpdate = (survey: string, meta: SurveyMeta) =>
+  engineCall<SurveyState>("survey.update", { survey, ...meta });
+export const surveyDelete = (survey: string) =>
+  engineCall<{ freed_bytes: number; surveys: string[] }>("survey.delete", { survey });
+
+export interface ReconstructionRow {
+  id: string;
+  name: string;
+  parent: string | null;
+  products: { sfm: string | null; mvs: string | null; mesh: string | null };
+  aligned: boolean;
+  created: string;
+  active: boolean;
+  /** What deleting it would free on disk. */
+  freed_bytes: number;
+}
+export interface Reconstructions {
+  reconstructions: ReconstructionRow[];
+  active: string | null;
+}
+export const reconstructions = () => engineCall<Reconstructions>("reconstruction.list", sv());
+export const reconstructionActivate = (id: string) =>
+  engineCall<Reconstructions>("reconstruction.activate", { ...sv(), reconstruction: id });
+export const reconstructionRename = (id: string, name: string) =>
+  engineCall<Reconstructions>("reconstruction.rename", { ...sv(), reconstruction: id, name });
+export const reconstructionDelete = (id: string) =>
+  engineCall<Reconstructions & { freed_bytes: number }>("reconstruction.delete", {
+    ...sv(),
+    reconstruction: id,
+  });
+export const transferReconstruction = (from: string, ticket: string) =>
+  engineCall<{ sparse: number; dense?: number }>(
+    "transfer.reconstruction",
+    { ...sv(), from },
+    ticket,
+  );
+
+/** Bytes as the window says them: "1.2 GB". */
+export function sizeText(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
 // -- photos -------------------------------------------------------------------
 
 export interface ImageInfo {
@@ -207,10 +276,18 @@ export async function imageMask(name: string): Promise<Mask> {
   return { source: r.source, mask: (await load(r.mask)) as Int32Array, width: w, height: h };
 }
 
-export async function saveMask(name: string, mask: Int32Array, width: number, height: number) {
+/** Store a photo's mask; `survey` is the one it was painted in (default:
+ * the current one), so a save queued before a switch lands where it belongs. */
+export async function saveMask(
+  name: string,
+  mask: Int32Array,
+  width: number,
+  height: number,
+  survey: string = currentSurvey(),
+) {
   const ref = await writeArray(fresh("mask"), mask, "int32", [height, width]);
   return engineCall<{ changed_pixels: number; status: Status }>("image.save_mask", {
-    ...sv(),
+    survey,
     name,
     mask: ref,
   });

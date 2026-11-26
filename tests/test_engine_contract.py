@@ -730,10 +730,10 @@ def test_plans_name_the_dirs_to_stage(tmp_path, monkeypatch):
     project = engine.project
     root = Path(project.root)
     s = "surveys/s1"
-    expected = {"sfm": {"in": [f"{s}/images", f"{s}/products/sfm-1"],
-                        "out": [f"{s}/products/sfm-1"]},
-                "mvs": {"in": [f"{s}/images", f"{s}/products/sfm-1", f"{s}/products/mvs-1"],
-                        "out": [f"{s}/products/mvs-1"]},
+    # every step writes a new product folder (ADR-0005)
+    expected = {"sfm": {"in": [f"{s}/images"], "out": [f"{s}/products/sfm-2"]},
+                "mvs": {"in": [f"{s}/images", f"{s}/products/sfm-1"],
+                        "out": [f"{s}/products/mvs-2"]},
                 "mesh": {"in": [f"{s}/products/mvs-1"], "out": [f"{s}/products/mesh-1"]}}
     for name, stage in expected.items():
         kind = KINDS[name]
@@ -755,8 +755,8 @@ def test_plan_over_the_pipe_carries_stage(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     plan = pipe.call("jobs.plan", {"kind": "sfm", "options": {"survey": "s1"}})
-    assert plan["stage"] == {"in": ["surveys/s1/images", "surveys/s1/products/sfm-1"],
-                             "out": ["surveys/s1/products/sfm-1"]}
+    assert plan["stage"] == {"in": ["surveys/s1/images"],
+                             "out": ["surveys/s1/products/sfm-2"]}
     pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 1})
     _fake_model(root)
     plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})

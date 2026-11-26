@@ -6,7 +6,7 @@
 // is under way, and saved whole, one undoable edit at a time.
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
-import { imageInfo, imageMask, saveMask } from "../engine/api";
+import { currentSurvey, imageInfo, imageMask, saveMask } from "../engine/api";
 import { useApp } from "../state/app";
 
 export interface MaskEditor {
@@ -92,10 +92,11 @@ export function useMask(name: string | null): MaskEditor {
       if (!name || !s) return Promise.resolve();
       // A copy: the next stroke edits the working mask while this one is written.
       const copy = m.slice();
+      const survey = currentSurvey();
       pending.current++;
       const run = queue.current.then(async () => {
         try {
-          await saveMask(name, copy, s.w, s.h);
+          await saveMask(name, copy, s.w, s.h, survey);
         } catch (e) {
           fail(e);
         } finally {

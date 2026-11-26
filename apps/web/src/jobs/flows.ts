@@ -8,6 +8,7 @@
 
 import { enginePath, isProblem, keepAwake, pickFolder } from "../desktop/bridge";
 import * as api from "../engine/api";
+import { createSurvey } from "../shell/surveys";
 import type { App, JobOutcome } from "../state/app";
 import { type PipelineOptions, runPipeline, stages } from "./pipeline";
 
@@ -47,6 +48,20 @@ export async function job(
 export async function importPhotos(app: App): Promise<void> {
   const folder = await pickFolder("Choose a folder of photos");
   if (!folder) return;
+  const project = app.state.project;
+  const current = project?.surveys.find((s) => s.id === project.survey);
+  if (current && current.images.length > 0) {
+    const answer = await app.choose(
+      "Add photos",
+      `Add these photos to ${current.name}, or start a new Survey with them (another flight or day)?`,
+      ["New Survey", `Add to ${current.name}`],
+    );
+    if (!answer) return;
+    if (answer === "New Survey") {
+      const name = folder.split(/[/]/).filter(Boolean).pop() ?? "";
+      if ((await createSurvey(app, { name })) === null) return;
+    }
+  }
   try {
     const where = await enginePath(folder);
     const { conflicts } = await api.ingestConflicts(where);

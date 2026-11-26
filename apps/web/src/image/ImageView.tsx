@@ -48,7 +48,7 @@ export function ImageView() {
   const schema = project?.schema ?? [];
   const row = project?.images.find((i) => i.name === name);
 
-  const photo = usePhoto(name);
+  const photo = usePhoto(name, project?.survey ?? null);
   const editor = useMask(name);
   const { size } = editor;
   const overlay = useOverlay(editor, schema);

@@ -85,23 +85,34 @@ def _survey(engine: Engine, params: dict):
 
 
 def survey_state(survey) -> dict:
-    ds, lb = survey.dataset, survey.labels
+    """A Survey as ``project.state`` reports it. A Survey not loaded yet is
+    described from its files, without loading its clouds."""
+    lb = survey.labels
     rec = survey.active
+    if survey.loaded:
+        ds = survey.dataset
+        images = [{"name": r.name, "status": lb.status_of(r.name),
+                   "solved": r.camera is not None, "user_mask": r.name in lb.image_masks}
+                  for r in ds.images]
+    else:
+        masks = ({f.stem for f in survey.masks_dir.glob("*.npy")}
+                 if survey.masks_dir.exists() else set())
+        images = [{"name": name, "status": lb.status_of(name), "solved": solved,
+                   "user_mask": name in masks and lb.status_of(name) == "user"}
+                  for name, solved in survey.peek_images()]
+    counts = survey.peek_counts()
+    outdated = survey.settings.get("reconstruction_outdated")
     return {
         "id": survey.id, "name": survey.name, "timestamp": survey.timestamp,
         "operator": survey.operator, "camera": survey.camera, "notes": survey.notes,
-        "images": [{"name": r.name, "status": lb.status_of(r.name),
-                    "solved": r.camera is not None,
-                    "user_mask": r.name in lb.image_masks}
-                   for r in ds.images],
-        "reconstruction": survey.reconstruction_status(),
+        "images": images,
+        "reconstruction": ("none" if counts["sparse"] is None
+                           else "outdated" if outdated else "current"),
         "active": rec.id if rec is not None else None,
+        "reconstructions": len(survey.reconstructions),
         "aligned": survey.aligned,
-        "sparse": ds.cloud.n_points if ds.cloud is not None else None,
-        "dense": ds.dense_cloud.n_points if ds.dense_cloud is not None else None,
-        "mesh": ({"vertices": len(ds.mesh.vertices), "faces": len(ds.mesh.faces)}
-                 if ds.mesh is not None else None),
-        "source_resolution": survey.source_resolution(cache=False),
+        **counts,
+        "source_resolution": survey.peek_resolution(),
         "can_undo": lb.can_undo(),
         "can_redo": lb.can_redo(),
     }
@@ -118,7 +129,7 @@ def project_state(engine: Engine) -> dict:
     return {
         "root": str(project.root),
         "schema": _schema(project),
-        "surveys": [survey_state(project.survey(sid)) for sid in project.surveys],
+        "surveys": [survey_state(survey) for survey in project.surveys.values()],
         "georeferenced": project.frame,
         "dirty": engine.dirty,
     }
@@ -786,3 +797,4 @@ def models_delete(engine: Engine, params: dict) -> dict:
 # own modules; importing them registers them.
 from cloudlabeller.engine import geo as _geo  # noqa: F401
 from cloudlabeller.engine import scene as _scene  # noqa: F401
+from cloudlabeller.engine import surveys as _surveys  # noqa: F401

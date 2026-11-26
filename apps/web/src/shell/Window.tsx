@@ -77,6 +77,13 @@ function useMenus(): Menu[] {
             run: () => void flows.importPhotos(app),
             disabled: !has || !idle,
           },
+          {
+            label: "New Survey…",
+            run: () =>
+              app.dispatch({ type: "dialog", dialog: { name: "survey", data: { create: true } } }),
+            disabled: !has || !idle,
+          },
+          { label: "Survey Details…", run: open("survey"), disabled: !has },
           { label: "Project Info…", run: open("project_info"), disabled: !has },
           "separator",
           { label: "Export Point Cloud…", run: open("export_cloud"), disabled: !cloud && !dense },
@@ -95,6 +102,13 @@ function useMenus(): Menu[] {
           { label: "Create Mesh…", run: open("mesh"), disabled: !dense || !idle },
           "separator",
           { label: "Clean Sparse Cloud…", run: open("clean"), disabled: !cloud || !idle },
+          {
+            label: "Reconstructions…",
+            run: open("reconstructions"),
+            disabled:
+              !has ||
+              !project?.surveys.some((s) => s.id === project.survey && s.reconstructions > 0),
+          },
           { label: "Download COLMAP…", run: open("colmap"), disabled: !idle },
         ],
       },
