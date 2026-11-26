@@ -511,8 +511,8 @@ def test_job_arguments_match_the_clis(tmp_path):
     options = {"ingest": {"survey": "s1", "folder": str(tmp_path)},
                "sfm": {"survey": "s1", "gpu": True},
                "georef": {"survey": "s1"}, "reproject": {"epsg": 32723, "orthometric": True},
-               # resume: the tiny test photos are too small for a fresh spec
-               "train": {"name": "m1", "epochs": 3, "include_auto": True, "resume": True},
+               "train": {"name": "m1", "epochs": 3, "include_auto": True, "resume": True,
+                         "surveys": ["s1"]},
                "geoid": {"epsg": 31982}}
     if sys.platform == "win32":
         options["colmap"] = {"variant": "cpu"}
@@ -541,9 +541,15 @@ def test_job_arguments_match_the_clis(tmp_path):
                                 {"survey": "s1", "gpu": True}).gpu is True
     assert KINDS["sfm"].prepare(engine, engine.project, {"survey": "s1"}).gpu is False
     assert KINDS["train"].prepare(engine, engine.project, {"resume": True}).gpu is True
+    from cloudlabeller.ml.model_spec import ModelSpec
+
+    engine.project.set_model_spec(ModelSpec(tile_size=1000, shrink=2))
     with pytest.raises(Exception) as err:                  # a fresh spec is checked
         KINDS["train"].prepare(engine, engine.project, {})
     assert getattr(err.value, "code", None) == "job.train.bad_spec"
+    with pytest.raises(Exception) as err:
+        KINDS["train"].prepare(engine, engine.project, {"surveys": ["s9"]})
+    assert getattr(err.value, "code", None) == "survey.not_found"
 
 
 def test_native_libraries_load_on_worker_threads(tmp_path):
@@ -613,12 +619,14 @@ def test_cancel_a_pending_request(inproc, monkeypatch):
     assert inproc.call("engine.cancel", {"id": "s"}) == {"cancelled": False}
 
 
-def _fake_model(root: Path, name: str = "m1", n_classes: int = 2) -> None:
+def _fake_model(root: Path, name: str = "m1", n_classes: int = 2, tiled: bool = True) -> None:
     """A saved model as ``models.list`` sees one (no real weights needed)."""
     d = root / "ml" / "models" / name
     d.mkdir(parents=True)
     (d / "manifest.json").write_text(json.dumps(
-        {"name": name, "n_classes": n_classes, "created": "2026-11-25"}), encoding="utf-8")
+        {"name": name, "n_classes": n_classes, "created": "2026-11-25",
+         "spec": {"tile_size": 1024, "shrink": 2} if tiled else {"resolution_divisor": 10}}),
+        encoding="utf-8")
     (d / "model.weights.h5").write_bytes(b"")
 
 

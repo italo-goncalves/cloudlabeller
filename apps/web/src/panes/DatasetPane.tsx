@@ -120,6 +120,14 @@ export function DatasetPane() {
                 <span className={cn("min-w-0 flex-1 truncate", !im.solved && "text-fg-faint")}>
                   {im.name}
                 </span>
+                {im.uncertainty != null && (
+                  <span
+                    className="shrink-0 font-mono text-table text-fg-muted"
+                    title="How unsure the model's prediction is, on average"
+                  >
+                    {`${Math.round(im.uncertainty * 100)}%`}
+                  </span>
+                )}
                 {p && <span className="shrink-0 font-mono text-table text-fg-faint">{fmt(p)}</span>}
               </button>
             </li>

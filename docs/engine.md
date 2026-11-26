@@ -137,14 +137,16 @@ version doesn't read).
 → `{root, schema, surveys, georeferenced, dirty}`. `georeferenced` is the
 Project frame (`{frame, origin_lla, origin_convention, crs?}`), or null.
 Each Survey in `surveys`, in the Project's order, is `{id, name, timestamp,
-operator, camera, notes, images: [{name, status, solved, user_mask}],
+operator, camera, notes, images: [{name, status, solved, user_mask,
+uncertainty}],
 reconstruction, active, reconstructions, aligned, sparse, dense, mesh, source_resolution,
 can_undo, can_redo}`.
 
 - `active` is the active Reconstruction's id, null before SfM, and
   `reconstructions` how many the Survey has. `aligned`: the active one has
   an Alignment into the Project frame.
-- `status` is `user`, `auto`, `ml` or `none`.
+- `status` is `user`, `auto`, `ml` or `none`. `uncertainty` is an `ml`
+  photo's mean Uncertainty (0..1), else null.
 - `reconstruction` is `none`, `outdated` or `current`.
 - `sparse` and `dense` are point counts, or null. `mesh` is
   `{vertices, faces}`, or null.
@@ -233,6 +235,14 @@ the whole mask, seeded from the overlay it showed. `mask` is an inbound
 `{survey, name}` → `{path, width, height}`. `path` is the photo's file, relative to
 the Project root with `/` separators. The size is the solved camera's, else
 the file's. Problem: `image.not_found`.
+
+### `image.uncertainty`
+`{survey, name}` → `{uncertainty, mean}`: how unsure the U-Net's
+prediction of the photo is at each pixel, 0 (sure) to 1 (as unsure as
+can be: the entropy of its class probabilities over the most it can be),
+as a `float32` Array file `[h, w]` at the prediction's size (the photo's
+divided by the model's shrink factor), and its mean. Both are null when
+the photo has no prediction (or one from before 0.4.0).
 
 ### `cloud.points`
 `{survey, cloud?: "sparse"|"dense"}` → `{cloud, n_points, xyz, rgb}`. `xyz`
@@ -448,14 +458,23 @@ The Alignment is stored with `source: "gcp"`. Problems: `align.no_gcps`,
 `project.jobs_running`.
 
 ### `model.spec`
-→ `{spec, training_size, problem}`: the U-Net settings, the size it trains
-at for this Project's photos, and why that size won't work (or null).
+→ `{spec, training_size, problem}`: the U-Net settings, what the network
+sees of each Tile (`[n, n]`, the Tile size over the shrink factor), and why
+the settings can't build a network (or null). `spec` is `{tile_size,
+shrink, overlap, min_labelled, channels, blocks, dropout, filter_size}`:
+Tiles of `tile_size` photo pixels on a grid whose neighbours share
+`overlap` of a Tile, shrunk by `shrink` (1, 2, 4 or 8); training skips
+Tiles less than `min_labelled` labelled.
 
 ### `model.set_spec`
 `{spec}` → as `model.spec`.
 
 ### `models.list`
-→ `{models}`: the saved models' manifests, newest first.
+→ `{models}`: the saved models' manifests, newest first: `{name, created,
+spec, n_classes, input_size, class_names, metrics, history, surveys,
+tiled}`. `history` has each metric per epoch; `surveys` the Surveys it was
+trained on. `tiled` is false for a model trained on whole photos (before
+0.4.0): it can't predict or be continued.
 
 ### `models.delete`
 `{name}` → `{models}`. Deletes a saved model, then lists the rest.
@@ -596,8 +615,8 @@ kinds marked ‡ work on one Survey and need the option `survey`:
 | `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced`, `job.reproject.no_fit` † |
 | `mvs` ‡ | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
 | `mesh` ‡ | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
-| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume` (pools every Survey's photos) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch` |
-| `predict` | ml | yes | `model` (every Survey's photos not user-labelled; its result is `{predicted: [{survey, name}]}`) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing` |
+| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume`, `surveys` (default: every Survey; their photos are pooled, cut into Tiles, and validated on whole photos held out) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch`, `job.train.legacy_model`, `survey.not_found` |
+| `predict` | ml | yes | `model`, `surveys` (default: every Survey; the photos not user-labelled; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `survey.not_found` |
 | `geoid` | download | no | `epsg` | |
 | `colmap` | download | no | `variant` (`cuda` or `cpu`) | `job.colmap.unsupported` |
 

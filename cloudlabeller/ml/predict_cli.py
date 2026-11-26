@@ -58,6 +58,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="predict_cli")
     p.add_argument("project_root")
     p.add_argument("--model", required=True, help="saved model name (ml/models/<name>)")
+    p.add_argument("--surveys", default=None,
+                   help="comma-separated Survey ids to predict (default: every one)")
     return p.parse_args(argv[1:])
 
 
@@ -81,13 +83,25 @@ def main(argv: list[str]) -> int:
     if manifest is None:
         log.error("model %r not found under %s", args.model, proj.ml_dir / "models")
         return 2
+    from cloudlabeller.ml.model_spec import ModelSpec, is_tiled
+
+    if not is_tiled(manifest):
+        log.error("model %r was trained on whole photos (before Tiles): retrain it",
+                  manifest["name"])
+        return 2
+    spec = ModelSpec.from_dict(manifest.get("spec"))
+    n_classes = len(proj.schema.classes)
+    wanted = [s for s in (args.surveys or "").split(",") if s] or list(proj.surveys)
     if manifest["n_classes"] != len(proj.schema.classes):
         log.error("model has %d classes but the project has %d — retrain first",
                   manifest["n_classes"], len(proj.schema.classes))
         return 2
 
     jobs = []                                      # (survey, [names]) per Survey
-    for sid in proj.surveys:
+    for sid in wanted:
+        if sid not in proj.surveys:
+            log.error("no Survey %s in the project", sid)
+            return 2
         survey = proj.survey(sid)
         names = [r.name for r in survey.dataset.images
                  if survey.labels.status_of(r.name) != "user"]   # red + yellow only
@@ -107,10 +121,11 @@ def main(argv: list[str]) -> int:
         start, share = done, len(names) / total
         written = inference.predict_all(
             model, names, lambda n, rec=records: _load_rgb(rec[n]),
-            survey.predictions_dir,
+            survey.predictions_dir, spec, n_classes, manifest["name"],
             progress=lambda f, m="", s0=start, sh=share:
                 progress(0.05 + 0.95 * (s0 / total + sh * f), m))
-        predicted += [{"survey": survey.id, "name": n} for n in sorted(written)]
+        predicted += [{"survey": survey.id, "name": n, "uncertainty": written[n]}
+                      for n in sorted(written)]
         done += len(names)
     print("RESULT " + json.dumps({"predicted": predicted}), flush=True)
     return 0

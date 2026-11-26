@@ -412,10 +412,9 @@ class Survey:
         (H, W) int32 or None. The upscale is a per-class one-hot resample
         (:func:`~cloudlabeller.core.raster.resample_label_mask`): smooth
         class boundaries, never a spurious in-between class."""
-        path = self.predictions_dir / f"{name}.npy"
-        if not path.exists():
+        small = self._prediction(name, "labels")
+        if small is None:
             return None
-        small = np.load(path)
         wh = self.source_resolution()
         record = self.dataset.image_by_name(name)
         if record is not None and record.camera is not None:
@@ -425,6 +424,24 @@ class Survey:
         from cloudlabeller.core.raster import resample_label_mask
 
         return resample_label_mask(small, (int(wh[0]), int(wh[1]))).astype(np.int32)
+
+    def _prediction(self, name: str, key: str):
+        """An array of ``name``'s stored prediction (``labels`` or
+        ``uncertainty``), or None; 0.3.0 predictions (``.npy``) are labels only."""
+        npz = self.predictions_dir / f"{name}.npz"
+        if npz.exists():
+            with np.load(npz) as data:
+                return data[key] if key in data else None
+        npy = self.predictions_dir / f"{name}.npy"
+        if key == "labels" and npy.exists():
+            return np.load(npy)
+        return None
+
+    def prediction_uncertainty(self, name: str):
+        """``name``'s Uncertainty (0 sure .. 1 unsure) at the prediction's
+        size, as float32, or None."""
+        u = self._prediction(name, "uncertainty")
+        return None if u is None else u.astype(np.float32)
 
     def source_resolution(self, cache: bool = True) -> tuple[int, int] | None:
         """(width, height) of the Survey's photos: from a solved camera, else

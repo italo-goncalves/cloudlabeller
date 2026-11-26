@@ -23,6 +23,8 @@ export interface ImageRow {
   status: Status;
   solved: boolean;
   user_mask: boolean;
+  /** The U-Net prediction's mean Uncertainty (0 sure .. 1 unsure), for `ml` photos. */
+  uncertainty?: number | null;
 }
 
 /** One Survey as `project.state` reports it. */
@@ -383,6 +385,24 @@ export async function saveMask(
   });
 }
 
+/** How unsure the prediction is per pixel (0..1), at the prediction's size; null: none. */
+export async function imageUncertainty(
+  name: string,
+): Promise<{ values: Float32Array; width: number; height: number; mean: number } | null> {
+  const r = await engineCall<{ uncertainty: ArrayRef | null; mean: number | null }>(
+    "image.uncertainty",
+    { ...sv(), name },
+  );
+  if (!r.uncertainty) return null;
+  const [h, w] = r.uncertainty.shape as [number, number];
+  return {
+    values: (await load(r.uncertainty)) as Float32Array,
+    width: w,
+    height: h,
+    mean: r.mean ?? 0,
+  };
+}
+
 // -- clouds and the mesh ------------------------------------------------------
 
 export interface CloudView {
@@ -546,7 +566,14 @@ export const propagate = (name: string, ticket: string) =>
 // -- the model ----------------------------------------------------------------
 
 export interface ModelSpec {
-  resolution_divisor: number;
+  /** Tile side, in photo pixels. */
+  tile_size: number;
+  /** The Tile is shrunk by this before the network (1, 2, 4 or 8). */
+  shrink: number;
+  /** Of a Tile, between neighbours on the grid. */
+  overlap: number;
+  /** A training Tile needs at least this fraction labelled. */
+  min_labelled: number;
   /** Channels in the first U-Net layer. */
   channels: number;
   blocks: number;
@@ -565,7 +592,13 @@ export const setModelSpec = (spec: ModelSpec) =>
     { spec },
   );
 
-export type ModelManifest = Record<string, unknown> & { name: string };
+export type ModelManifest = Record<string, unknown> & {
+  name: string;
+  spec?: Partial<ModelSpec>;
+  /** Trained on Tiles (0.4.0); older models must be retrained. */
+  tiled: boolean;
+  surveys?: string[];
+};
 export const models = () => engineCall<{ models: ModelManifest[] }>("models.list");
 export const deleteModel = (name: string) =>
   engineCall<{ deleted: string }>("models.delete", { name });

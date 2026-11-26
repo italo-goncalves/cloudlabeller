@@ -8,7 +8,14 @@
 
 import { cn } from "@geokit/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { markDelete, markPhoto, marksPhoto, type PhotoMarks, propagate } from "../engine/api";
+import {
+  imageUncertainty,
+  markDelete,
+  markPhoto,
+  marksPhoto,
+  type PhotoMarks,
+  propagate,
+} from "../engine/api";
 import { useGcps } from "../panes/GcpPanel";
 import { useApp } from "../state/app";
 import type { ImageTool } from "../state/store";
@@ -55,6 +62,37 @@ export function ImageView() {
   const { activeGcp, gcpVersion } = state;
   const gcpNames = new Map((useGcps()?.gcps ?? []).map((g) => [g.id, g.name]));
   const [gcpMarks, setGcpMarks] = useState<PhotoMarks>({ marks: [], hints: [] });
+  // the U-Net's Uncertainty over the photo, drawn on its own canvas
+  const [showUnsure, setShowUnsure] = useState(false);
+  const unsureCanvas = useRef<HTMLCanvasElement>(null);
+  const predicted = row?.status === "ml";
+  // biome-ignore lint/correctness/useExhaustiveDependencies: redrawn per photo and prediction
+  useEffect(() => {
+    const canvas = unsureCanvas.current;
+    if (!canvas || !showUnsure || !predicted || !name) return;
+    let live = true;
+    imageUncertainty(name)
+      .then((u) => {
+        if (!live || !u) return;
+        canvas.width = u.width;
+        canvas.height = u.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        const img = ctx.createImageData(u.width, u.height);
+        for (let i = 0; i < u.values.length; i++) {
+          const v = u.values[i] ?? 0;
+          img.data[i * 4] = 255;
+          img.data[i * 4 + 1] = Math.round(64 * (1 - v));
+          img.data[i * 4 + 2] = 255;
+          img.data[i * 4 + 3] = Math.round(230 * v);
+        }
+        ctx.putImageData(img, 0, 0);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [name, showUnsure, predicted, state.masks.version, project?.survey]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the Marks change with their version
   useEffect(() => {
     if (!name) {
@@ -306,6 +344,15 @@ export function ImageView() {
           />
         </span>
         <span className="ml-auto flex items-center gap-1">
+          <Button
+            kind={showUnsure && predicted ? "primary" : "plain"}
+            aria-pressed={showUnsure && predicted}
+            disabled={!predicted}
+            title="Show how unsure the model's prediction is: the brighter, the less sure"
+            onClick={() => setShowUnsure((v) => !v)}
+          >
+            Uncertainty
+          </Button>
           <Button disabled={!ready} onClick={importMask}>
             Import Mask…
           </Button>
@@ -359,6 +406,13 @@ export function ImageView() {
                 draggable={false}
                 className="block h-full w-full"
                 style={{ imageOrientation: "none" }}
+              />
+            )}
+            {showUnsure && predicted && (
+              <canvas
+                ref={unsureCanvas}
+                className="pointer-events-none absolute inset-0 h-full w-full"
+                style={{ imageRendering: "auto" }}
               />
             )}
             <canvas

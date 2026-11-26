@@ -121,15 +121,6 @@ class Project:
     def set_model_spec(self, spec) -> None:
         self.settings["model_spec"] = spec.to_dict()
 
-    def source_resolution(self) -> tuple[int, int] | None:
-        """The first Survey's photo size, for the whole-photo model until
-        Tiles replace it."""
-        for sid in self.surveys:
-            wh = self.survey(sid).source_resolution()
-            if wh:
-                return wh
-        return None
-
     # -- summary ---------------------------------------------------------------------
     def summary_info(self) -> list[tuple[str, str]]:
         """(label, value) rows for the Project Info dialog."""
@@ -157,9 +148,9 @@ class Project:
             rows.append(("Classes", ", ".join(f"{c.id}: {c.name}"
                                               for c in self.schema.classes)))
         spec = self.model_spec()
-        rows.append(("U-Net spec", f"1/{spec.resolution_divisor} resolution, "
-                                   f"{spec.channels} ch × {spec.blocks} blocks, "
-                                   f"filter {spec.filter_size}"))
+        rows.append(("U-Net spec", f"{spec.tile_size} px Tiles shrunk ×{spec.shrink} "
+                                   f"({spec.net_size} px), {spec.channels} ch × "
+                                   f"{spec.blocks} blocks, filter {spec.filter_size}"))
         from cloudlabeller.ml.model_store import list_models
 
         models = list_models(self.ml_dir)

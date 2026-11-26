@@ -52,12 +52,18 @@ class TrainingSet:
         self.samples = samples
 
     def split(self, val_fraction: float = 0.2, seed: int = 0) -> tuple["TrainingSet", "TrainingSet"]:
-        """Random (train, validation) split — seeded, so re-runs are stable."""
+        """Random (train, validation) split by photo — seeded, so re-runs are
+        stable. The Tiles of one photo (``name#row,col``) stay together, so
+        validation never sees a photo training saw."""
+        photos = sorted({photo_of(s.name) for s in self.samples})
         rng = np.random.default_rng(seed)
-        idx = rng.permutation(len(self.samples))
-        cut = int(len(idx) * (1 - val_fraction))
-        train = [self.samples[i] for i in idx[:cut]]
-        val = [self.samples[i] for i in idx[cut:]]
+        order = [photos[i] for i in rng.permutation(len(photos))]
+        cut = int(len(order) * (1 - val_fraction))
+        if len(order) > 1:
+            cut = min(max(cut, 1), len(order) - 1)
+        held = set(order[cut:])
+        train = [s for s in self.samples if photo_of(s.name) not in held]
+        val = [s for s in self.samples if photo_of(s.name) in held]
         return TrainingSet(train), TrainingSet(val)
 
     def augment_data(self, n_rolls=5):
@@ -104,6 +110,11 @@ class TrainingSet:
 
 #: A target pixel is kept labelled when labelled classes together cover at
 #: least this fraction of its area (below it, it becomes -1/unlabelled).
+def photo_of(sample_name: str) -> str:
+    """The photo a sample came from (a Tile is named ``photo#row,col``)."""
+    return sample_name.split("#", 1)[0]
+
+
 MASK_LABEL_FRACTION = 0.2
 
 
@@ -170,4 +181,30 @@ def build_training_set(
                 weight=projected_weight if name in projected_names else 1.0,
             )
         )
+    return TrainingSet(samples)
+
+
+def build_tile_set(
+    labelled_image_names: list[str],
+    image_loader,                       # name -> (H, W, C)
+    mask_loader,                        # name -> (H, W) int32 (user + projected)
+    spec,                               # ModelSpec: tile_size, overlap, shrink, min_labelled
+    projected_weight: float = 0.5,
+    projected_names: set[str] | None = None,
+) -> TrainingSet:
+    """The Tiles of every labelled photo, at the network's size: one sample
+    per Tile with enough labels, named ``photo#row,col``."""
+    from cloudlabeller.ml.tiles import cut
+
+    projected_names = projected_names or set()
+    samples: list[Sample] = []
+    for name in labelled_image_names:
+        image, mask = image_loader(name), mask_loader(name)
+        if mask is None:
+            continue
+        weight = projected_weight if name in projected_names else 1.0
+        for (i, j), timg, tmask in cut(image, mask, int(spec.tile_size), float(spec.overlap),
+                                       int(spec.shrink), float(spec.min_labelled)):
+            samples.append(Sample(name=f"{name}#{i},{j}", image=timg, mask=tmask,
+                                  weight=weight))
     return TrainingSet(samples)

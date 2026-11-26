@@ -60,6 +60,13 @@ def _load_rgb(path) -> np.ndarray:
         return np.asarray(im.convert("RGB"))
 
 
+def _history(manifest: dict | None, metrics: dict) -> dict:
+    """Per-epoch metrics: a resumed model's earlier epochs, then these."""
+    before = (manifest or {}).get("history") or {}
+    return {k: list(before.get(k, [])) + [float(v) for v in vals]
+            for k, vals in metrics.items()}
+
+
 def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="train_cli")
     p.add_argument("project_root")
@@ -75,6 +82,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
                         "more epochs (architecture/size come from its manifest)")
     p.add_argument("--stop-file", default=None,
                    help="halt after the current epoch when this file appears")
+    p.add_argument("--surveys", default=None,
+                   help="comma-separated Survey ids to train on (default: every one)")
     return p.parse_args(argv[1:])
 
 
@@ -96,48 +105,56 @@ def main(argv: list[str]) -> int:
 
     from cloudlabeller.core.project import Project
     from cloudlabeller.ml import model_store, trainer
-    from cloudlabeller.ml.dataset_builder import build_training_set
+    from cloudlabeller.ml.dataset_builder import build_tile_set
     from cloudlabeller.ml.unet import build_model_from_spec
 
     progress(0.0, "Opening project…")
     proj = Project.open(args.project_root)
-    source_res = proj.source_resolution()
-    if not proj.schema.classes or source_res is None:
-        log.error("project has no label classes or no images")
+    if not proj.schema.classes:
+        log.error("project has no label classes")
         return 2
     n_classes = len(proj.schema.classes)
+    wanted = [s for s in (args.surveys or "").split(",") if s] or list(proj.surveys)
+    unknown = [s for s in wanted if s not in proj.surveys]
+    if unknown:
+        log.error("no Survey %s in the project", ", ".join(unknown))
+        return 2
 
     manifest = None
     if args.resume:
-        # Continue training: architecture, spec and training size come from
-        # the saved model's manifest, NOT the current Model Settings.
+        # Continue training: architecture, spec and Tiles come from the saved
+        # model's manifest, NOT the current Model Settings.
         import json as _json
+
+        from cloudlabeller.ml.model_spec import ModelSpec, is_tiled
 
         manifest_path = model_store.model_dir(proj.ml_dir, args.name) / model_store.MANIFEST
         if not manifest_path.exists():
             log.error("no saved model named %r to resume", args.name)
             return 2
         manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not is_tiled(manifest):
+            log.error("model %r was trained on whole photos (before Tiles): "
+                      "train a fresh one", args.name)
+            return 2
         if manifest["n_classes"] != n_classes:
             log.error("saved model has %d classes but the project now has %d — "
                       "cannot resume; train a fresh model",
                       manifest["n_classes"], n_classes)
             return 2
-        from cloudlabeller.ml.model_spec import ModelSpec
-
         spec = ModelSpec.from_dict(manifest.get("spec"))
     else:
         spec = proj.model_spec()
-        error = spec.validate_size(*source_res)
+        error = spec.validate()
         if error:
             log.error("model settings invalid: %s", error)
             return 2
 
-    # Photos are pooled over every Survey, keyed "<survey>/<name>".
+    # Photos are pooled over the chosen Surveys, keyed "<survey>/<name>".
     user_names: list[str] = []
     auto_names: list[str] = []
     records: dict[str, tuple] = {}
-    for sid in proj.surveys:
+    for sid in wanted:
         survey = proj.survey(sid)
         labels = survey.labels
         for r in survey.dataset.images:
@@ -152,23 +169,24 @@ def main(argv: list[str]) -> int:
     if not names:
         log.error("no labelled images to train on")
         return 2
-    # When resuming, the dataset must be built at the SAVED model's input size.
-    target_size = (tuple(manifest["input_size"]) if manifest is not None
-                   else spec.training_size(*source_res))
 
     def mask_loader(key):
         survey, name, _ = records[key]
         mask = survey.labels.image_masks.get(name)
         return mask if mask is not None else survey.render_auto_mask(name)
 
-    progress(0.01, f"Loading {len(names)} images at "
-                   f"{target_size[0]}×{target_size[1]} px…")
-    ts = build_training_set(
-        names, lambda k: _load_rgb(records[k][2]), mask_loader,
-        projected_weight=0.5, projected_names=set(auto_names),
-        target_size=target_size)
+    n = spec.net_size
+    progress(0.01, f"Cutting {len(names)} photos into {spec.tile_size} px Tiles "
+                   f"({n}×{n} px for the network)…")
+    ts = build_tile_set(
+        names, lambda k: _load_rgb(records[k][2]), mask_loader, spec,
+        projected_weight=0.5, projected_names=set(auto_names))
+    if not ts.samples:
+        log.error("no Tile is labelled enough to train on (at least %.0f%% of a Tile)",
+                  100 * spec.min_labelled)
+        return 2
     train_set, val_set = (ts.split(args.val_fraction)
-                          if args.val_fraction > 0 and len(ts.samples) > 1
+                          if args.val_fraction > 0 and len(names) > 1
                           else (ts, None))
 
     if args.resume:
@@ -177,7 +195,7 @@ def main(argv: list[str]) -> int:
     else:
         progress(0.03, f"Building U-Net ({spec.channels} ch × {spec.blocks} "
                        f"blocks, {n_classes} classes)…")
-        model = build_model_from_spec(spec, n_classes, source_res)
+        model = build_model_from_spec(spec, n_classes)
 
     model, metrics = trainer.train(
         model, train_set, val_set,
@@ -190,8 +208,9 @@ def main(argv: list[str]) -> int:
     last = {k: v[-1] for k, v in metrics.items()}
     model_store.save_model(
         model, proj.ml_dir, args.name, spec=spec, n_classes=n_classes,
-        input_size=target_size,
-        class_names=[c.name for c in proj.schema.classes], metrics=last)
+        input_size=(n, n),
+        class_names=[c.name for c in proj.schema.classes], metrics=last,
+        history=_history(manifest, metrics), surveys=wanted)
     print("RESULT " + json.dumps({
         "name": model_store.sanitize_name(args.name),
         "epochs_run": len(metrics.get("loss", [])),

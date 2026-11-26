@@ -54,18 +54,64 @@ export function ModelSpecDialog() {
     >
       {spec && (
         <>
+          <p className="mb-3 text-fg-muted">
+            The network learns and predicts on Tiles: square pieces of the photos, cut on an
+            overlapping grid and shrunk before it sees them. Photos of any size give Tiles of the
+            same size, so one model covers Surveys taken with different cameras.
+          </p>
+          <Field label="Tile size (photo pixels)" inline>
+            {(id) => (
+              <NumberInput
+                id={id}
+                min={32}
+                max={8192}
+                step={32}
+                value={spec.tile_size}
+                onChange={(v) => set({ tile_size: v })}
+              />
+            )}
+          </Field>
+          <Field label="Shrink by" inline>
+            {(id) => (
+              <select
+                id={id}
+                className="h-control rounded-md border border-border bg-surface-0 px-2"
+                value={spec.shrink}
+                onChange={(e) => set({ shrink: Number(e.target.value) })}
+              >
+                {[1, 2, 4, 8].map((k) => (
+                  <option key={k} value={k}>
+                    {k === 1 ? "1 (full detail)" : k}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+          <Field label="Overlap" inline hint="Of a Tile, shared with its neighbours (0 to 0.45).">
+            {(id) => (
+              <NumberInput
+                id={id}
+                min={0}
+                max={0.45}
+                step={0.05}
+                value={spec.overlap}
+                onChange={(v) => set({ overlap: v })}
+              />
+            )}
+          </Field>
           <Field
-            label="Resolution divisor"
+            label="Least labelled"
             inline
-            hint="Photos are trained at their size over this (snapped to the U-Net's multiple)."
+            hint="Training skips Tiles with less than this fraction labelled."
           >
             {(id) => (
               <NumberInput
                 id={id}
-                min={1}
-                max={100}
-                value={spec.resolution_divisor}
-                onChange={(v) => set({ resolution_divisor: v })}
+                min={0}
+                max={1}
+                step={0.01}
+                value={spec.min_labelled}
+                onChange={(v) => set({ min_labelled: v })}
               />
             )}
           </Field>
@@ -120,7 +166,7 @@ export function ModelSpecDialog() {
           ) : (
             preview.size && (
               <p className="text-fg-muted">
-                Trains at {preview.size[0]} × {preview.size[1]} px (when saved).
+                The network sees {preview.size[0]} × {preview.size[1]} px per Tile (when saved).
               </p>
             )
           )}
@@ -132,6 +178,35 @@ export function ModelSpecDialog() {
 
 const fact = (m: api.ModelManifest | undefined, k: string) =>
   m && m[k] !== undefined ? String(m[k]) : "—";
+
+/** Which Surveys a Job covers: all of them by default. */
+function SurveyPicker({ value, onChange }: { value: string[]; onChange: (ids: string[]) => void }) {
+  const surveys = useApp().state.project?.surveys ?? [];
+  if (surveys.length < 2) return null;
+  return (
+    <Field label="Surveys">
+      {() => (
+        <div className="flex flex-col">
+          {surveys.map((s) => (
+            <Check
+              key={s.id}
+              checked={value.includes(s.id)}
+              onChange={(on) =>
+                onChange(
+                  on
+                    ? surveys.map((x) => x.id).filter((id) => id === s.id || value.includes(id))
+                    : value.filter((id) => id !== s.id),
+                )
+              }
+            >
+              {s.name}
+            </Check>
+          ))}
+        </div>
+      )}
+    </Field>
+  );
+}
 
 export function TrainDialog() {
   const app = useApp();
@@ -145,6 +220,8 @@ export function TrainDialog() {
   const [val, setVal] = useState(0.2);
   const [rolls, setRolls] = useState(5);
   const [includeAuto, setIncludeAuto] = useState(false);
+  const all = app.state.project?.surveys.map((s) => s.id) ?? [];
+  const [surveys, setSurveys] = useState<string[]>(all);
   useEffect(() => {
     api
       .models()
@@ -157,11 +234,15 @@ export function TrainDialog() {
   const n = user + (includeAuto ? auto : 0);
   const problem = !name.trim()
     ? "Name the model."
-    : n === 0
-      ? "No labelled photos to train on: paint some first."
-      : saved && resume && Number(saved.n_classes) !== (app.state.project?.schema.length ?? 0)
-        ? "The saved model has a different number of classes; start fresh instead."
-        : null;
+    : surveys.length === 0
+      ? "Choose at least one Survey."
+      : saved && resume && !saved.tiled
+        ? "That model was trained on whole photos, before Tiles: start fresh instead."
+        : n === 0
+          ? "No labelled photos to train on: paint some first."
+          : saved && resume && Number(saved.n_classes) !== (app.state.project?.schema.length ?? 0)
+            ? "The saved model has a different number of classes; start fresh instead."
+            : null;
   const run = () => {
     close();
     void job(
@@ -175,6 +256,7 @@ export function TrainDialog() {
         augment_rolls: rolls,
         include_auto: includeAuto,
         resume: Boolean(saved) && resume,
+        ...(surveys.length < all.length ? { surveys } : {}),
       },
       `Training "${name.trim()}"`,
     ).then((o) => {
@@ -209,8 +291,9 @@ export function TrainDialog() {
       }
     >
       <p className="mb-3 text-fg-muted">
-        {user} photos labelled by you and {auto} from the cloud.
+        {user} photos labelled by you and {auto} from the cloud, in every Survey.
       </p>
+      <SurveyPicker value={surveys} onChange={setSurveys} />
       <Field label="Model name">
         {(id) => (
           <>
@@ -265,15 +348,16 @@ export function TrainDialog() {
   );
 }
 
-const COLUMNS: [string, string][] = [
-  ["name", "Name"],
-  ["created", "Created"],
-  ["input_size", "Input"],
-  ["n_classes", "Classes"],
-  ["channels", "Channels"],
-  ["blocks", "Blocks"],
-  ["dropout", "Dropout"],
-  ["filter_size", "Filter"],
+/** The models table: what a manifest holds, its spec's values from `spec`. */
+const COLUMNS: [string, string, (m: api.ModelManifest) => unknown][] = [
+  ["name", "Name", (m) => m.name],
+  ["created", "Created", (m) => m.created],
+  ["tile", "Tile", (m) => (m.tiled ? `${m.spec?.tile_size} px ÷${m.spec?.shrink}` : "whole photo")],
+  ["n_classes", "Classes", (m) => m.n_classes],
+  ["channels", "Channels", (m) => m.spec?.channels],
+  ["blocks", "Blocks", (m) => m.spec?.blocks],
+  ["dropout", "Dropout", (m) => m.spec?.dropout],
+  ["filter_size", "Filter", (m) => m.spec?.filter_size],
 ];
 
 export function PredictDialog() {
@@ -281,6 +365,8 @@ export function PredictDialog() {
   const close = useClose();
   const [manifests, setManifests] = useState<api.ModelManifest[] | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
+  const all = app.state.project?.surveys.map((s) => s.id) ?? [];
+  const [surveys, setSurveys] = useState<string[]>(all);
   const load = useCallback(() => {
     api
       .models()
@@ -313,9 +399,10 @@ export function PredictDialog() {
   };
   const run = (name: string) => {
     close();
-    void job(app, "predict", { model: name }, `Predicting with "${name}"`).then((o) => {
+    const options = { model: name, ...(surveys.length < all.length ? { surveys } : {}) };
+    void job(app, "predict", options, `Predicting with "${name}"`).then((o) => {
       if (o.ok) {
-        const predicted = (o.result as { predicted?: string[] })?.predicted ?? [];
+        const predicted = (o.result as { predicted?: unknown[] })?.predicted ?? [];
         app.dispatch({ type: "log", text: `Predicted ${predicted.length} photos` });
       }
     });
@@ -324,6 +411,7 @@ export function PredictDialog() {
     Array.isArray(v) ? v.join(" × ") : v === undefined || v === null ? "—" : String(v);
   const classes = app.state.project?.schema.length ?? 0;
   const pick = manifests?.find((m) => m.name === chosen);
+  const usable = (m: api.ModelManifest) => m.tiled && Number(m.n_classes) === classes;
   return (
     <Dialog
       title="Predict every photo"
@@ -337,7 +425,7 @@ export function PredictDialog() {
           <Button onClick={close}>Cancel</Button>
           <Button
             kind="primary"
-            disabled={!pick || Number(pick.n_classes) !== classes}
+            disabled={!pick || !usable(pick) || surveys.length === 0}
             onClick={() => chosen && run(chosen)}
           >
             Predict
@@ -348,6 +436,7 @@ export function PredictDialog() {
       <p className="mb-3 text-fg-muted">
         The model labels every photo you haven't labelled yourself.
       </p>
+      <SurveyPicker value={surveys} onChange={setSurveys} />
       {manifests === null ? (
         <p className="text-fg-muted">Reading the models…</p>
       ) : manifests.length === 0 ? (
@@ -372,11 +461,11 @@ export function PredictDialog() {
                   m.name === chosen && "bg-selection",
                 )}
                 onClick={() => setChosen(m.name)}
-                onDoubleClick={() => Number(m.n_classes) === classes && run(m.name)}
+                onDoubleClick={() => usable(m) && run(m.name)}
               >
-                {COLUMNS.map(([k]) => (
-                  <td key={k} className="px-2 py-1">
-                    {show(m[k])}
+                {COLUMNS.map(([k, , get]) => (
+                  <td key={k} className={cn("px-2 py-1", !m.tiled && "text-fg-faint")}>
+                    {show(get(m))}
                   </td>
                 ))}
               </tr>
@@ -384,7 +473,12 @@ export function PredictDialog() {
           </tbody>
         </table>
       )}
-      {pick && Number(pick.n_classes) !== classes && (
+      {pick && !pick.tiled && (
+        <p className="mt-2 text-danger">
+          This model was trained on whole photos, before Tiles: train a new one.
+        </p>
+      )}
+      {pick?.tiled && Number(pick.n_classes) !== classes && (
         <p className="mt-2 text-danger">
           This model has {String(pick.n_classes)} classes and the Project {classes}.
         </p>

@@ -94,11 +94,16 @@ def survey_state(survey) -> dict:
         images = [{"name": r.name, "status": lb.status_of(r.name),
                    "solved": r.camera is not None, "user_mask": r.name in lb.image_masks}
                   for r in ds.images]
+        unsure = survey.settings.get("uncertainty") or {}
+        for row in images:
+            row["uncertainty"] = unsure.get(row["name"]) if row["status"] == "ml" else None
     else:
         masks = ({f.stem for f in survey.masks_dir.glob("*.npy")}
                  if survey.masks_dir.exists() else set())
+        unsure = survey.settings.get("uncertainty") or {}
         images = [{"name": name, "status": lb.status_of(name), "solved": solved,
-                   "user_mask": name in masks and lb.status_of(name) == "user"}
+                   "user_mask": name in masks and lb.status_of(name) == "user",
+                   "uncertainty": unsure.get(name) if lb.status_of(name) == "ml" else None}
                   for name, solved in survey.peek_images()]
     counts = survey.peek_counts()
     outdated = survey.settings.get("reconstruction_outdated")
@@ -346,6 +351,20 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     survey.save_manifest()
     engine.changed("labels", "status", survey=survey.id, images=[name])
     return {"changed_pixels": int(changed.size), "status": labels.status_of(name)}
+
+
+@method("image.uncertainty")
+def image_uncertainty(engine: Engine, params: dict) -> dict:
+    """How unsure the U-Net's prediction of a photo is, per pixel (0 sure, 1
+    unsure), at the prediction's size; null when it has none."""
+    survey = _survey(engine, params)
+    record = _image(survey, params)
+    u = survey.prediction_uncertainty(record.name)
+    if u is None:
+        return {"uncertainty": None, "mean": None}
+    return {"uncertainty": arrays.write(engine.project.root,
+                                        f"uncertainty/{survey.id}/{record.name}", u),
+            "mean": float(u.mean(dtype=np.float64))}
 
 
 # -- clouds and mesh -----------------------------------------------------------------
@@ -686,12 +705,9 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
 # -- model --------------------------------------------------------------------------
 @method("model.spec")
 def model_spec(engine: Engine, params: dict) -> dict:
-    project = engine.project
-    spec = project.model_spec()
-    res = project.source_resolution()
-    return {"spec": spec.to_dict(),
-            "training_size": list(spec.training_size(*res)) if res else None,
-            "problem": spec.validate_size(*res) if res else None}
+    spec = engine.project.model_spec()
+    n = spec.net_size
+    return {"spec": spec.to_dict(), "training_size": [n, n], "problem": spec.validate()}
 
 
 @method("model.set_spec")
@@ -710,9 +726,10 @@ def model_set_spec(engine: Engine, params: dict) -> dict:
 
 @method("models.list")
 def models_list(engine: Engine, params: dict) -> dict:
+    from cloudlabeller.ml.model_spec import is_tiled
     from cloudlabeller.ml.model_store import list_models
 
-    return {"models": list_models(engine.project.ml_dir)}
+    return {"models": [{**m, "tiled": is_tiled(m)} for m in list_models(engine.project.ml_dir)]}
 
 
 # -- jobs ---------------------------------------------------------------------------

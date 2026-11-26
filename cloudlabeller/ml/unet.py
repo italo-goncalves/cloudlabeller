@@ -169,16 +169,13 @@ def build_model(n_classes: int, image_width: int, image_height: int,
     return model
 
 
-def build_model_from_spec(spec, n_classes: int,
-                          source_resolution: tuple[int, int],
-                          in_channels: int = 3):
+def build_model_from_spec(spec, n_classes: int, in_channels: int = 3):
     """Build the U-Net from a :class:`~cloudlabeller.ml.model_spec.ModelSpec`
-    (the Model Settings dialog): the training size comes from
-    ``spec.training_size`` and the architecture from ``spec.unet_kwargs()``.
-    This is the single seam between the dialog's values and ``build_model``."""
-    width, height = spec.training_size(*source_resolution)
-    return build_model(n_classes, width, height,
-                       in_channels=in_channels, **spec.unet_kwargs())
+    (the Model Settings dialog): it takes square Tiles of ``spec.net_size``
+    and its architecture from ``spec.unet_kwargs()``. This is the single
+    seam between the dialog's values and ``build_model``."""
+    n = spec.net_size
+    return build_model(n_classes, n, n, in_channels=in_channels, **spec.unet_kwargs())
 
 def load_model(weights_path: str, n_classes: int, image_width: int,
                image_height: int, in_channels: int = 3, **kwargs):

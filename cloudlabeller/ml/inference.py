@@ -18,12 +18,15 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Inference — apply the trained U-Net to images.
+"""Inference — apply the trained U-Net to photos, Tile by Tile.
 
-``predict`` returns the mask at the MODEL's resolution (e.g. 768x512), not the
-photo's: predictions are stored at that size (a full-res 21 Mpx int32 mask is
-~84 MB) and upscaled on demand by ``Project.prediction_mask``. ``predict_all``
-orchestrates a whole batch and writes the .npy files the project reads back.
+``predict_photo`` cuts a photo into the model's Tiles, predicts them and
+blends them (:mod:`cloudlabeller.ml.tiles`), returning the classes and the
+Uncertainty at the photo's size divided by the model's shrink factor.
+Predictions are stored at that size (a full-res 21 Mpx int32 mask is
+~84 MB) and upscaled on demand by ``Survey.prediction_mask``.
+``predict_all`` writes one ``<name>.npz`` per photo: ``labels``,
+``uncertainty`` and the model's name.
 """
 
 from __future__ import annotations
@@ -36,20 +39,12 @@ import numpy as np
 ProgressFn = Callable[[float, str], None]
 
 
-def predict(model, image: np.ndarray) -> np.ndarray:
-    """Run the model on one (H, W, C) uint8 image; return an (h, w) int32 mask
-    at the model's input resolution (argmax over class probabilities)."""
-    import cv2
+def predict(model, image: np.ndarray, spec, n_classes: int) -> tuple[np.ndarray, np.ndarray]:
+    """One photo's (classes, Uncertainty) at its size / ``spec.shrink``."""
+    from cloudlabeller.ml.tiles import predict_photo
 
-    _, in_h, in_w, _ = model.input_shape
-    x = image
-    if (image.shape[0], image.shape[1]) != (in_h, in_w):
-        x = cv2.resize(image, (in_w, in_h), interpolation=cv2.INTER_AREA)
-    x = x.astype(np.float32)
-    if x.max() > 1.0:
-        x /= 255.0
-    prob = model.predict(x[None], verbose=0)[0]      # (h, w, n_classes)
-    return np.argmax(prob, axis=-1).astype(np.int32)
+    return predict_photo(lambda x: model.predict(x, verbose=0), image,
+                         int(spec.tile_size), float(spec.overlap), int(spec.shrink), n_classes)
 
 
 def predict_all(
@@ -57,19 +52,22 @@ def predict_all(
     image_names: list[str],
     image_loader,                       # name -> (H, W, C) uint8
     out_dir: str | Path,
+    spec,
+    n_classes: int,
+    model_name: str = "",
     progress: ProgressFn = lambda f, m: None,
-) -> dict[str, Path]:
-    """Predict masks for every image; save as .npy (at model resolution);
-    return name -> path."""
+) -> dict[str, float]:
+    """Predict every photo; save ``<name>.npz``; return name -> its mean
+    Uncertainty."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    written: dict[str, Path] = {}
+    written: dict[str, float] = {}
     total = len(image_names)
     for i, name in enumerate(image_names, 1):
-        mask = predict(model, image_loader(name))
-        path = out_dir / f"{name}.npy"
-        np.save(path, mask.astype(np.int32))
-        written[name] = path
+        labels, uncertainty = predict(model, image_loader(name), spec, n_classes)
+        np.savez_compressed(out_dir / f"{name}.npz", labels=labels.astype(np.int16),
+                            uncertainty=uncertainty, model=np.array(model_name))
+        (out_dir / f"{name}.npy").unlink(missing_ok=True)      # a 0.3.0 prediction
+        written[name] = float(np.mean(uncertainty, dtype=np.float64))
         progress(i / total, f"Predicted {name} ({i}/{total})")
     return written

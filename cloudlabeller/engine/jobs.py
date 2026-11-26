@@ -479,21 +479,40 @@ def _apply_mesh(engine, project, results, plan):
 
 
 # -- ml ---------------------------------------------------------------------------
+def _surveys_option(project, options) -> list[str]:
+    """The Surveys an ml Job covers (option ``surveys``; default: all)."""
+    given = options.get("surveys")
+    if given is None:
+        return list(project.surveys)
+    if not isinstance(given, list) or not given or not all(isinstance(s, str) for s in given):
+        raise InvalidParams("option 'surveys' is a list of Survey ids", option="surveys")
+    unknown = [s for s in given if s not in project.surveys]
+    if unknown:
+        raise Problem("survey.not_found", "No Survey has that id.", survey=unknown[0])
+    return [s for s in project.surveys if s in given]
+
+
 @kind("train", "cloudlabeller.ml.train_cli", "ml",
       "Train the U-Net on the labelled photos of every Survey")
 def _prepare_train(engine, project, options):
     if not project.schema.classes:
         raise Problem("job.train.no_classes", "Define some label classes first.")
-    source_res = project.source_resolution()
-    if source_res is None:
+    surveys = _surveys_option(project, options)
+    if not any(project.surveys[s].peek_images() for s in surveys):
         raise Problem("job.train.no_images", "Add images to the Project first.")
     name = _opt(options, "name", str, "unet")
     resume = _opt(options, "resume", bool, False)
     if resume:
         from cloudlabeller.ml.model_store import list_models
 
+        from cloudlabeller.ml.model_spec import is_tiled
+
         manifest = next((m for m in list_models(project.ml_dir) if m.get("name") == name),
                         None)
+        if manifest is not None and not is_tiled(manifest):
+            raise Problem("job.train.legacy_model",
+                          "That model was trained on whole photos, before Tiles: train a "
+                          "fresh one.", model=name)
         n_classes = len(project.schema.classes)
         if manifest is not None and manifest.get("n_classes") != n_classes:
             raise Problem("job.train.class_mismatch",
@@ -502,7 +521,7 @@ def _prepare_train(engine, project, options):
                           model=name, model_classes=manifest.get("n_classes"),
                           project_classes=n_classes)
     else:
-        error = project.model_spec().validate_size(*source_res)
+        error = project.model_spec().validate()
         if error:
             raise Problem("job.train.bad_spec", error)
     # TensorFlow runs in the child; it reads the Project from disk.
@@ -519,6 +538,8 @@ def _prepare_train(engine, project, options):
         args.append("--include-auto")
     if resume:
         args.append("--resume")
+    if surveys != list(project.surveys):
+        args += ["--surveys", ",".join(surveys)]
     return Plan(args, project.ml_dir / "train.log", gpu=True, stop_file=stop_file)
 
 
@@ -539,6 +560,13 @@ def _prepare_predict(engine, project, options):
     manifest = next((m for m in list_models(project.ml_dir) if m.get("name") == model), None)
     if manifest is None:
         raise Problem("job.predict.no_model", "No saved model has that name.", model=model)
+    from cloudlabeller.ml.model_spec import is_tiled
+
+    if not is_tiled(manifest):
+        raise Problem("job.predict.legacy_model",
+                      "That model was trained on whole photos, before Tiles: retrain it.",
+                      model=model)
+    surveys = _surveys_option(project, options)
     n_classes = len(project.schema.classes)
     if manifest.get("n_classes") != n_classes:
         raise Problem("job.predict.class_mismatch",
@@ -546,12 +574,14 @@ def _prepare_predict(engine, project, options):
                       model=model, model_classes=manifest.get("n_classes"),
                       project_classes=n_classes)
     if not any(s.labels.status_of(r.name) != "user"
-               for s in (project.survey(sid) for sid in project.surveys)
+               for s in (project.survey(sid) for sid in surveys)
                for r in s.dataset.images):
         raise Problem("job.predict.nothing", "All images are user-labelled.")
     project.save_manifest()                        # the child reads statuses from disk
-    return Plan([str(project.root), "--model", model], project.ml_dir / "predict.log",
-                gpu=True)
+    args = [str(project.root), "--model", model]
+    if surveys != list(project.surveys):
+        args += ["--surveys", ",".join(surveys)]
+    return Plan(args, project.ml_dir / "predict.log", gpu=True)
 
 
 @applies("predict")
@@ -561,6 +591,9 @@ def _apply_predict(engine, project, results, plan):
     for item in predicted:
         if isinstance(item, dict) and item.get("survey") in project.surveys:
             by_survey.setdefault(item["survey"], []).append(item.get("name"))
+            unsure = project.surveys[item["survey"]].settings.setdefault("uncertainty", {})
+            if item.get("uncertainty") is not None:
+                unsure[item["name"]] = float(item["uncertainty"])
     for sid, names in by_survey.items():
         survey = project.survey(sid)
         for name in names:

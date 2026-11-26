@@ -37,15 +37,15 @@ pytestmark = pytest.mark.skipif(
 def test_train_save_load_predict(tmp_path):
     import cloudlabeller  # noqa: F401  (MSVC-runtime preload before TF)
     from cloudlabeller.ml import inference, model_store, trainer
-    from cloudlabeller.ml.dataset_builder import build_training_set
+    from cloudlabeller.ml.dataset_builder import build_tile_set
     from cloudlabeller.ml.model_spec import ModelSpec
     from cloudlabeller.ml.unet import build_model_from_spec
 
     rng = np.random.default_rng(0)
-    source_res = (96, 64)                       # pretend photos are 96x64
-    spec = ModelSpec(resolution_divisor=2, channels=4, blocks=2, filter_size=3)
-    tw, th = spec.training_size(*source_res)
-    assert spec.validate_size(*source_res) is None
+    spec = ModelSpec(tile_size=64, shrink=2, overlap=0.25, min_labelled=0.0,
+                     channels=4, blocks=2, filter_size=3)
+    n = spec.net_size                           # 32
+    assert spec.validate() is None
 
     # Two-class toy scene: left half class 0, right half class 1, some unlabelled.
     def make(name):
@@ -58,12 +58,12 @@ def test_train_save_load_predict(tmp_path):
 
     # Mixed weights + batch size > 1 + validation: the exact configuration that
     # crashed with flat (N,) sample weights ("Dimensions must be equal").
-    data = {n: make(n) for n in ("a", "b", "c", "d")}
-    ts = build_training_set(list(data), lambda n: data[n][0],
-                            lambda n: data[n][1], target_size=(tw, th),
-                            projected_names={"d"}, projected_weight=0.5)
+    data = {k: make(k) for k in ("a", "b", "c", "d")}
+    ts = build_tile_set(list(data), lambda k: data[k][0], lambda k: data[k][1], spec,
+                        projected_names={"d"}, projected_weight=0.5)
+    assert {smp.image.shape for smp in ts.samples} == {(n, n, 3)}
     train_set, val_set = ts.split(val_fraction=0.25)
-    model = build_model_from_spec(spec, n_classes=2, source_resolution=source_res)
+    model = build_model_from_spec(spec, n_classes=2)
 
     msgs = []
     model, metrics = trainer.train(
@@ -74,21 +74,21 @@ def test_train_save_load_predict(tmp_path):
     assert any("epoch 2/2" in m for _, m in msgs)
 
     model_store.save_model(model, tmp_path, "smoke", spec=spec, n_classes=2,
-                           input_size=(tw, th))
+                           input_size=(n, n), history=metrics)
     loaded, manifest = model_store.load_model(tmp_path, "smoke")
-    assert manifest["input_size"] == [tw, th]
+    assert manifest["input_size"] == [n, n] and len(manifest["history"]["loss"]) == 2
 
-    pred = inference.predict(loaded, data["a"][0])
-    assert pred.shape == (th, tw)
-    assert pred.dtype == np.int32
-    assert set(np.unique(pred)) <= {0, 1}
+    labels, unsure = inference.predict(loaded, data["a"][0], spec, 2)
+    assert labels.shape == (32, 48)              # the photo / shrink
+    assert set(np.unique(labels)) <= {0, 1}
+    assert unsure.shape == labels.shape and 0 <= float(unsure.min()) <= float(unsure.max()) <= 1
 
-    # predict_all writes one npy per image at model resolution.
-    out = inference.predict_all(loaded, ["a", "b"], lambda n: data[n][0],
-                                tmp_path / "pred")
-    assert sorted(out) == ["a", "b"]
-    saved = np.load(out["a"])
-    assert saved.shape == (th, tw)
+    # predict_all writes one npz per photo: labels and Uncertainty.
+    out = inference.predict_all(loaded, ["a", "b"], lambda k: data[k][0],
+                                tmp_path / "pred", spec, 2, "smoke")
+    assert sorted(out) == ["a", "b"] and 0 <= out["a"] <= 1
+    with np.load(tmp_path / "pred" / "a.npz") as saved:
+        assert saved["labels"].shape == (32, 48) and str(saved["model"]) == "smoke"
 
 
 def test_train_and_predict_cli_subprocess(tmp_path):
@@ -106,9 +106,9 @@ def test_train_and_predict_cli_subprocess(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
     proj.schema.add(name="rock")
     proj.schema.add(name="soil")
-    spec = ModelSpec(resolution_divisor=2, channels=4, blocks=2, filter_size=3)
+    spec = ModelSpec(tile_size=64, shrink=2, overlap=0.25, min_labelled=0.0,
+                     channels=4, blocks=2, filter_size=3)
     proj.set_model_spec(spec)
-    tw, th = spec.training_size(96, 64)                 # the model's input size
     rng = np.random.default_rng(0)
     for name in ("a.jpg", "b.jpg", "c.jpg"):
         arr = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
@@ -141,7 +141,7 @@ def test_train_and_predict_cli_subprocess(tmp_path):
     # Resume: load the saved model and train it for more epochs. Architecture
     # comes from the manifest, so this must work even with different current
     # Model Settings.
-    proj.set_model_spec(ModelSpec(resolution_divisor=4, channels=8, blocks=1,
+    proj.set_model_spec(ModelSpec(tile_size=128, shrink=4, channels=8, blocks=1,
                                   filter_size=3))
     proj.save_manifest()
     out = run("cloudlabeller.ml.train_cli", "--name", "cli smoke",
@@ -152,10 +152,11 @@ def test_train_and_predict_cli_subprocess(tmp_path):
     manifest = json.loads((proj.ml_dir / "models" / "cli smoke" /
                            "manifest.json").read_text())
     assert manifest["spec"]["channels"] == 4            # saved arch, not current
-    assert manifest["input_size"] == [tw, th]
+    assert manifest["input_size"] == [32, 32] and manifest["surveys"] == ["s1"]
+    assert len(manifest["history"]["loss"]) == 3        # 2 epochs, then 1 more
 
-    out = run("cloudlabeller.ml.predict_cli", "--model", "cli smoke")
-    assert out["predicted"] == ["c.jpg"]                # red only; greens kept
-    pred = np.load(proj.survey("s1").predictions_dir / "c.jpg.npy")
-    assert pred.shape == (th, tw)                       # the MODEL's input size
-    assert set(np.unique(pred)) <= {0, 1}
+    out = run("cloudlabeller.ml.predict_cli", "--model", "cli smoke", "--surveys", "s1")
+    assert [(p["survey"], p["name"]) for p in out["predicted"]] == [("s1", "c.jpg")]
+    with np.load(proj.survey("s1").predictions_dir / "c.jpg.npz") as pred:
+        assert pred["labels"].shape == (32, 48)         # the photo / shrink
+        assert set(np.unique(pred["labels"])) <= {0, 1}

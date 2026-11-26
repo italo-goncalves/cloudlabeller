@@ -18,7 +18,7 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Tests for the U-Net model spec: aspect snapping and pow-2 training sizes."""
+"""Tests for the U-Net model spec and Tiles (0.4.0 step 4)."""
 
 import ast
 import importlib.util
@@ -29,78 +29,117 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from cloudlabeller.ml.dataset_builder import build_training_set
-from cloudlabeller.ml.model_spec import ModelSpec, snap_aspect
+from cloudlabeller.ml.dataset_builder import Sample, TrainingSet, build_tile_set, photo_of
+from cloudlabeller.ml.model_spec import ModelSpec, is_tiled
+from cloudlabeller.ml.tiles import cut, feather, grid_for, pad, predict_photo
 
 
-class TestSnapAspect:
-    @pytest.mark.parametrize("w, h, expected", [
-        (5472, 3648, (3, 2)),      # typical drone sensor
-        (1920, 1080, (16, 9)),
-        (4000, 3000, (4, 3)),
-        (1280, 1024, (5, 4)),
-        (3648, 5472, (2, 3)),      # portrait
-        (2000, 1000, (2, 1)),
+class TestSpec:
+    def test_the_network_sees_the_tile_shrunk(self):
+        spec = ModelSpec(tile_size=1024, shrink=4)
+        assert spec.net_size == 256 and spec.buffer == int(1024 * 0.35)
+        assert spec.validate() is None
+
+    @pytest.mark.parametrize("fields, words", [
+        ({"tile_size": 1000, "shrink": 2, "blocks": 4}, "multiple of 16"),
+        ({"tile_size": 1022, "shrink": 4}, "multiple of the shrink"),
+        ({"shrink": 3}, "shrink factor"),
+        ({"overlap": 0.5}, "overlap"),
     ])
-    def test_common_ratios(self, w, h, expected):
-        assert snap_aspect(w, h) == expected
+    def test_settings_that_cannot_build_a_network_say_why(self, fields, words):
+        assert words in ModelSpec(**fields).validate()
 
-    def test_slightly_off_ratio_snaps(self):
-        # A cropped 3:2 (a few pixels shaved off) still snaps to 3:2.
-        assert snap_aspect(5470, 3648) == (3, 2)
-
-    def test_extreme_ratio_stays_small(self):
-        aw, ah = snap_aspect(10000, 300)   # ~33:1 panorama
-        assert aw <= 42 and ah <= 21       # bounded terms, not 100:3
+    def test_a_029_spec_reads_back_with_tile_defaults(self):
+        spec = ModelSpec.from_dict({"resolution_divisor": 10, "channels": 32})
+        assert spec.channels == 32 and spec.tile_size == 1024
+        assert not is_tiled({"spec": {"resolution_divisor": 10}})
+        assert is_tiled({"spec": spec.to_dict()})
 
 
-class TestTrainingSize:
-    def test_size_is_pow2_multiple_of_aspect(self):
-        spec = ModelSpec(resolution_divisor=10)
-        tw, th = spec.training_size(5472, 3648)
-        k = spec.pow2_scale(5472, 3648)
-        assert (tw, th) == (3 * 2 ** k, 2 * 2 ** k)
-        assert tw % 2 ** spec.blocks == 0 and th % 2 ** spec.blocks == 0
+class TestTiles:
+    def test_the_grid_covers_the_photo_with_overlapping_tiles(self):
+        g = grid_for(3000, 4000, 1024, 0.35)
+        assert g.buffer == 358 and g.step == 666
+        assert g.padded[0] >= 3000 and g.padded[1] >= 4000
+        assert g.padded[0] - g.step < 3000          # no row wasted
+        assert len(list(g.origins())) == g.rows * g.cols
+        small = grid_for(100, 80, 256, 0.35)        # a photo smaller than a Tile
+        assert (small.rows, small.cols) == (1, 1) and small.padded == (256, 256)
 
-    def test_approximates_requested_divisor(self):
-        spec = ModelSpec(resolution_divisor=10)
-        tw, th = spec.training_size(5472, 3648)     # target ~547x365
-        assert (tw, th) == (768, 512)               # 3:2 x 2^8 (closest pow-2 area)
+    def test_padding_keeps_the_photo_and_marks_the_rest(self):
+        g = grid_for(50, 70, 32, 0.25)
+        mask = np.zeros((50, 70), np.int32)
+        padded = pad(mask, g, -1)
+        assert padded.shape == g.padded
+        assert (padded[:50, :70] == 0).all() and (padded[50:] == -1).all()
 
-    def test_divisor_one_keeps_near_full_resolution(self):
-        spec = ModelSpec(resolution_divisor=1)
-        tw, th = spec.training_size(1920, 1080)
-        assert (tw, th) == (2048, 1152)             # 16:9 x 2^7 ~ full res
+    def test_feathered_weights_ramp_over_the_overlap(self):
+        w = feather(10, 3)
+        assert w[5, 5] == 1.0 and w[0, 0] < w[1, 1] < w[3, 3]
+        assert np.allclose(w, w[::-1, ::-1]) and (w > 0).all()
 
-    def test_validate_flags_shallow_pow2(self):
-        # Divisor so large that k drops below the block count.
-        spec = ModelSpec(resolution_divisor=100, blocks=4)
-        assert spec.pow2_scale(1920, 1080) < 4
-        assert spec.validate_size(1920, 1080) is not None
+    def test_cutting_skips_tiles_with_too_few_labels(self):
+        image = np.full((64, 96, 3), 200, np.uint8)
+        mask = np.full((64, 96), -1, np.int32)
+        mask[:20, :20] = 1                            # only the top-left corner
+        tiles = cut(image, mask, 32, 0.25, 2, 0.05)
+        assert [rc for rc, _, _ in tiles] == [(0, 0)]
+        (_, img, m), = tiles
+        assert img.shape == (16, 16, 3) and m.shape == (16, 16)
+        assert set(np.unique(m)) <= {-1, 1}
 
-    def test_validate_ok_for_default(self):
-        spec = ModelSpec()
-        assert spec.validate_size(5472, 3648) is None
+    def test_a_constant_prediction_blends_to_itself_at_any_photo_size(self):
+        probs = np.array([0.1, 0.7, 0.2], np.float32)
+        for h, w in ((100, 140), (61, 37), (256, 256)):
+            image = np.random.default_rng(0).integers(0, 255, (h, w, 3), dtype=np.uint8)
+            seen = []
+
+            def model(x, seen=seen):
+                seen.append(x.shape)
+                return np.broadcast_to(probs, x.shape[:3] + (3,))
+            labels, unsure = predict_photo(model, image, 64, 0.35, 2, 3)
+            assert labels.shape == (-(-h // 2), -(-w // 2))
+            assert (labels == 1).all()
+            want = -(probs * np.log(probs)).sum() / np.log(3)
+            assert np.allclose(unsure.astype(np.float32), want, atol=1e-3)
+            assert all(s[1:3] == (32, 32) for s in seen)
+
+    def test_blending_fades_neighbours_into_each_other(self):
+        """Two Tiles disagreeing: the blend changes class inside the overlap,
+        not at a Tile's edge."""
+        image = np.zeros((32, 52, 3), np.uint8)
+
+        def model(x):
+            out = np.zeros(x.shape[:3] + (2,), np.float32)
+            for k in range(len(x)):
+                out[k, ..., k % 2] = 1.0              # left Tile says 0, right says 1
+            return out
+        labels, unsure = predict_photo(model, image, 32, 0.4, 1, 2)
+        assert labels[0, 0] == 0 and labels[0, -1] == 1
+        switch = int(np.argmax(labels[0] == 1))
+        assert 20 <= switch <= 32                     # within the overlap [20, 32)
+        assert unsure[0, switch].astype(float) > 0.5
 
 
-class TestBuildTrainingSetResize:
-    def test_resizes_to_target_and_preserves_ids(self):
-        img = (np.random.rand(30, 45, 3) * 255).astype(np.uint8)
-        mask = np.full((30, 45), -1, np.int32)
-        mask[:15, :20] = 2
-        ts = build_training_set(
-            ["a"], lambda n: img, lambda n: mask, target_size=(48, 32))
-        s = ts.samples[0]
-        assert s.image.shape == (32, 48, 3)
-        assert s.mask.shape == (32, 48)
-        assert s.mask.dtype == np.int32
-        assert set(np.unique(s.mask)) == {-1, 2}
+class TestTileSet:
+    def test_photos_of_any_size_give_tiles_of_one_size(self):
+        spec = ModelSpec(tile_size=32, shrink=2, overlap=0.25, min_labelled=0.0, blocks=2)
+        photos = {"s1/a": (40, 60), "s2/b": (90, 33)}
+        ts = build_tile_set(list(photos),
+                            lambda n: np.zeros(photos[n] + (3,), np.uint8),
+                            lambda n: np.zeros(photos[n], np.int32), spec,
+                            projected_names={"s2/b"})
+        assert {s.image.shape for s in ts.samples} == {(16, 16, 3)}
+        assert {photo_of(s.name) for s in ts.samples} == set(photos)
+        assert {s.weight for s in ts.samples if photo_of(s.name) == "s2/b"} == {0.5}
 
-    def test_no_target_keeps_original(self):
-        img = np.zeros((10, 20, 3), np.uint8)
-        mask = np.zeros((10, 20), np.int32)
-        ts = build_training_set(["a"], lambda n: img, lambda n: mask)
-        assert ts.samples[0].image.shape == (10, 20, 3)
+    def test_validation_holds_out_whole_photos(self):
+        samples = [Sample(f"p{p}#{i},0", np.zeros((2, 2, 3)), np.zeros((2, 2), np.int32))
+                   for p in range(5) for i in range(4)]
+        train, val = TrainingSet(samples).split(0.4, seed=1)
+        a = {photo_of(s.name) for s in train.samples}
+        b = {photo_of(s.name) for s in val.samples}
+        assert a and b and not a & b and len(train.samples) + len(val.samples) == 20
 
 
 # The imported package's copy (an installed wheel, or the working tree), read
@@ -136,18 +175,16 @@ class TestSpecBuildModelLink:
         assert not {"input_layer", "output_size"} & set(kwargs)
 
     def test_build_model_from_spec_forwards_spec_values(self):
-        spec = ModelSpec(resolution_divisor=10, channels=32, blocks=5,
+        spec = ModelSpec(tile_size=1024, shrink=2, channels=32, blocks=5,
                          dropout=0.25, filter_size=3)
         with mock.patch.dict(sys.modules, {"tensorflow": mock.MagicMock()}):
             sys.modules.pop("cloudlabeller.ml.unet", None)
             import cloudlabeller.ml.unet as unet
 
             with mock.patch.object(unet, "build_model") as bm:
-                unet.build_model_from_spec(spec, n_classes=7,
-                                           source_resolution=(5472, 3648))
+                unet.build_model_from_spec(spec, n_classes=7)
             sys.modules.pop("cloudlabeller.ml.unet", None)
 
-        expected_size = spec.training_size(5472, 3648)
         bm.assert_called_once_with(
-            7, expected_size[0], expected_size[1], in_channels=3,
+            7, 512, 512, in_channels=3,
             channels=32, blocks=5, dropout_prob=0.25, filter_size=3)
