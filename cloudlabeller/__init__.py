@@ -26,7 +26,7 @@ and the stage CLIs that run as Job subprocesses. None of it imports a GUI
 toolkit.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def _preload_msvc_runtime() -> None:

@@ -41,7 +41,8 @@ Steps, in order (step 4 can run beside 2 and 3):
    blended at network resolution with the Uncertainty kept; training and
    prediction take a Survey picker; validation holds out whole photos;
    0.3.0 models are listed as needing retraining.
-5. Docs and the release.
+5. **Docs and the release.** Docs and version 0.4.0 done; the release
+   waits for the end-to-end test below.
 
 - **Surveys.**
   - A 0.3.0 Project opens as a single Survey without asking.

@@ -20,6 +20,20 @@ survey where per-point classes matter.
 
 ## Features
 
+**Surveys**
+- A Project holds one site's **Surveys**: each acquisition (a flight, a
+  field day) with its own photos, camera and settings, its name, time,
+  operator and notes. Labels and the U-Net are shared across them.
+- Running a step again keeps the earlier result: each Survey keeps its
+  **Reconstructions**, sharing what they have in common; choose the one
+  shown, copy labels between them, delete the ones you don't need.
+- **GCPs**: import surveyed coordinates (any projected CRS or WGS 84, with
+  ellipsoidal or sea-level heights), mark them on the photos or on the
+  cloud (a click snaps to the nearest point), and align every Survey to
+  them, or to each other through GCPs they share. Residuals per GCP and
+  Survey, check points, and hints showing where each GCP should be in a
+  photo.
+
 **Photogrammetry** (COLMAP / pycolmap)
 - Structure-from-Motion with spatial (GPS), sequential or exhaustive
   matching; GPU SIFT + matching via CUDA COLMAP, with automatic CPU fallback.
@@ -33,7 +47,8 @@ survey where per-point classes matter.
 - Reproject the whole project (clouds, mesh, cameras) into any projected
   CRS — coordinates are stored minus a km-rounded offset to preserve
   precision, the current frame shows in the status bar, and camera positions
-  appear next to the file names in the Dataset pane.
+  appear next to the file names in the Dataset pane. Georeferencing and
+  reprojecting store a transform; no product file is ever rewritten.
 - A one-click **full pipeline** (SfM → MVS → mesh) for overnight runs — the
   machine is kept awake and every stage logs to the project.
 - COLMAP is **not** bundled: *Photogrammetry → Download COLMAP…* fetches the
@@ -53,6 +68,10 @@ survey where per-point classes matter.
 - Train a U-Net on your labelled images (TensorFlow), predict the whole
   image store, and send the predictions to the cloud — label a few images,
   annotate the entire survey.
+- The network works on overlapping **Tiles**, so one model covers Surveys
+  taken with different cameras; predictions are blended seamlessly and
+  show how unsure the model is, per pixel and per photo. Train on, and
+  predict, any choice of Surveys.
 
 **Data interchange**
 - Export labelled clouds to `.las`, `.ply` or `.csv` and meshes to `.ply`,
@@ -97,8 +116,11 @@ the Engine's contract in [docs/engine.md](docs/engine.md).
 ## Typical workflow
 
 1. **File → New Project…**, then **Add Images…** to fill the image store.
+   A second flight or field day goes in a new Survey (Add Images… asks).
 2. **Photogrammetry → Run Full Pipeline…** (or run SfM / MVS / mesh
-   individually). Georeference when the reconstruction is final.
+   individually). Georeference when the reconstruction is final: to the
+   photos' GPS, or to GCPs (the GCPs tab of the Dataset pane), which also
+   ties the Surveys together.
 3. Label a few well-chosen images (or paint the cloud) and run
    **Transfer → Images → Cloud**.
 4. **Model → Train U-Net…**, then **Predict All Images…** and transfer again

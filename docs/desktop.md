@@ -24,14 +24,14 @@ apps need is written in geokit first.
 
 | Folder | What it holds |
 |---|---|
-| `shell/` | The window: the menu bar, the panes, the status bar (CRS frame, Project summary, the running Job with Stop and its place in the GPU queue), the keys that work everywhere (Ctrl+Z / Ctrl+Y, 0–9 for the classes), Welcome (New, Open, recent Projects), and the close guard. |
+| `shell/` | The window: the menu bar, the panes, moving between Surveys (`surveys.ts`: the window shows one at a time, and `engine/api.ts` sends every Survey-scoped call to it), the status bar (CRS frame, Project summary, the running Job with Stop and its place in the GPU queue), the keys that work everywhere (Ctrl+Z / Ctrl+Y, 0–9 for the classes), Welcome (New, Open, recent Projects), and the close guard. |
 | `state/` | One reducer (`store.ts`, tested) and its context (`app.tsx`): running a Job or a long Engine request with the status bar following it, saying a Problem, asking a question. |
 | `engine/api.ts` | Every Engine method the window calls, typed after [engine.md](engine.md), with Array files read into typed arrays. |
 | `jobs/` | `flows.ts`: what a menu item sets going (georeferencing after SfM, a mesh after MVS, the questions around them). `pipeline.ts`: the full pipeline as a chain of Jobs, tested. |
 | `viewer/` | The 3D view (`Viewer3D`, `rig.ts`) on geokit's `LayerHost`: the cloud as one node thinned by the detail level, the mesh, the camera frusta, the lasso, and the View pane. Pure helpers in `adapt.ts`, tested. |
-| `image/` | The photo with its mask: polygon, brush and eraser, Import Mask, Propagate. Rasterising in `raster.ts`, tested. |
-| `panes/` | Labels, Dataset and Log. |
-| `dialogs/` | One per menu item that asks something: SfM, MVS, mesh, pipeline, COLMAP, cleaning, reprojecting, export, the model's settings, training, prediction, Project Info, About. |
+| `image/` | The photo with its mask: polygon, brush and eraser, Import Mask, Propagate, the GCP tool (Marks and hints) and the Uncertainty overlay. Rasterising in `raster.ts`, tested. |
+| `panes/` | Labels, Dataset (the Survey line, the photos, the GCPs tab in `GcpPanel.tsx`) and Log. |
+| `dialogs/` | One per menu item that asks something: SfM, MVS, mesh, pipeline, COLMAP, cleaning, reprojecting, export, the model's settings, training, prediction (both with a Survey picker), a Survey's details, Reconstructions, a GCP, importing GCPs, Project Info, About. |
 | `ui/controls.tsx` | The controls every screen builds from, on the kit's tokens. |
 
 ## Running it
