@@ -18,9 +18,7 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Reconstruction + visualisation tests (need pycolmap; the visualisation ones
-also need the ``qt`` extra and are skipped without it — see conftest.py).
-"""
+"""Reconstruction tests (need pycolmap)."""
 
 import numpy as np
 import pytest
@@ -28,14 +26,6 @@ import pytest
 from cloudlabeller.core.dataset import Camera, PointCloud
 
 pycolmap = pytest.importorskip("pycolmap")
-try:
-    import pyvista as pv
-except ModuleNotFoundError:          # an Environment without the qt extra
-    from conftest import missing_module
-
-    pv = missing_module("pyvista")
-
-
 def _app_camera(tx: float = 0.0) -> Camera:
     K = np.array([[1000.0, 0, 320], [0, 1000.0, 240], [0, 0, 1]])
     return Camera(K=K, R=np.eye(3), t=np.array([tx, 0.0, 0.0]),
@@ -100,39 +90,7 @@ def test_colmap_to_cameras_logic():
     assert np.allclose(rec0.camera.position, [-1.0, 0.0, 0.0])
 
 
-# --- frustum geometry ----------------------------------------------------
-def test_camera_frustum_geometry():
-    from cloudlabeller.ui.camera_gizmo import camera_center, camera_frustum
-
-    cam = _app_camera(tx=2.0)
-    frustum = camera_frustum(cam, scale=0.5)
-    assert frustum.n_points == 5                # centre + 4 corners
-    assert frustum.n_lines == 8                 # 4 spokes + 4 rectangle edges
-    # apex of the frustum is the camera centre
-    assert np.allclose(frustum.points[0], camera_center(cam))
-
-
-# --- offscreen render smoke (no Qt) --------------------------------------
-def test_offscreen_render_cloud_and_cameras(tmp_path):
-    from cloudlabeller.ui.camera_gizmo import camera_frustum
-
-    rng = np.random.default_rng(1)
-    cloud = PointCloud(xyz=rng.normal(size=(500, 3)).astype(np.float32),
-                       rgb=rng.integers(0, 255, size=(500, 3)).astype(np.uint8))
-
-    pl = pv.Plotter(off_screen=True)
-    poly = pv.PolyData(cloud.xyz)
-    poly["rgb"] = cloud.rgb
-    pl.add_mesh(poly, scalars="rgb", rgb=True, point_size=3)
-    for tx in (-1.0, 0.0, 1.0):
-        pl.add_mesh(camera_frustum(_app_camera(tx), scale=0.4), color="#ffcc00")
-    out = tmp_path / "preview.png"
-    pl.screenshot(str(out))
-    pl.close()
-    assert out.exists() and out.stat().st_size > 0
-
-
-# --- result serialisation round-trip (subprocess <-> GUI handoff) ---------
+# --- result serialisation round-trip (subprocess <-> Engine handoff) ---------
 def test_result_save_load_roundtrip(tmp_path):
     from cloudlabeller.core.dataset import ImageRecord
     from cloudlabeller.photogrammetry.pipeline import (
@@ -155,41 +113,7 @@ def test_result_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.images[0].camera.position, images[0].camera.position)
 
 
-# --- the bug fix: a failing reconstruction subprocess must NOT crash us ----
-def test_process_job_isolates_failure(tmp_path):
-    """ProcessJob must emit `failed` (not kill the parent) when SfM errors."""
-    from PySide6.QtCore import QEventLoop, QTimer
-    from PySide6.QtWidgets import QApplication
-    from cloudlabeller.workers.process_job import ProcessJob
-
-    # QApplication (not QCoreApplication): the Qt app is a process-wide singleton,
-    # and other tests construct QWidgets, which require a full QApplication.
-    app = QApplication.instance() or QApplication([])
-    log_path = tmp_path / "sfm.log"
-    job = ProcessJob("cloudlabeller.photogrammetry.run_cli",
-                     [str(tmp_path / "does_not_exist"), str(tmp_path / "ws")],
-                     log_path=log_path)
-    outcome = {}
-    lines: list[str] = []
-    job.log_line.connect(lines.append)
-    loop = QEventLoop()
-    job.failed.connect(lambda msg: (outcome.update(failed=msg), loop.quit()))
-    job.finished.connect(lambda: (outcome.update(finished=True), loop.quit()))
-    QTimer.singleShot(120_000, loop.quit)  # safety timeout
-    job.start()
-    loop.exec()
-
-    # Parent is still alive and got a clean failure signal with a log.
-    assert "failed" in outcome, f"expected failure, got {outcome}"
-    assert outcome["failed"]                 # non-empty message
-    assert lines                             # log streamed to the panel
-    # ProcessJob writes the log as UTF-8; read it back the same way (the
-    # locale default is cp1252 on machines without Windows' UTF-8 mode, and
-    # the log's command line contains a non-ASCII user path).
-    assert log_path.exists() and log_path.read_text(encoding="utf-8")
-
-
-# --- SfM options: dialog -> CLI args -> parsed namespace ------------------
+# --- SfM options: Options -> CLI args -> parsed namespace ------------------
 def test_sfm_options_cli_roundtrip():
     from cloudlabeller.photogrammetry.options import SfmOptions
     from cloudlabeller.photogrammetry.run_cli import _parse
@@ -307,103 +231,6 @@ def test_set_patch_match_sources_rewrites_cfg(tmp_path):
     set_patch_match_sources(tmp_path / "missing", 10)        # no cfg: no error
 
 
-# --- dataset pane: status dots ----------------------------------------------
-def test_dataset_panel_status_dots():
-    from pathlib import Path
-    from types import SimpleNamespace as NS
-
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.dataset import Dataset, ImageRecord
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.labels import LabelStore
-    from cloudlabeller.ui.dataset_panel import DatasetPanel
-    from cloudlabeller.ui.status import STATUS_COLORS
-
-    QApplication.instance() or QApplication([])
-
-    labels = LabelStore()
-    labels.mark_user_labeled("a.jpg")
-    labels.mark_auto_labeled("b.jpg")
-    project = NS(dataset=Dataset(images=[
-        ImageRecord(0, Path("a.jpg")), ImageRecord(1, Path("b.jpg")),
-        ImageRecord(2, Path("c.jpg"))]), labels=labels)
-
-    bus = EventBus()
-    panel = DatasetPanel(bus)
-    bus.project_opened.emit(project)
-
-    def dot(row):
-        item = panel.image_list.item(row)
-        return item.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name()
-
-    assert dot(0) == STATUS_COLORS["user"]       # green: user-labelled
-    assert dot(1) == STATUS_COLORS["auto"]       # yellow: auto-labelled
-    assert dot(2) == STATUS_COLORS["none"]       # red: unlabelled
-
-    # Labelling an image live-updates its dot (no rebuild needed).
-    labels.mark_user_labeled("c.jpg")
-    bus.image_labels_changed.emit("c.jpg")
-    assert dot(2) == STATUS_COLORS["user"]
-
-
-# --- image pane: shrinkable two-row toolbar ----------------------------------
-def test_image_view_toolbar_stays_shrinkable():
-    """The dock must be narrowable: buttons sit in two rows and the file-name
-    label must not impose its text width as a minimum (long names would
-    otherwise lock the pane wide)."""
-    from PySide6.QtWidgets import QApplication, QGridLayout, QSizePolicy
-
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.ui.image_view import ImageView
-
-    QApplication.instance() or QApplication([])
-    view = ImageView(EventBus())
-
-    assert view.lbl_name.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
-    grid = view.layout().itemAt(0).layout()
-    assert isinstance(grid, QGridLayout) and grid.rowCount() == 2
-    before = view.minimumSizeHint().width()
-    view.lbl_name.setText("a-very-long-file-name-from-a-drone_DJI_20260716.JPG"
-                          * 4)
-    assert view.minimumSizeHint().width() == before
-
-
-# --- detail levels: SfM vs MVS resolution presets ---------------------------
-def test_detail_control_levels():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.ui.detail_level import MVS_LEVELS, DetailControl
-
-    QApplication.instance() or QApplication([])
-    res = (5472, 3648)
-
-    # SfM: High (full) / Medium 1/4 (default) / Low 1/16 — divisors 1, 2, 4.
-    sfm = DetailControl(res)
-    assert sfm.combo.currentText().startswith("Medium — 1/4")
-    assert sfm.pixels() == 5472 // 2
-    assert [sfm.combo.itemText(i).split(" — ")[0] for i in range(3)] \
-        == ["High", "Medium", "Low"]
-    sfm.combo.setCurrentIndex(2)
-    assert "1/16" in sfm.combo.currentText() and sfm.pixels() == 5472 // 4
-
-    # MVS: Ultra/High/Medium (default)/Low — divisors 1, 2, 4, 8.
-    mvs = DetailControl(res, default_level="medium", levels=MVS_LEVELS)
-    assert mvs.combo.currentText().startswith("Medium — 1/16")
-    assert mvs.pixels() == 5472 // 4
-    assert [mvs.combo.itemText(i).split(" — ")[0] for i in range(4)] \
-        == ["Ultra", "High", "Medium", "Low"]
-    mvs.combo.setCurrentIndex(3)
-    assert "1/64" in mvs.combo.currentText() and mvs.pixels() == 5472 // 8
-    mvs.combo.setCurrentIndex(0)
-    assert mvs.pixels() == 0                          # Ultra = no cap
-
-    # Unknown source resolution: divisor-2 level falls back to custom_default.
-    fallback = DetailControl(None, default_level="medium",
-                             custom_default=2000, levels=MVS_LEVELS)
-    assert fallback.pixels() == 1000                  # divisor 4 -> default//2
-
-
 # --- meshing: density-matched depth + cost estimates -----------------------
 def _grid_cloud(nx: int, ny: int, spacing: float = 1.0) -> PointCloud:
     gx, gy = np.meshgrid(np.arange(nx) * spacing, np.arange(ny) * spacing)
@@ -478,38 +305,6 @@ def test_mesh_cli_parse_methods():
     ns = _parse(["mesh_cli", "dense.npz", "mesh.npz", "--method", "delaunay",
                  "--workspace", "ws", "--depth", "12"])
     assert ns.method == "delaunay" and ns.workspace == "ws" and ns.depth == 12
-
-
-def test_create_mesh_dialog_defaults_and_estimates():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.ui.mesh_dialog import CreateMeshDialog
-
-    QApplication.instance() or QApplication([])
-    dialog = CreateMeshDialog(_grid_cloud(300, 300), workspace=None)
-
-    opts = dialog.options()
-    assert opts == {"method": "poisson", "depth": None,
-                    "trim": 10.0, "point_weight": 1.0}
-    assert not dialog.rb_delaunay.isEnabled()        # no MVS workspace
-    assert "Rough estimate" in dialog.lbl_estimate.text()
-
-    dialog.cmb_detail.setCurrentIndex(1)             # "Maximum (depth 13)"
-    assert dialog.options()["depth"] == 13
-
-
-def test_pipeline_dialog_mesh_options():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.ui.run_pipeline_dialog import RunPipelineDialog
-
-    QApplication.instance() or QApplication([])
-    dialog = RunPipelineDialog(image_count=5)
-    assert dialog.mesh_options() == {"method": "poisson", "depth": None,
-                                     "trim": 10.0, "point_weight": 1.0}
-    dialog.cmb_mesh_method.setCurrentIndex(1)        # Delaunay
-    assert dialog.mesh_options()["method"] == "delaunay"
-    assert not dialog.cmb_mesh_detail.isEnabled()    # depth n/a for Delaunay
 
 
 # --- image-overlap (covisibility) graph -----------------------------------
@@ -714,24 +509,6 @@ def test_cli_parsers_new_flags():
     assert sfm_parse(["run_cli", "imgs", "ws"]).colmap_binary is None
 
 
-def test_sfm_dialog_gpu_default_and_mvs_quality():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.ui.run_pipeline_dialog import RunPipelineDialog
-    from cloudlabeller.ui.run_sfm_dialog import RunSfmDialog
-
-    QApplication.instance() or QApplication([])
-    # GPU defaults ON exactly when a CUDA COLMAP executable was found.
-    assert RunSfmDialog(5, gpu_available=True).options().use_gpu is True
-    assert RunSfmDialog(5, gpu_available=False).options().use_gpu is False
-
-    pipeline = RunPipelineDialog(5, gpu_available=True)
-    assert pipeline.sfm_options().use_gpu is True
-    assert pipeline.mvs_quality() == "standard"
-    pipeline.cmb_mvs_quality.setCurrentIndex(1)
-    assert pipeline.mvs_quality() == "draft"
-
-
 def test_colmap_streams_and_parses_progress():
     import sys
 
@@ -844,53 +621,6 @@ def test_import_cloud_and_mesh_from_ply(tmp_path):
     assert len(mesh.vertices) > 0 and mesh.faces.shape[1] == 3
 
 
-def test_lasso_projection_matches_vtk_renderer():
-    """project_to_display (vectorized) must agree with VTK's own per-point
-    SetWorldPoint/WorldToDisplay transform."""
-    from cloudlabeller.ui.lasso import composite_projection_matrix, project_to_display
-
-    pl = pv.Plotter(off_screen=True, window_size=(800, 600))
-    rng = np.random.default_rng(0)
-    pts = rng.uniform(-3, 3, (200, 3))
-    pl.add_mesh(pv.PolyData(pts))
-    pl.reset_camera()
-    pl.render()
-
-    matrix = composite_projection_matrix(pl.renderer)
-    screen, in_front = project_to_display(pts, matrix, 800, 600)
-
-    ren = pl.renderer
-    for i in range(0, 200, 17):
-        ren.SetWorldPoint(*pts[i], 1.0)
-        ren.WorldToDisplay()
-        dx, dy, _ = ren.GetDisplayPoint()
-        assert in_front[i]
-        assert abs(screen[i, 0] - dx) < 0.5 and abs(screen[i, 1] - dy) < 0.5
-    pl.close()
-
-
-def test_points_in_lasso_selects_correct_cluster():
-    from cloudlabeller.ui.lasso import composite_projection_matrix, points_in_lasso, \
-        project_to_display
-
-    pl = pv.Plotter(off_screen=True, window_size=(800, 600))
-    left = np.column_stack([np.full(50, -2.0), np.random.rand(50), np.random.rand(50)])
-    right = np.column_stack([np.full(50, 2.0), np.random.rand(50), np.random.rand(50)])
-    pts = np.vstack([left, right])
-    pl.add_mesh(pv.PolyData(pts))
-    pl.reset_camera()
-    pl.render()
-    matrix = composite_projection_matrix(pl.renderer)
-
-    # Lasso around the LEFT cluster's projected bounding box.
-    screen, _ = project_to_display(left, matrix, 800, 600)
-    lo, hi = screen.min(0) - 5, screen.max(0) + 5
-    path = np.array([[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]])
-    sel = points_in_lasso(pts, matrix, 800, 600, path)
-    assert set(sel) == set(range(50))           # all left, no right
-    pl.close()
-
-
 def test_paint_dense_cloud_undoable():
     from cloudlabeller.core.labels import LabelStore, Modality
 
@@ -925,118 +655,6 @@ def test_normals_backface_culling_in_bridge():
     assert visible_point_pixels(plain, below)[0].size > 0
     assert visible_point_pixels(with_n, below)[0].size == 0
     assert visible_point_pixels(with_n, above)[0].size > 0
-
-
-def test_auto_masks_are_virtual(tmp_path):
-    """Auto-labelled images get their overlay rendered from the cloud on demand;
-    no full-res mask is materialised until the user draws on the image."""
-    from PIL import Image
-    from PySide6.QtCore import QPointF
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.dataset import ImageRecord, PointCloud
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.project import Project
-    from cloudlabeller.ui.image_view import ImageView
-
-    QApplication.instance() or QApplication([])
-    proj = Project.create(tmp_path / "p.clproj")
-    proj.add_label("rock", "#ff0000")
-
-    cam = _app_camera(0.0)
-    img_path = proj.images_dir / "a.png"
-    Image.new("RGB", (cam.width, cam.height), (5, 5, 5)).save(img_path)
-    proj.dataset.images = [ImageRecord(0, img_path, cam)]
-    # a labelled cloud in front of the camera
-    rng = np.random.default_rng(0)
-    xyz = np.column_stack([rng.uniform(-1, 1, 300), rng.uniform(-1, 1, 300),
-                           rng.uniform(4, 6, 300)]).astype(np.float32)
-    proj.dataset.cloud = PointCloud(xyz=xyz)
-    proj.labels.cloud_labels = np.zeros(300, np.int32)      # all class 0
-    proj.labels.mark_auto_labeled("a.png")
-
-    view = ImageView(EventBus())
-    view.project = proj
-    view.show_image_sync("a.png")
-
-    assert "a.png" not in proj.labels.image_masks           # nothing materialised
-    assert view._auto_mask is not None                      # rendered on demand
-    assert (view._auto_mask != -1).any()
-    auto_snapshot = view._auto_mask.copy()                  # commit clears the transient
-
-    # Drawing a polygon materialises the mask, seeded with the auto labels.
-    proj.schema.add("veg", "#00ff00")                       # class 1
-    view._set_active_class(1)
-    for x, y in [(10, 10), (60, 10), (60, 60), (10, 60)]:
-        view._add_vertex(QPointF(x, y))
-    view._commit()
-    stored = proj.labels.image_masks["a.png"]
-    assert stored[30, 30] == 1                              # user polygon
-    assert view._auto_mask is None                          # transient cleared: stored now
-    outside = auto_snapshot == 0
-    outside[:70, :70] = False                               # away from the polygon
-    if outside.any():
-        r, c = np.argwhere(outside)[0]
-        assert stored[r, c] == 0                            # auto labels preserved
-
-
-def test_lasso_path_actor_offscreen():
-    from cloudlabeller.ui.viewer3d import _LassoPathActor
-
-    pl = pv.Plotter(off_screen=True, window_size=(400, 300))
-    pl.add_mesh(pv.PolyData(np.random.rand(50, 3)))
-    actor = _LassoPathActor(pl)
-    assert not actor.actor.GetVisibility()
-    actor.begin((10.0, 10.0))
-    actor.add_point((100.0, 20.0))
-    actor.add_point((60.0, 90.0))
-    assert actor.actor.GetVisibility()
-    pl.render()                                             # draws without error
-    actor.clear()
-    assert not actor.actor.GetVisibility()
-    pl.close()
-
-
-def test_view_panel_lasso_enable_rules():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.ui.view_panel import ViewPanel
-
-    QApplication.instance() or QApplication([])
-    panel = ViewPanel(EventBus())
-    assert not panel.btn_lasso.isEnabled()            # no project / no dense
-
-    class _DS:
-        def has(self, k):
-            return k in ("sparse", "dense")
-
-    class _Proj:
-        dataset = _DS()
-
-    panel._on_project(_Proj())
-    assert panel.btn_lasso.isEnabled()                # sparse shown: delete-lasso
-    panel._rep_buttons["dense"].setChecked(True)
-    assert panel.btn_lasso.isEnabled()                # dense shown: label-lasso
-
-    # selection actions are gated by the representation
-    panel.set_selection_count(1234)
-    assert panel.btn_apply.isEnabled() and not panel.btn_delete.isEnabled()
-    assert "1,234" in panel.lbl_selection.text()
-    panel._rep_buttons["sparse"].setChecked(True)
-    panel.set_selection_count(1234)
-    assert panel.btn_delete.isEnabled() and not panel.btn_apply.isEnabled()
-    panel.set_selection_count(0)
-    assert not panel.btn_apply.isEnabled() and not panel.btn_delete.isEnabled()
-
-    # the mesh view disarms and disables the lasso
-    panel.btn_lasso.setChecked(True)
-    toggles: list[bool] = []
-    panel.lasso_toggled.connect(toggles.append)
-    panel._rep_buttons["mesh"].setEnabled(True)
-    panel._rep_buttons["mesh"].setChecked(True)
-    assert not panel.btn_lasso.isEnabled() and not panel.btn_lasso.isChecked()
-    assert toggles and toggles[-1] is False           # lasso disarmed
 
 
 def test_distorted_projection_matches_pycolmap():
@@ -1174,231 +792,6 @@ def test_transfer_round_trip():
     assert np.mean(recovered[visible] == labels[visible]) > 0.9   # labels round-trip
 
 
-def test_frustum_points_scale():
-    from cloudlabeller.ui.camera_gizmo import camera_center, frustum_points
-
-    cam = _app_camera(2.0)
-    c = camera_center(cam)
-    p_half = frustum_points(cam, 0.5)
-    p_full = frustum_points(cam, 1.0)
-    assert np.allclose(p_half[0], c) and np.allclose(p_full[0], c)   # centre fixed
-    d_half = np.linalg.norm(p_half[1:] - c, axis=1)
-    d_full = np.linalg.norm(p_full[1:] - c, axis=1)
-    assert np.allclose(d_full, 2 * d_half)                           # corners scale linearly
-
-
-def test_frustum_resize_in_place():
-    from cloudlabeller.ui.camera_gizmo import camera_frustum, frustum_points
-
-    cam = _app_camera(0.0)
-    poly = camera_frustum(cam, 0.5)
-    pl = pv.Plotter(off_screen=True)
-    actor = pl.add_mesh(poly)
-    extent0 = np.ptp(np.array(poly.bounds).reshape(3, 2), axis=1).sum()
-    poly.points = frustum_points(cam, 2.0)        # 4x larger, same mesh object
-    extent1 = np.ptp(np.array(poly.bounds).reshape(3, 2), axis=1).sum()
-    assert actor.mapper.dataset is poly           # actor renders the mutated mesh
-    assert extent1 > extent0
-    pl.close()
-
-
-def test_blend_point_colors():
-    from cloudlabeller.ui.viewer3d import blend_point_colors
-
-    rgb = np.array([[100, 100, 100], [10, 20, 30]], np.uint8)
-    labels = np.array([-1, 1])                   # pt0 unlabelled (-1), pt1 = class 1 (red)
-    lut = {0: (0, 0, 0), 1: (255, 0, 0)}
-
-    assert np.array_equal(blend_point_colors(rgb, labels, lut, 0.0), rgb)   # RGB end
-
-    full = blend_point_colors(rgb, labels, lut, 1.0)                        # label end
-    assert np.array_equal(full[0], [100, 100, 100])   # unlabelled stays RGB
-    assert np.array_equal(full[1], [255, 0, 0])       # labelled -> class colour
-
-    half = blend_point_colors(rgb, labels, lut, 0.5)  # halfway for the labelled pt
-    assert np.array_equal(half[1], [132, 10, 15])      # ((10+255)/2, 10, 15)
-
-    # mismatched label length -> falls back to RGB
-    assert np.array_equal(blend_point_colors(rgb, np.array([1]), lut, 1.0), rgb)
-
-
-def test_label_panel_add_rename_color_remove(tmp_path):
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.project import Project
-    from cloudlabeller.ui.label_panel import LabelPanel
-
-    QApplication.instance() or QApplication([])
-    bus = EventBus()
-    panel = LabelPanel(bus)
-    proj = Project.create(tmp_path / "p.clproj")
-    actives: list[int] = []
-    bus.active_class_changed.connect(actives.append)
-    bus.project_opened.emit(proj)
-
-    # Empty schema: only the fixed "unlabelled" (-1) row, active = -1, not removable.
-    assert len(panel._rows) == 1 and panel._rows[0].class_id == -1
-    assert panel._active == -1 and not panel.remove_btn.isEnabled()
-
-    panel._add()
-    panel._add()
-    assert [c.id for c in proj.schema.classes] == [0, 1]
-    assert len(panel._rows) == 3                          # unlabelled + 2 user
-    assert panel._active == 1 and actives[-1] == 1        # newest is active
-
-    panel._on_renamed(0, "rock")
-    assert proj.schema.by_id(0).name == "rock"
-    panel._on_recolored(1, "#0000ff")
-    assert proj.schema.by_id(1).color == "#0000ff"
-
-    panel._remove()                                       # removes active (1)
-    assert [c.name for c in proj.schema.classes] == ["rock"]
-    assert panel._active == 0
-
-    # Selecting unlabelled disables Remove; trying to remove is a no-op.
-    panel._set_active(-1)
-    assert not panel.remove_btn.isEnabled()
-    panel._remove()
-    assert [c.name for c in proj.schema.classes] == ["rock"]   # unchanged
-
-
-def test_image_view_polygon_fills_int32_mask(tmp_path):
-    from PIL import Image
-    from PySide6.QtCore import QPointF
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.dataset import ImageRecord
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.project import Project
-    from cloudlabeller.ui.image_view import ImageView
-
-    QApplication.instance() or QApplication([])
-    proj = Project.create(tmp_path / "p.clproj")
-    proj.add_label("rock", "#ff0000")                 # class 0
-    img_path = proj.images_dir / "a.png"
-    Image.new("RGB", (20, 20), (10, 20, 30)).save(img_path)
-    proj.dataset.images = [ImageRecord(image_id=0, path=img_path)]
-
-    bus = EventBus()
-    view = ImageView(bus)
-    bus.project_opened.emit(proj)
-    bus.active_class_changed.emit(0)                  # active = rock
-    view.show_image_sync("a.png")
-    assert view.current_name == "a.png"
-
-    for x, y in [(2, 2), (15, 2), (15, 15), (2, 15)]:  # square polygon
-        view._add_vertex(QPointF(x, y))
-    view._commit()
-
-    mask = proj.labels.image_masks["a.png"]
-    assert mask.dtype == np.int32 and mask.shape == (20, 20)
-    assert mask[8, 8] == 0                            # inside polygon -> class 0
-    assert mask[0, 0] == -1                           # outside -> unlabelled
-    assert not view._vertices                         # polygon cleared after commit
-    assert proj.labels.status_of("a.png") == "user"   # drawing marks it user (green dot)
-
-
-def test_image_view_undo_vertex(tmp_path):
-    from PIL import Image
-    from PySide6.QtCore import QPointF
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.dataset import ImageRecord
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.project import Project
-    from cloudlabeller.ui.image_view import ImageView
-
-    QApplication.instance() or QApplication([])
-    proj = Project.create(tmp_path / "p.clproj")
-    proj.add_label("rock", "#ff0000")
-    img_path = proj.images_dir / "a.png"
-    Image.new("RGB", (20, 20), (0, 0, 0)).save(img_path)
-    proj.dataset.images = [ImageRecord(image_id=0, path=img_path)]
-
-    bus = EventBus()
-    view = ImageView(bus)
-    bus.project_opened.emit(proj)
-    bus.active_class_changed.emit(0)
-    view.show_image_sync("a.png")
-
-    for x, y in [(2, 2), (15, 2), (15, 15)]:
-        view._add_vertex(QPointF(x, y))
-    assert len(view._vertices) == 3 and len(view._markers) == 3
-
-    view._undo_vertex()                               # right-click undo
-    assert len(view._vertices) == 2 and len(view._markers) == 2
-
-    view._undo_vertex()
-    view._undo_vertex()
-    view._undo_vertex()                               # extra undo is a safe no-op
-    assert view._vertices == [] and view._markers == []
-
-
-def test_dataset_panel_selection_sync(tmp_path):
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.dataset import ImageRecord
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.project import Project
-    from cloudlabeller.ui.dataset_panel import DatasetPanel
-
-    QApplication.instance() or QApplication([])
-    proj = Project.create(tmp_path / "p.clproj")
-    proj.dataset.images = [ImageRecord(0, tmp_path / "a.jpg"),
-                           ImageRecord(1, tmp_path / "b.jpg")]
-    bus = EventBus()
-    panel = DatasetPanel(bus)
-    emitted: list[str] = []
-    bus.image_selected.connect(emitted.append)
-    bus.project_opened.emit(proj)
-
-    bus.image_selected.emit("b.jpg")                  # e.g. from a frustum click
-    assert panel.image_list.currentItem().text() == "b.jpg"   # row synced
-
-    panel.image_list.setCurrentRow(0)                 # user clicks a row
-    assert emitted[-1] == "a.jpg"
-
-
-def test_view_panel_signals_and_availability():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.ui.view_panel import ViewPanel
-
-    QApplication.instance() or QApplication([])
-    bus = EventBus()
-    panel = ViewPanel(bus)
-    reps, cams, blends = [], [], []
-    panel.representation_changed.connect(reps.append)
-    panel.cameras_toggled.connect(cams.append)
-    panel.label_blend_changed.connect(blends.append)
-
-    # No project: defaults to sparse, all representations disabled.
-    assert panel.current_representation() == "sparse"
-    assert not panel._rep_buttons["dense"].isEnabled()
-
-    # Slider emits a 0..1 blend; camera checkbox emits bool.
-    panel.slider.setValue(50)
-    assert blends and abs(blends[-1] - 0.5) < 1e-6
-    panel.chk_cameras.setChecked(False)
-    assert cams[-1] is False
-
-    # A project with sparse+dense enables those; picking dense emits.
-    class _DS:
-        def has(self, k):
-            return k in ("sparse", "dense")
-
-    class _Proj:
-        dataset = _DS()
-
-    bus.project_opened.emit(_Proj())
-    assert panel._rep_buttons["dense"].isEnabled()
-    assert not panel._rep_buttons["mesh"].isEnabled()
-    panel._rep_buttons["dense"].setChecked(True)
-    assert reps[-1] == "dense"
-
-
 def test_list_image_files_filters_sidecars(tmp_path):
     from cloudlabeller.photogrammetry.sfm import list_image_files
 
@@ -1421,44 +814,6 @@ def test_run_sfm_rejects_no_images(tmp_path):
     (imgs / "DJI_PPKNAV.nav").write_bytes(b"x")   # sidecar only, no real images
     with pytest.raises(RuntimeError, match="No image files"):
         run_sfm(imgs, tmp_path / "ws")
-
-
-def test_run_sfm_dialog():
-    from PySide6.QtWidgets import QApplication, QDialogButtonBox
-    from cloudlabeller.ui.run_sfm_dialog import RunSfmDialog
-
-    QApplication.instance() or QApplication([])
-    empty = RunSfmDialog(0)                   # empty store -> OK disabled
-    assert not empty.buttons.button(QDialogButtonBox.Ok).isEnabled()
-
-    dlg = RunSfmDialog(57)                     # images present -> OK enabled
-    assert dlg.buttons.button(QDialogButtonBox.Ok).isEnabled()
-
-    # defaults: spatial matcher (GPS), single camera, CPU
-    o = dlg.options()
-    assert o.matcher == "spatial" and o.single_camera and not o.use_gpu
-
-    # each matcher radio maps correctly
-    dlg.rb_sequential.setChecked(True)
-    assert dlg.options().matcher == "sequential"
-
-    # toggles reflected
-    dlg.rb_exhaustive.setChecked(True)
-    dlg.chk_gpu.setChecked(True)
-    dlg.cmb_model.setCurrentText("OPENCV")
-    dlg.detail.combo.setCurrentIndex(0)               # High = full resolution
-    o2 = dlg.options()
-    assert o2.matcher == "exhaustive" and o2.use_gpu and o2.camera_model == "OPENCV"
-    assert o2.max_image_size == 0
-
-    # relative detail presets derive from the source resolution
-    rel = RunSfmDialog(57, source_resolution=(8000, 6000))
-    assert rel.options().max_image_size == 4000       # default: Medium = 1/2
-    rel.detail.combo.setCurrentIndex(2)
-    assert rel.options().max_image_size == 2000       # Low = 1/4
-    rel.detail.combo.setCurrentIndex(3)               # Custom -> spinbox value
-    rel.detail.spin.setValue(3200)
-    assert rel.options().max_image_size == 3200
 
 
 def test_distortion_foldback_points_not_visible():
@@ -1492,23 +847,6 @@ def test_distortion_foldback_points_not_visible():
     cloud = PointCloud(xyz=pts.astype(np.float32))
     idx, pix = visible_point_pixels(cloud, cam)
     assert 1 in idx and 0 not in idx
-
-
-def test_merged_frustums_batches_all_cameras():
-    """One merged PolyData for N cameras (points 5i..5i+4 belong to camera i) —
-    per-camera actors made opening large projects slow."""
-    from cloudlabeller.ui.camera_gizmo import frustum_points, merged_frustums
-
-    cams = [_app_camera(tx) for tx in (0.0, 1.0, 2.0)]
-    poly = merged_frustums(cams, scale=0.5)
-    assert poly.n_points == 15                      # 5 per camera
-    assert poly.n_cells == 24                       # 8 line segments per camera
-    for i, cam in enumerate(cams):
-        assert np.allclose(poly.points[5 * i:5 * i + 5],
-                           frustum_points(cam, 0.5))
-    # resize-in-place contract: reassigning points matches a fresh build
-    poly.points = np.vstack([frustum_points(c, 1.5) for c in cams])
-    assert np.allclose(poly.points[5:10], frustum_points(cams[1], 1.5))
 
 
 def test_sparse_point_stats_and_filtering(tmp_path):
@@ -1549,24 +887,6 @@ def test_sparse_point_stats_and_filtering(tmp_path):
     assert len(store.cloud_labels) == 27
     assert list(store.cloud_labels[:2]) == [1, 1]   # points 3,4 kept their label
     assert not store.can_undo()                     # history cleared
-
-
-def test_clean_cloud_dialog_mask():
-    from PySide6.QtWidgets import QApplication, QDialogButtonBox
-
-    from cloudlabeller.ui.clean_cloud_dialog import CleanCloudDialog
-
-    QApplication.instance() or QApplication([])
-    views = np.array([2, 3, 5, 8, 2])
-    errors = np.array([0.5, 1.0, 3.5, 0.8, 9.0])
-    d = CleanCloudDialog(views, errors)
-    # defaults: >=3 views, <=2.0 px  -> keeps indices 1 and 3
-    assert list(d.mask()) == [False, True, False, True, False]
-    assert "Keeps 2 of 5" in d.lbl_preview.text()
-    d.spin_views.setValue(2)
-    d.spin_error.setValue(10.0)                     # keeps everything
-    assert d.mask().all()
-    assert not d.buttons.button(QDialogButtonBox.Ok).isEnabled()  # no-op clean
 
 
 class TestGeoref:

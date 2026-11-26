@@ -18,7 +18,7 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""UI-agnostic domain model. No Qt imports allowed in this package."""
+"""UI-agnostic domain model. No GUI-toolkit imports allowed in this package."""
 
 from cloudlabeller.core.dataset import Camera, Dataset, ImageRecord, Mesh, PointCloud
 from cloudlabeller.core.label_schema import LabelClass, LabelSchema

@@ -70,8 +70,8 @@ class _PaintCommand:
 class LabelStore:
     """Owns per-point cloud labels and per-image pixel masks.
 
-    Notifications are delivered through :meth:`subscribe`; the UI layer wires
-    these to the Qt event bus (keeping this module Qt-free).
+    Notifications are delivered through :meth:`subscribe`; the Engine turns
+    them into its own notifications (this module knows no UI).
     """
 
     cloud_labels: np.ndarray | None = None          # (N,) int32 sparse-cloud labels

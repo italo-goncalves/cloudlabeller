@@ -372,24 +372,3 @@ class TestMinorImprovements:
         (stray / "data.txt").write_text("x")           # no manifest -> not a model
         model_store.delete_model(tmp_path, "keepme")
         assert (stray / "data.txt").exists()
-
-    def test_dim_other_classes(self):
-        from cloudlabeller.ui.viewer3d import dim_other_classes
-
-        colors = np.full((4, 3), 200, np.uint8)
-        labels = np.array([0, 1, 0, -1], np.int32)
-        out = dim_other_classes(colors, labels, class_id=0)
-        assert (out[0] == 200).all() and (out[2] == 200).all()   # isolated: full
-        assert (out[1] == 30).all() and (out[3] == 30).all()     # others: dimmed
-        assert (colors == 200).all()                             # input untouched
-        # mismatched labels -> unchanged
-        assert dim_other_classes(colors, np.array([0]), 0) is colors
-
-    def test_format_count(self):
-        from cloudlabeller.ui.label_panel import format_count
-
-        assert format_count(500, 1000) == "500 · 50%"
-        assert format_count(12_300, 100_000) == "12.3k · 12%"
-        assert format_count(12_255_000, 22_751_916) == "12.3M · 54%"
-        assert format_count(0, 100) == "0 · 0%"
-        assert format_count(5, 0) == ""

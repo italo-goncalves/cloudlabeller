@@ -21,7 +21,7 @@
 """Subprocess entry point for reconstruction.
 
 Run in its own process so COLMAP's native threads / OpenGL (GPU SIFT) context
-cannot collide with the GUI's VTK OpenGL context, and so a native crash fails the
+cannot collide with a renderer's OpenGL context, and so a native crash fails the
 job instead of taking down the app.
 
 Usage::

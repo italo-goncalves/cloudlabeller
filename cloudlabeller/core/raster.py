@@ -126,7 +126,7 @@ def mask_to_indexed(mask: np.ndarray,
 
     The colormap approach: instead of materialising a full RGBA overlay
     (179 MB / ~450 ms at 21 Mpx), emit a 1-byte-per-pixel index (45 MB, ~110 ms
-    total with the Qt colour-table conversion). Row 0 of the table is fully
+    total with the colour-table conversion). Row 0 of the table is fully
     transparent and represents unlabelled (-1) — the "NaN" of the palette;
     a trailing transparent sentinel row absorbs stray ids from older schemas.
     """

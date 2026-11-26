@@ -20,8 +20,7 @@
 
 """Headless reconstruction entry point: images → (sparse cloud, cameras).
 
-This is decoupled from Qt so it can be tested/scripted directly and run on a
-worker thread by the UI.
+This is decoupled from any UI so it can be tested/scripted directly.
 """
 
 from __future__ import annotations
@@ -73,7 +72,7 @@ def reconstruct(
 
     Note: COLMAP's GPU SIFT creates its own OpenGL context. Run this in a
     *separate process* (see :mod:`cloudlabeller.photogrammetry.run_cli`) when a
-    GUI with a live OpenGL/VTK context is present, or two GL contexts in one
+    live OpenGL context is present in the caller, or two GL contexts in one
     process can crash. ``use_gpu`` defaults to False (CPU SIFT) for safety.
     See :func:`run_sfm` for the remaining options.
     """

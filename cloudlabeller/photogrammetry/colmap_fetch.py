@@ -27,9 +27,8 @@ via Photogrammetry → Download COLMAP…. The install target is
 ``~/.cloudlabeller/colmap``, which :func:`cloudlabeller.photogrammetry.mvs.
 find_colmap_binary` already searches.
 
-Qt-free: meant to run on a ``workers.job.Job`` (pure network + zip I/O — no
-native-library GIL hazard), receiving ``progress`` / ``should_stop`` from the
-Job runner.
+Pure network + zip I/O, no native library; it receives ``progress`` /
+``should_stop`` from whatever runs it.
 """
 
 from __future__ import annotations

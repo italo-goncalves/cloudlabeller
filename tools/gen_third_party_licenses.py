@@ -29,7 +29,7 @@ site-packages being distributed::
 For every installed package it emits name, version, declared license and the
 license/notice files shipped in its dist-info. Special sections cover the
 components whose obligations are not captured by a wheel's own metadata:
-the embedded Python runtime, Qt/PySide6 (LGPLv3), FFmpeg inside the OpenCV
+the embedded Python runtime, FFmpeg inside the OpenCV
 wheel, OpenSSL, and the separately-downloaded COLMAP bundle. The full
 LGPL-3.0 / GPL-3.0 texts are appended from tools/licenses/.
 """
@@ -69,14 +69,6 @@ Python runtime
     This application ships the CPython interpreter, licensed under the
     Python Software Foundation License (see LICENSE.txt in the application
     root, distributed with the embedded runtime).
-
-Qt / PySide6 / Shiboken6 (LGPLv3)
-    The user interface uses Qt through PySide6, used under the GNU Lesser
-    General Public License v3 (full text in the appendix below). Qt and
-    PySide6 are dynamically linked and ship as separate, replaceable library
-    files (the PySide6/shiboken6 folders in Lib/site-packages): you may
-    replace them with your own builds. Their source code is available at
-    https://code.qt.io/ and https://pypi.org/project/PySide6/ .
 
 FFmpeg (inside the OpenCV wheel, LGPL)
     The opencv-python(-headless) wheel bundles an LGPL build of FFmpeg as a separate,

@@ -2,13 +2,12 @@
 # mirrors it. The desktop app's Environment installs the pinned lock made from
 # these (apps/desktop/environment/requirements.lock, tools/lock_environment.py).
 #
-# Dev env (the 0.2.x Qt app + tests):  pip install -e .[qt,dev]
+# Dev env (the Engine, the Jobs and the tests):  pip install -e .[dev]
 
 # Core
 numpy>=1.24
 scipy>=1.10
-# Headless: the app never opens an OpenCV window (the GUI build also bundles
-# its own Qt on Linux). Don't install opencv-python beside it: both own cv2/.
+# Headless: the app never opens an OpenCV window. Don't install opencv-python beside it: both own cv2/.
 opencv-python-headless>=4.8
 pillow>=10          # polygon rasterisation (core/raster.py)
 
@@ -31,11 +30,3 @@ pycolmap-cuda12==4.2.*; sys_platform == "linux"
 tensorflow==2.19.*
 tensorflow[and-cuda]==2.19.*; sys_platform == "linux"
 scikit-image>=0.22   # augmentation (gamma correction) in ml/dataset_builder.py
-
-# --- extra `qt`: the 0.2.x Qt app (not in the desktop app's Environment) ---
-# Pin PySide6 < 6.8: the 6.8+ Qt Windows build links icuuc.dll (ICU), which
-# clashes with the ICU shipped by Anaconda / Windows (WinError 127 on import).
-# 6.7.3 is verified working in the Anaconda-based venv on this machine.
-PySide6==6.7.3
-pyvista>=0.43
-pyvistaqt>=0.11

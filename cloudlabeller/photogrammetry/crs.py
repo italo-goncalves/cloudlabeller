@@ -20,8 +20,8 @@
 
 """Coordinate reference systems: local ENU frame -> projected CRS (pyproj).
 
-The app's internal frame stays local metric ENU (clouds are float32 and VTK
-jitters at UTM magnitudes); conversion to a projected CRS happens only at
+The app's internal frame stays local metric ENU (clouds are float32 and a
+renderer jitters at UTM magnitudes); conversion to a projected CRS happens only at
 export time, in float64. COLMAP's ``model_aligner`` anchors the ENU frame at
 the **first** reference GPS coordinate (the first line of ``ref_images.txt``
 — verified in COLMAP's ``ConvertCameraLocations``), so the exact export
@@ -378,8 +378,7 @@ def export_needs_geoid(spec: dict) -> bool:
 
 def build_export_transform(spec: dict, progress=lambda f, m="": None):
     """``(transform, crs)`` for :mod:`cloudlabeller.io.export`; ``(None,
-    None)`` for the local frame. May download the geoid grid once (the Qt
-    app does; the Engine asks for the ``geoid`` Job first)."""
+    None)`` for the local frame. May download the geoid grid once (the Engine asks for the ``geoid`` Job first)."""
     if spec["kind"] == "local":
         return None, None
     import pyproj

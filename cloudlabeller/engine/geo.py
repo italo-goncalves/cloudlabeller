@@ -157,7 +157,7 @@ def _target(params: dict, formats: tuple) -> Path:
 def _export_spec(engine: Engine, params: dict) -> dict:
     """How this export writes coordinates (see ``crs.export_spec``). A
     choice made for an ENU Project is kept in the manifest, as the Qt app
-    did; ``crs`` null reuses the kept one."""
+    did (0.2.x); ``crs`` null reuses the kept one."""
     from cloudlabeller.photogrammetry.crs import export_needs_geoid, export_spec
 
     geo = engine.project.settings.get("georeferenced")

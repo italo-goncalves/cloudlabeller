@@ -214,25 +214,3 @@ def test_georef_cli_aligns_project_natively(tmp_path, monkeypatch, capsys):
 
 
 # -- dialogs ------------------------------------------------------------------
-def test_sfm_dialog_georef_checkbox():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.ui.run_sfm_dialog import RunSfmDialog
-
-    QApplication.instance() or QApplication([])
-    dlg = RunSfmDialog(10, gps_found=3)
-    assert dlg.chk_georef.isEnabled() and dlg.georeference()
-    dlg_no = RunSfmDialog(10, gps_found=1)
-    assert not dlg_no.chk_georef.isEnabled() and not dlg_no.georeference()
-
-
-def test_pipeline_dialog_georef_checkbox():
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.ui.run_pipeline_dialog import RunPipelineDialog
-
-    QApplication.instance() or QApplication([])
-    dlg = RunPipelineDialog(10, gps_found=3)
-    assert dlg.chk_georef.isEnabled() and dlg.georeference()
-    dlg_no = RunPipelineDialog(10, gps_found=0)
-    assert not dlg_no.chk_georef.isEnabled() and not dlg_no.georeference()

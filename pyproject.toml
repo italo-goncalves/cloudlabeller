@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudlabeller"
-version = "0.2.1"
+version = "0.3.0"
 description = "Photogrammetry + bidirectional 2D/3D labelling with label transfer and U-Net propagation."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,7 @@ license = { text = "GPL-3.0-or-later" }
 # Mirror of requirements.txt (the authoritative, commented list). The base
 # dependencies are what the Engine and the Jobs need: they are the desktop
 # app's Environment (apps/desktop/environment/requirements.lock, made by
-# tools/lock_environment.py). The 0.2.x Qt app needs the `qt` extra on top.
+# tools/lock_environment.py).
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -35,21 +35,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-qt = [
-    "PySide6==6.7.3",  # 6.8+ links ICU (icuuc.dll) -> WinError 127 with Anaconda/Windows ICU
-    "pyvista>=0.43",
-    "pyvistaqt>=0.11",
-]
 dev = [
     "pytest>=7.4",
     "ruff>=0.4",
     "black>=24.0",
 ]
 
-[project.scripts]
-cloudlabeller = "cloudlabeller.app:main"
-
-# The repo also holds apps/, tools/, scripts/ and tests/: only the app's own
+# The repo also holds apps/, tools/ and tests/: only the app's own
 # package goes into the wheel the desktop app's Environment installs.
 [tool.setuptools.packages.find]
 include = ["cloudlabeller*"]

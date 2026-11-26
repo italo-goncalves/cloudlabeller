@@ -20,12 +20,13 @@
 
 """CloudLabeller — photogrammetry + bidirectional 2D/3D labelling.
 
-The package is organised so that :mod:`cloudlabeller.core` is UI-agnostic and
-free of Qt imports; the GUI in :mod:`cloudlabeller.ui` depends on core, never the
-other way around.
+The package is the Engine behind the desktop app (``apps/``): the domain model
+in :mod:`cloudlabeller.core`, the JSON-RPC server in :mod:`cloudlabeller.engine`,
+and the stage CLIs that run as Job subprocesses. None of it imports a GUI
+toolkit.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 
 def _preload_msvc_runtime() -> None:

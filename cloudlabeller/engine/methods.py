@@ -22,10 +22,10 @@
 
 Each handler takes the Engine and the request's params and returns a
 JSON-able result, or a :class:`Deferred` for work that takes a while. The
-handlers carry over what the Qt window decided around each action (which
+handlers carry over what the 0.2.x Qt window decided around each action (which
 images a transfer reads, what a status change persists), not any UI.
 
-Persistence follows the Qt app: a status change writes ``project.json`` at
+Persistence is as it was in the 0.2.x Qt app: a status change writes ``project.json`` at
 once; a painted image mask is written at once; other label arrays are marked
 dirty and saved within a minute, on ``project.save`` and on close.
 """

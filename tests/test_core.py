@@ -200,6 +200,34 @@ def test_auto_mask_source_prefers_labelled_dense(tmp_path):
     assert cloud is proj.dataset.cloud                # mismatched dense ignored
 
 
+def test_auto_masks_are_virtual(tmp_path):
+    """Auto-labelled images get their mask rendered from the cloud on demand;
+    nothing full-resolution is stored in the label store."""
+    from PIL import Image
+
+    from cloudlabeller.core.dataset import Camera, ImageRecord
+
+    proj = Project.create(tmp_path / "p.clproj")
+    proj.add_label("rock", "#ff0000")
+    K = np.array([[1000.0, 0, 320], [0, 1000.0, 240], [0, 0, 1]])
+    cam = Camera(K=K, R=np.eye(3), t=np.zeros(3), width=640, height=480,
+                 model="PINHOLE")
+    img_path = proj.images_dir / "a.png"
+    Image.new("RGB", (cam.width, cam.height), (5, 5, 5)).save(img_path)
+    proj.dataset.images = [ImageRecord(0, img_path, cam)]
+    rng = np.random.default_rng(0)
+    xyz = np.column_stack([rng.uniform(-1, 1, 300), rng.uniform(-1, 1, 300),
+                           rng.uniform(4, 6, 300)]).astype(np.float32)
+    proj.dataset.cloud = PointCloud(xyz=xyz)
+    proj.labels.cloud_labels = np.zeros(300, np.int32)      # all class 0
+    proj.labels.mark_auto_labeled("a.png")
+
+    mask = proj.render_auto_mask("a.png")
+    assert "a.png" not in proj.labels.image_masks           # nothing materialised
+    assert mask is not None and mask.shape == (480, 640)
+    assert (mask != -1).any() and set(np.unique(mask)) <= {-1, 0}
+
+
 def test_stale_auto_masks_purged_on_open(tmp_path):
     """Masks saved for auto-status images are derived data: skipped and removed
     on open (older versions materialised them, exhausting RAM)."""

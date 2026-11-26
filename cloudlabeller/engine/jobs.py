@@ -24,7 +24,7 @@ A Job kind knows three things: how to build its command line from the
 window's options (refusing with a Problem when it can't run), whether it is
 a GPU Job, and what to do to the open Project when it ends well (reload
 products, record a new frame, mark predicted images). That last part is
-what the Qt window's ``_on_*_done`` handlers did.
+what the 0.2.x Qt window's ``_on_*_done`` handlers did.
 
 The core runs ``<Environment python> -m <module> <args…>``, writes the
 output to the plan's log file, and reads the ``*_cli`` line protocol:

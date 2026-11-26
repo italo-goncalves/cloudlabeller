@@ -105,7 +105,7 @@ def _sparse_only(params: dict) -> None:
 
 
 def _delete_points(engine: Engine, keep: np.ndarray) -> dict:
-    """Drop the sparse points where ``keep`` is False, as the Qt window's
+    """Drop the sparse points where ``keep`` is False, as the 0.2.x Qt window's
     ``_apply_sparse_clean`` did: rewrite the cloud, the labels follow, and
     the undo history is cleared."""
     project = engine.project

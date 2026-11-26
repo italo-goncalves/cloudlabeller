@@ -18,7 +18,7 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""PLY I/O without pyvista: io/ply.py writes, trimesh reads (io/geometry.py)."""
+"""PLY I/O: io/ply.py writes, trimesh reads (io/geometry.py)."""
 
 import numpy as np
 import pytest

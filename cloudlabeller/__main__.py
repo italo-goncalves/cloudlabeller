@@ -18,9 +18,21 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Allow ``python -m cloudlabeller`` to launch the GUI."""
+"""``python -m cloudlabeller`` has nothing to launch: the interface is the
+desktop app, and this package is the Engine behind it."""
 
-from cloudlabeller.app import main
+import sys
+
+
+def main() -> int:
+    print(
+        "CloudLabeller's interface is the desktop app; this package has no GUI "
+        "of its own.\n"
+        "The Engine runs as: python -m cloudlabeller.engine",
+        file=sys.stderr,
+    )
+    return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

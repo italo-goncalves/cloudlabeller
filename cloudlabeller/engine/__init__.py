@@ -30,7 +30,7 @@ results, the Tauri core runs them (ADR-0004, :mod:`.jobs`).
 The contract — every method, notification and error code — is
 ``docs/engine.md``; ``tests/test_engine_contract.py`` holds the Engine to it.
 
-Qt-free: nothing here may import PySide6, and TensorFlow never runs in this
+GUI-free: nothing here may import PySide6, pyvista or vtk, and TensorFlow never runs in this
 process (training and prediction are Jobs).
 """
 

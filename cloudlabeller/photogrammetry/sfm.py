@@ -23,8 +23,8 @@
 A single SfM run yields BOTH a sparse point cloud and the solved camera poses,
 so no dense/MVS step (and no CUDA) is required to get a first cloud + cameras.
 
-Heavy stages call ``progress(fraction, message)`` so a worker thread can relay
-status to the UI without this module importing Qt.
+Heavy stages call ``progress(fraction, message)`` so the caller can relay
+status to a UI without this module knowing one.
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ def run_sfm(
         run fails. Defaults to
         **False**; the caller must be isolated in a subprocess — GPU SIFT
         creates its own GL/CUDA context, which crashes next to a live
-        in-process VTK context.
+        in-process OpenGL context.
       * ``single_camera`` — share one intrinsic across all images (right for a
         single physical camera, e.g. one drone).
       * ``camera_model`` — COLMAP camera model name (distortion handling).

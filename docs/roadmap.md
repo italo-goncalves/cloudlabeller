@@ -64,6 +64,11 @@ spike is done: all of COLMAP runs in WSL, see ADR-0003.)
    test: Align to EXIF GPS and Reproject, on photos with GPS.*
 5. **Release.** Qt and its tests are removed, the Windows installer is
    published, and Zenodo mints the new version's DOI.
+   *Under way (2026-11-26): the Qt app, its tests, the portable build and
+   the `qt` extra are gone, and the version is 0.3.0. Still to do: merge
+   `dev` into `main`, tag `v0.3.0` (CI builds the signed installer into a
+   draft release), publish the release, and record the new DOI in
+   `CITATION.cff`.*
 
 **Done when:** a new user on Windows runs the installer, the app sets up its
 Environment unattended (on the GPU when WSL allows it), and the whole workflow

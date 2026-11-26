@@ -111,5 +111,5 @@ class LabelSchema:
         return schema
 
     def lookup_table(self) -> dict[int, tuple[int, int, int]]:
-        """id -> RGB, for building VTK/Qt colour maps (user classes only)."""
+        """id -> RGB, for building colour maps (user classes only)."""
         return {c.id: c.rgb() for c in self.classes}

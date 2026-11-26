@@ -18,11 +18,8 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Job plumbing for the stage CLIs and the 0.2.x Qt app.
+"""Resource limits for Job subprocesses.
 
-``resources`` (thread and memory limits) is Qt-free and imported by every
-``*_cli`` subprocess. ``job`` and ``process_job`` wrap work in Qt for the Qt
-app; import them by their own module path. This package root must not import
-them: it would make every CLI, and the desktop app's Environment (which has no
-PySide6), depend on Qt.
+``resources`` (thread and memory limits) is imported by every ``*_cli``
+subprocess.
 """

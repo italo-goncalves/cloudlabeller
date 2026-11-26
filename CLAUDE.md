@@ -57,13 +57,14 @@ Rules:
   it on `PYTHONPATH`), so isolated mode (`-I`) can't see it. A debug build
   of the desktop app uses it when `CLOUDLABELLER_DEV_PYTHON` names it.
   There is no `.venv` in the repo. The `python` on PATH is a bare
-  3.12 without the app's dependencies. Don't test with the installed app's
-  embedded Python either (`C:\Programas\CloudLabeller`): it imports its own
-  installed copy of the app.
-- Run the app: `/c/Python_envs/cloudlabeller/python.exe -m cloudlabeller`.
-- Tests: `QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true
-  /c/Python_envs/cloudlabeller/python.exe -m pytest tests/ -q` — keep the
-  suite green; add a regression test with every bug fix.
+  3.12 without the app's dependencies. Don't test with an installed app's
+  Python either (the desktop app's Environment, or the old 0.2.x portable
+  copy in `C:\Programas\CloudLabeller`): each imports its own installed
+  copy of the app.
+- Run the app: `CLOUDLABELLER_DEV_PYTHON='C:\Python_envs\cloudlabeller\python.exe'
+  pnpm desktop`. `python -m cloudlabeller` no longer opens a window.
+- Tests: `/c/Python_envs/cloudlabeller/python.exe -m pytest tests/ -q` and
+  `pnpm check` — keep both green; add a regression test with every bug fix.
 - The desktop app (0.3.0) is in `apps/` (`apps/web` the page,
   `apps/desktop/src-tauri` the Rust core); see `docs/desktop.md`.
   `pnpm check` runs Biome, tsc, vitest, the node tests and `cargo test`;
@@ -74,8 +75,8 @@ Rules:
   run `graft ask "<question>"` before grepping the tree, and
   `graft callers <symbol>` for what a change touches. `graft/` is a local,
   git-ignored cache; `graft build` rebuilds it.
-- `cloudlabeller/core/` and `cloudlabeller/engine/` must stay Qt-free
-  (except `core/events.py`).
+- The Qt app (PySide6/pyvista, `cloudlabeller/ui/`) was removed in 0.3.0
+  step 5; it is in git history up to v0.2.1. Don't bring Qt back.
 - The Engine (`python -m cloudlabeller.engine`, step 2 of 0.3.0) is
   JSON-RPC over stdin/stdout, and its contract is `docs/engine.md`. A new or
   changed method is documented there in the same change, and
@@ -86,18 +87,16 @@ Rules:
   The Engine reads and writes the protocol on private copies of stdin and
   stdout. Don't use `sys.stdin`/`sys.stdout` there: on Windows a native
   library probing fd 0 hung it (diagnosed 2026-11-25).
-- Heavy native work (COLMAP, TensorFlow) runs in subprocesses (`*_cli.py` +
-  `ProcessJob`); pure-numpy work runs in `QThreadPool` via `workers.job.Job`.
-  NEVER run TensorFlow on an in-process thread — it deadlocks the GIL against
-  Qt's event loop (frozen app, diagnosed 2026-07-08).
+- Heavy native work (COLMAP, TensorFlow) runs in Jobs: `*_cli.py`
+  subprocesses the Tauri core starts. NEVER import or run TensorFlow in the
+  Engine (in 0.2.x it deadlocked the GIL against the UI's event loop,
+  diagnosed 2026-07-08).
 - Unlabelled label id is -1; user classes are contiguous 0..N-1.
 - Dependencies: the base list in `pyproject.toml` is the desktop app's
-  Environment (Engine + Jobs, no Qt); the 0.2.x Qt app needs the `qt` extra
-  (the dev env has `[qt,dev]`). After changing any dependency, run
+  Environment (Engine + Jobs); the dev env adds `[dev]`. After changing any
+  dependency, run
   `uv run --no-project tools/lock_environment.py` and commit both `uv.lock`
   and `apps/desktop/environment/requirements.lock` (`--check` says whether
   they are stale). No module that a `*_cli` or the Engine imports may import
   PySide6, pyvista or vtk (`tests/test_qt_free_imports.py`).
-- PySide6 is pinned == 6.7.3 (6.8+ links ICU and fails to import on this
-  machine — see requirements.txt).
 - The user's U-Net code lives in `cloudlabeller/ml/` and is typically LOCKED.

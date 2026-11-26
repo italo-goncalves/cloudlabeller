@@ -144,79 +144,29 @@ def test_reproject_cli_requires_georeferencing(tmp_path, capsys):
 
 # -- export from an offset frame ------------------------------------------------
 def test_export_transform_offset_kind():
-    from cloudlabeller.ui.main_window import MainWindow
-
     spec = {"kind": "offset", "epsg": UTM_SIRGAS_22S, "orthometric": False,
             "offset": [480_000.0, 6_675_000.0, 0.0]}
-    transform, crs = MainWindow._build_export_transform(
-        spec, lambda f, m="": None)
+    transform, crs = crsmod.build_export_transform(spec, lambda f, m="": None)
     got = transform(np.array([[819.7, 857.5, 15.0]], np.float32))
     assert got.dtype == np.float64
     assert np.allclose(got[0], [480_819.7, 6_675_857.5, 15.0], atol=1e-4)
     assert crs.to_epsg() == UTM_SIRGAS_22S
 
-    transform, crs = MainWindow._build_export_transform(
-        {"kind": "local"}, lambda f, m="": None)
+    transform, crs = crsmod.build_export_transform({"kind": "local"},
+                                                   lambda f, m="": None)
     assert transform is None and crs is None
+# -- dataset pane coordinates ----------------------------------------------------
 
 
-# -- viewer up direction --------------------------------------------------------
 def test_scene_up_georeferenced_is_plus_z_else_camera_derived():
     """Regression (2026-07-16): the empirical +R[1] up-heuristic showed
     georeferenced models upside down. Georeferenced frames have +Z up by
     construction; the unreferenced heuristic uses -R[1] (COLMAP's image
     y-axis points down)."""
-    from types import SimpleNamespace as NS
-
-    from cloudlabeller.ui.viewer3d import Viewer3D
-
-    geo = NS(project=NS(settings={"georeferenced": {"frame": "ENU"}}),
-             _frustums={})
-    assert np.allclose(Viewer3D._scene_up(geo), [0.0, 0.0, 1.0])
+    from cloudlabeller.photogrammetry.cameras import scene_up
 
     # Oblique cameras with image-down = world -Z  =>  up must come out +Z.
     R = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-    local = NS(project=None,
-               _frustums={"a": NS(camera=NS(R=R)), "b": NS(camera=NS(R=R))})
-    assert np.allclose(Viewer3D._scene_up(local), [0.0, 0.0, 1.0])
-
-
-# -- dataset pane coordinates ----------------------------------------------------
-def test_dataset_panel_shows_camera_coordinates():
-    from pathlib import Path as P
-    from types import SimpleNamespace as NS
-
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
-
-    from cloudlabeller.core.dataset import Camera, Dataset, ImageRecord
-    from cloudlabeller.core.events import EventBus
-    from cloudlabeller.core.labels import LabelStore
-    from cloudlabeller.ui.dataset_panel import DatasetPanel
-
-    QApplication.instance() or QApplication([])
-    cam = Camera(K=np.eye(3), R=np.eye(3), t=np.array([-819.7, -857.5, -15.0]),
-                 width=100, height=100)        # centre = -R.T @ t
-    project = NS(
-        dataset=Dataset(images=[ImageRecord(0, P("a.jpg"), camera=cam),
-                                ImageRecord(1, P("b.jpg"))]),
-        labels=LabelStore(),
-        settings={"georeferenced": {"crs": {
-            "epsg": 31982, "offset": [480_000.0, 6_675_000.0, 0.0]}}})
-    bus = EventBus()
-    panel = DatasetPanel(bus)
-    bus.project_opened.emit(project)
-
-    solved = panel.image_list.item(0)
-    assert solved.data(Qt.UserRole) == "a.jpg"
-    assert solved.text() == "a.jpg    (480819.7, 6675857.5, 15.0)"
-    unsolved = panel.image_list.item(1)
-    assert unsolved.text() == "b.jpg"          # no camera -> name only
-
-    # Selection still round-trips through the UserRole name.
-    emitted: list[str] = []
-    bus.image_selected.connect(emitted.append)
-    panel.image_list.setCurrentRow(0)
-    assert emitted[-1] == "a.jpg"
-    bus.image_selected.emit("b.jpg")
-    assert panel.image_list.currentItem().data(Qt.UserRole) == "b.jpg"
+    assert np.allclose(scene_up([R, R], False), [0.0, 0.0, 1.0])
+    assert np.allclose(scene_up([R, R], True), [0.0, 0.0, 1.0])
+    assert np.allclose(scene_up([np.eye(3)], True), [0.0, 0.0, 1.0])

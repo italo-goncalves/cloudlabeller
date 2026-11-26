@@ -5,9 +5,16 @@
 > transfer powered by [hylite](https://github.com/hifexplo/hylite) and a U-Net
 > model that propagates a few hand-labelled images to the entire dataset.
 >
-> **0.3.0 note:** hylite is no longer a dependency. The projection it inspired
-> (full COLMAP camera model, occlusion) lives in `transfer/projection.py`; the
-> hylite sections below are the original design.
+> **0.3.0 notes:**
+> - The PySide6/PyVista window is gone. The interface is a Tauri desktop app
+>   ([docs/desktop.md](docs/desktop.md)) whose page talks to a Python Engine
+>   over JSON-RPC ([docs/engine.md](docs/engine.md)); the reasons are in
+>   [ADR-0002](docs/adr/0002-tauri-webview-with-a-json-rpc-engine.md). The
+>   stack, the architecture and the module map below are current; the 3D
+>   interaction table (§8) records the original VTK design.
+> - hylite is no longer a dependency. The projection it inspired (full COLMAP
+>   camera model, occlusion) lives in `transfer/projection.py`; the hylite
+>   sections below are the original design.
 
 ---
 
@@ -39,20 +46,21 @@
 
 | Concern              | Choice                                  | Why |
 |----------------------|-----------------------------------------|-----|
-| Language             | Python 3.11+                            | hylite + your U-Net code are Python |
-| GUI shell            | **PySide6** (Qt 6)                       | Mature, native, dockable panels |
-| 3D rendering         | **PyVista + `pyvistaqt`** (VTK backend) | GPU rendering, rich picking API, embeds in Qt |
-| 2D image canvas      | `QGraphicsView` + NumPy/QImage          | Fast pan/zoom, overlay alpha masks |
+| Language             | Python 3.12 (Engine, Jobs); TypeScript (window) | the U-Net and COLMAP bindings are Python |
+| Desktop shell        | **Tauri 2** (Rust core, system webview) | Small installer, updater, starts every Job (ADR-0004) |
+| Window               | **React** + Tailwind on geokit's tokens  | One page for every screen |
+| 3D rendering         | **three.js** through `@geokit/viewer`   | Point clouds, meshes, frusta, picking, lasso |
+| 2D image canvas      | `<img>` + canvas overlay in the page    | Pan/zoom, polygon and brush masks |
 | Photogrammetry       | **pycolmap** (SfM/MVS), OpenCV (utils)  | De-facto reconstruction; exports the camera model hylite needs |
 | Label transfer       | **hylite** (`HyScene`, `HyCloud`, `HyImage`, `Camera`) | Native image↔cloud projection w/ occlusion |
 | ML                   | PyTorch (assumed) — **your code**       | Placeholders only; framework-agnostic interfaces |
-| Mesh / cloud I/O     | hylite, PyVista, `trimesh`, `laspy`     | Broad format support |
+| Mesh / cloud I/O     | `trimesh`, `laspy`, `io/ply.py`         | Broad format support |
 | Persistence          | Project folder + JSON manifest + binary label arrays | Transparent, diffable, large arrays kept out of JSON |
 
-> **Why VTK over Open3D:** VTK's picking (`vtkCellPicker`,
-> `vtkAreaPicker`/frustum, hardware selection) and Qt embedding via `pyvistaqt`
-> give us precise, interactive selection on millions of points without writing
-> our own GL layer.
+> **0.2.x history — why VTK over Open3D:** VTK's picking and Qt embedding via
+> `pyvistaqt` gave precise selection on millions of points without our own GL
+> layer. 0.3.0 does the same in three.js: an id pass for picking, and lasso
+> selection through the whole cloud in the Engine (`cloud.select`).
 
 ---
 
@@ -60,31 +68,25 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                              UI (PySide6)                              │
-│  MainWindow ── docks ──┬─ Viewer3D (pyvistaqt)                         │
-│                        ├─ ImageView (QGraphicsView)                    │
-│                        ├─ LabelPanel (class schema, colors, visibility)│
-│                        ├─ DatasetPanel (image list, products)          │
-│                        └─ ToolBar (selection tools, transfer, train)   │
+│                 Window (apps/web — React, @geokit/viewer)              │
+│  Menus · Labels · View · Dataset · 3D viewer · Image view · Log        │
 └───────────────▲───────────────────────────────────────────▲──────────┘
-                │ Qt signals (EventBus)                       │
+                │ Tauri commands / events                     │
 ┌───────────────┴───────────────────────────────────────────┴──────────┐
-│                              Core / Domain                             │
-│  Project ── Dataset(images, cameras, cloud, mesh)                      │
-│           ├─ LabelSchema (classes ↔ colors ↔ ids)                      │
-│           └─ LabelStore (per-point labels, per-pixel masks, undo)      │
-└───────┬───────────────────┬───────────────────┬───────────────────────┘
-        │                   │                   │
-┌───────▼───────┐  ┌────────▼────────┐  ┌───────▼─────────┐
-│ photogrammetry │  │    transfer     │  │       ml        │
-│  (pycolmap)    │  │   (hylite)      │  │  (your U-Net)   │
-│  sfm/mvs/      │  │ img↔cloud↔mesh  │  │ build/train/    │
-│  cameras       │  │  via HyScene    │  │ infer (stubs)   │
-└────────────────┘  └─────────────────┘  └─────────────────┘
+│        Tauri core (apps/desktop/src-tauri — Rust)                      │
+│  Engine host · Job runner + GPU Lease · WSL staging · Environment      │
+└───────▲──────────────────────────────────────────────────▲───────────┘
+        │ JSON-RPC over stdin/stdout              starts    │
+┌───────┴──────────────────────────────┐   ┌───────────────┴──────────┐
+│ Engine (cloudlabeller/engine)        │   │ Jobs (*_cli.py processes)│
+│  Project · LabelSchema · LabelStore  │   │  SfM/MVS/mesh (pycolmap) │
+│  transfer · plans Jobs, applies them │   │  train/predict (U-Net)   │
+└──────────────────────────────────────┘   └──────────────────────────┘
 ```
 
-The **Core** layer is UI-agnostic and import-safe (no Qt). The UI subscribes to
-a lightweight `EventBus` so that labelling in one view updates the other.
+The **Core** layer (`core/`) is UI-agnostic and Qt-free. The Engine owns the
+open Project; it tells the window what changed (`project.changed`), so
+labelling in one view updates the other.
 
 ---
 
@@ -188,12 +190,12 @@ loop at the marked placeholders.
 5. Predicted image masks can be **transferred back to the cloud** (§6), closing
    the loop: label a few → train → predict all → fuse into 3D.
 
-Long-running ML/SfM jobs run in a `QThread`/worker with cancel + progress so the
-UI stays fluid.
+Long-running ML/SfM work runs as Jobs: separate processes the Tauri core
+starts, with progress and Stop, so the window stays fluid.
 
 ---
 
-## 8. Fluid & precise 3D interaction (`ui/viewer3d.py`, `ui/tools/`)
+## 8. Fluid & precise 3D interaction (the original VTK design)
 
 | Need | Implementation |
 |------|----------------|
@@ -235,7 +237,6 @@ import existing cameras+cloud (Metashape/COLMAP export) → label & transfer.
 | `core/dataset.py` | images, cameras, cloud, mesh registry |
 | `core/label_schema.py` | classes, colours, hotkeys |
 | `core/labels.py` | label arrays + undo/redo command stack |
-| `core/events.py` | Qt signal bus connecting views |
 | `photogrammetry/sfm.py` | pycolmap SfM wrapper |
 | `photogrammetry/mvs.py` | dense cloud + meshing |
 | `photogrammetry/cameras.py` | COLMAP cameras → app `Camera` (intrinsics, distortion) |
@@ -249,13 +250,11 @@ import existing cameras+cloud (Metashape/COLMAP export) → label & transfer.
 | `ml/unet.py` | **PLACEHOLDER** model |
 | `ml/trainer.py` | **PLACEHOLDER** training loop |
 | `ml/inference.py` | **PLACEHOLDER** predict-all orchestration |
-| `ui/main_window.py` | dockable shell, menus, toolbars |
-| `ui/viewer3d.py` | PyVista/VTK 3D view + picking |
-| `ui/image_view.py` | 2D labelling canvas |
-| `ui/label_panel.py` | schema editor + visibility |
-| `ui/dataset_panel.py` | image/product browser |
-| `ui/tools/` | selection/paint tool strategies |
-| `workers/` | QThread wrappers for SfM/MVS/train/infer |
+| `engine/` | the Engine: JSON-RPC methods, Job plans and results ([docs/engine.md](docs/engine.md)) |
+| `*_cli.py` | Job entry points (SfM, MVS, mesh, georef, train, predict, …) |
+| `workers/resources.py` | thread and memory limits for Job processes |
+| `apps/web/src/` | the window: shell, panes, dialogs, 3D viewer, Image view |
+| `apps/desktop/src-tauri/` | the Tauri core: Engine host, Job runner, Environment, files |
 
 ---
 

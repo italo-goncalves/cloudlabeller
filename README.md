@@ -65,37 +65,34 @@ survey where per-point classes matter.
 
 ## Getting started
 
-CloudLabeller is not published on PyPI — install it from this repository.
+**Install** (Windows 10/11, x64): download `CloudLabeller_<version>_x64-setup.exe`
+from the [Releases](https://github.com/italo-goncalves/cloudlabeller/releases)
+page and run it; no administrator rights are needed. On first start the app
+sets up its Python Environment by itself, which downloads a few GB once:
 
-**Run from source** (Python 3.10; developed and tested on Windows):
+- in WSL, on the GPU, when a WSL distro exists and `nvidia-smi` works there;
+- otherwise natively on Windows, on the CPU.
 
-```bash
-git clone https://github.com/italo-goncalves/cloudlabeller.git
-cd cloudlabeller
-pip install -r requirements.txt   # dependencies only, pinned — see notes inside
-python -m cloudlabeller
-```
-
-**Build the portable Windows distribution** — a self-contained folder with
-its own embedded Python that runs on machines with no Python installed:
-
-```bash
-python scripts/build_portable.py --out C:/Temp/cl_build
-```
-
-The script downloads the embeddable Python 3.10, installs the requirements
-into it (~2 GB — be patient), copies the app and writes the launchers
-(`CloudLabeller.vbs` / `.bat`); zip the resulting `CloudLabeller` folder to
-distribute it. By default your local COLMAP bundle (`~/.cloudlabeller/colmap`,
-if present) is included; pass `--skip-colmap` for a much smaller archive —
-recipients can then fetch COLMAP in-app via *Photogrammetry → Download
-COLMAP…*.
+Installed copies update themselves from new releases.
 
 An NVIDIA GPU is required for dense MVS (CUDA); everything else — SfM,
 labelling, training, prediction — runs on the CPU.
 
-Development: architecture in [DESIGN.md](DESIGN.md); tests with
-`QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true pytest tests/ -q`.
+**Develop:** the window and the Tauri core are in `apps/` (Node 22, pnpm,
+Rust), the Engine and the Jobs in `cloudlabeller/` (Python 3.12):
+
+```bash
+git clone https://github.com/italo-goncalves/cloudlabeller.git
+cd cloudlabeller
+pnpm install
+pnpm check      # Biome, tsc, vitest, node tests, cargo test
+pnpm desktop    # runs the app; see docs/desktop.md for using your own Python
+pip install -e .[dev]
+pytest tests/ -q
+```
+
+Architecture: [DESIGN.md](DESIGN.md), [docs/desktop.md](docs/desktop.md) and
+the Engine's contract in [docs/engine.md](docs/engine.md).
 
 ## Typical workflow
 
