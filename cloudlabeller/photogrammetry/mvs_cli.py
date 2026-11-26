@@ -49,8 +49,11 @@ MESH_FILE = "mesh.npz"
 
 def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="mvs_cli")
-    p.add_argument("workspace", help="reconstruction dir (contains sparse/)")
-    p.add_argument("images_dir", help="project image store")
+    p.add_argument("workspace", help="the SfM product (contains sparse/)")
+    p.add_argument("images_dir", help="the Survey's photos")
+    p.add_argument("--out", default=None,
+                   help="the MVS product: dense/ and dense.npz go here "
+                        "(default: the workspace)")
     p.add_argument("--max-image-size", type=int, default=2000)
     p.add_argument("--quality", choices=("standard", "draft"), default="standard",
                    help="draft = ~3-4x faster stereo, noisier cloud")
@@ -78,14 +81,17 @@ def main(argv: list[str]) -> int:
         cloud, mesh = run_mvs(args.workspace, args.images_dir,
                               max_image_size=args.max_image_size,
                               build_mesh=args.mesh, colmap_binary=args.colmap_binary,
-                              quality=args.quality, progress=progress)
+                              quality=args.quality, progress=progress,
+                              out_dir=args.out)
     except Exception:
         log.exception("Dense MVS failed")
         return 1
 
-    save_cloud_npz(cloud, Path(args.workspace) / DENSE_FILE)
+    out = Path(args.out or args.workspace)
+    out.mkdir(parents=True, exist_ok=True)
+    save_cloud_npz(cloud, out / DENSE_FILE)
     if mesh is not None:
-        mesh_out = args.mesh_out or str(Path(args.workspace) / MESH_FILE)
+        mesh_out = args.mesh_out or str(out / MESH_FILE)
         save_mesh_npz(mesh, mesh_out)
     log.info("Dense MVS done: %d points%s", cloud.n_points,
              "" if mesh is None else f", mesh {len(mesh.faces)} faces")

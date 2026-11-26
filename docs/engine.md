@@ -55,7 +55,7 @@ C-ordered bytes with no header, in the Project's `.arrays/` folder.
 Messages carry its descriptor:
 
 ```json
-{"path": ".arrays/mask/IMG_0001.JPG.bin", "dtype": "int32", "shape": [3000, 4000]}
+{"path": ".arrays/mask/s1/IMG_0001.JPG.bin", "dtype": "int32", "shape": [3000, 4000]}
 ```
 
 - `path` is relative to the Project root and uses `/`, so it names the same
@@ -71,13 +71,32 @@ Messages carry its descriptor:
 
 Label ids are `int32`. Unlabelled is `-1` and the classes are `0..N-1`.
 
+## Surveys and frames
+
+A Project holds one or more Surveys (layout v2, see `GLOSSARY.md` and
+ADR-0005). Every method about photos, clouds or the mesh takes `survey`,
+the Survey's id (`s1`, `s2`…), and works on that Survey's active
+Reconstruction. Photo names are unique within a Survey only. A request
+naming no Survey that exists fails with `survey.not_found` (`params.survey`).
+
+Geometry sent to the window (`cloud.points`, `cloud.view`, `mesh.geometry`,
+`cameras.list`), what the lasso reads (`cloud.select`) and what export
+writes is in the **Project frame**: the Reconstruction's products stay in
+their own SfM frame, and its Alignment carries them into the Project frame
+as they are read. A Reconstruction with no Alignment is shown and exported
+in its own frame. Point indices, labels and transfers don't depend on the
+frame.
+
+Opening a 0.3.0 Project (format 1) moves it into layout v2 first, as one
+Survey `s1`; `project.json` from before is kept as `project.v1.json`.
+
 ## Notifications (Engine → window)
 
 | Method | Params |
 |---|---|
 | `engine.ready` | Same as `engine.hello`. |
 | `engine.log` | `{level, message}`: an internal failure the user didn't ask about. |
-| `project.changed` | `{parts, images?}`. `parts` are drawn from `schema`, `images`, `status`, `sparse`, `dense`, `mesh`, `labels` and `settings`. `images` names the photos whose mask or status changed. |
+| `project.changed` | `{parts, survey?, images?}`. `parts` are drawn from `schema`, `surveys`, `images`, `status`, `sparse`, `dense`, `mesh`, `labels` and `settings`. `survey` names the Survey the change is in; absent, it is Project-wide (the schema, the frame, the models). `images` names that Survey's photos whose mask or status changed. |
 | `request.progress` | `{id, fraction, message}` for a long request still running. |
 
 A Job's progress and log reach the window from the Tauri core, which runs
@@ -103,27 +122,35 @@ is pending.
 `project.jobs_running`.
 
 ### `project.open`
-`{root}` → the Project state. Closes the open Project first. Problems:
-`project.not_found`, `project.jobs_running`.
+`{root}` → the Project state. Closes the open Project first; moves a
+0.3.0 Project into layout v2 (see Surveys and frames). Problems:
+`project.not_found`, `project.jobs_running`, `project.format` (a format this
+version doesn't read).
 
 ### `project.close`
 → `{}`. Saves if dirty. Problem: `project.jobs_running`.
 
 ### `project.save`
-→ `{}`. Writes the manifest and every label array.
+→ `{}`. Writes the manifests and every label array.
 
 ### `project.state`
-→ `{root, schema, images: [{name, status, solved, user_mask}], reconstruction,
-sparse, dense, mesh, georeferenced, source_resolution, can_undo, can_redo,
-dirty}`.
+→ `{root, schema, surveys, georeferenced, dirty}`. `georeferenced` is the
+Project frame (`{frame, origin_lla, origin_convention, crs?}`), or null.
+Each Survey in `surveys`, in the Project's order, is `{id, name, timestamp,
+operator, camera, notes, images: [{name, status, solved, user_mask}],
+reconstruction, active, aligned, sparse, dense, mesh, source_resolution,
+can_undo, can_redo}`.
 
+- `active` is the active Reconstruction's id, null before SfM. `aligned`:
+  it has an Alignment into the Project frame.
 - `status` is `user`, `auto`, `ml` or `none`.
 - `reconstruction` is `none`, `outdated` or `current`.
 - `sparse` and `dense` are point counts, or null. `mesh` is
   `{vertices, faces}`, or null.
 
 ### `project.summary`
-→ `{rows: [[label, value], …]}`: the Project Info rows, as plain text.
+→ `{rows: [[label, value], …]}`: the Project Info rows, as plain text,
+the Project's first, then each Survey's (labels indented by two spaces).
 
 ### `schema.add`
 `{name?, color?}` → `{schema}`. Each class in `schema` is
@@ -140,13 +167,14 @@ dirty}`.
 ids above it shift down by one, and the undo history is cleared.
 
 ### `labels.undo`
-→ `{changed: {modality: "cloud"|"image", image} | null}`
+`{survey}` → `{changed: {modality: "cloud"|"image", image} | null}`. Each
+Survey has its own history.
 
 ### `labels.redo`
-→ `{changed: {modality: "cloud"|"image", image} | null}`
+`{survey}` → `{changed: {modality: "cloud"|"image", image} | null}`
 
 ### `image.mask`
-`{name}` → `{source, mask}`. The overlay for a photo:
+`{survey, name}` → `{source, mask}`. The overlay for a photo:
 
 - `source` is `user` (the user's own mask), `ml` (the U-Net's prediction,
   at the photo's size) or `auto` (projected from the labelled cloud), or
@@ -156,33 +184,33 @@ ids above it shift down by one, and the undo history is cleared.
 Problem: `image.not_found`.
 
 ### `image.save_mask`
-`{name, mask}` → `{changed_pixels, status}`. Stores the mask the user
+`{survey, name, mask}` → `{changed_pixels, status}`. Stores the mask the user
 painted, as one undoable edit, and marks the photo `user`. The window sends
 the whole mask, seeded from the overlay it showed. `mask` is an inbound
 `int32` Array file of the photo's size. Problems: `image.not_found`,
 `image.mask_shape`, `image.mask_values`.
 
 ### `image.info`
-`{name}` → `{path, width, height}`. `path` is the photo's file, relative to
+`{survey, name}` → `{path, width, height}`. `path` is the photo's file, relative to
 the Project root with `/` separators. The size is the solved camera's, else
 the file's. Problem: `image.not_found`.
 
 ### `cloud.points`
-`{cloud?: "sparse"|"dense"}` → `{cloud, n_points, xyz, rgb}`. `xyz` is a
-`float32` Array file `[N, 3]`. `rgb` is a `uint8` one `[N, 3]`, or null.
+`{survey, cloud?: "sparse"|"dense"}` → `{cloud, n_points, xyz, rgb}`. `xyz`
+is a `float32` Array file `[N, 3]`, in the Project frame. `rgb` is a `uint8` one `[N, 3]`, or null.
 Problem: `cloud.none`.
 
 ### `cloud.labels`
-`{cloud?}` → `{cloud, labels}`. `labels` is an `int32` Array file `[N]`.
+`{survey, cloud?}` → `{cloud, labels}`. `labels` is an `int32` Array file `[N]`.
 
 ### `cloud.paint`
-`{cloud?, indices, class_id}` → `{painted}`. Gives the chosen points one
+`{survey, cloud?, indices, class_id}` → `{painted}`. Gives the chosen points one
 class (`-1` erases), as one undoable edit. `indices` is an inbound `int32`
 or `uint32` Array file. Painting the dense cloud also updates the mesh's
 labels. Problems: `schema.no_class`, `cloud.bad_indices`.
 
 ### `cloud.view`
-`{cloud?, max_points?: 0}` → `{cloud, n_points, shown, xyz, rgb, index}`. A
+`{survey, cloud?, max_points?: 0}` → `{cloud, n_points, shown, xyz, rgb, index}`. A
 display subsample: `max_points` points chosen uniformly at random with a
 fixed seed (the same ones every call), in the cloud's own order. `xyz` is
 `float32 [shown, 3]`, `rgb` is `uint8 [shown, 3]` or null, and `index` is
@@ -191,7 +219,7 @@ cloud. When `max_points` is 0 or at least N, every point is shown and
 `index` is null. Problem: `cloud.none`.
 
 ### `cloud.select`
-`{cloud?, view_projection, polygon, width, height}` → `{count, indices}`. A
+`{survey, cloud?, view_projection, polygon, width, height}` → `{count, indices}`. A
 long request. Selects the full cloud's points whose screen projection lies
 inside the lasso, including points hidden behind others.
 
@@ -208,14 +236,15 @@ inside the lasso, including points hidden behind others.
 nothing. Problem: `cloud.none`.
 
 ### `cloud.delete`
-`{cloud?: "sparse", indices}` → `{removed, n_points}`. Deletes the chosen
-sparse points. The cloud file is rewritten, the labels follow the
-surviving points, the undo history is cleared, and the Project is saved.
+`{survey, cloud?: "sparse", indices}` → `{removed, n_points}`. Deletes the chosen
+sparse points. The Reconstruction stops showing them (its SfM product is
+not edited), the labels follow the surviving points, the undo history is
+cleared, and the Project is saved.
 Only the sparse cloud can lose points. `indices` is an inbound `int32` or
 `uint32` Array file. Problem: `cloud.bad_indices`.
 
 ### `cloud.stats`
-`{cloud?: "sparse"}` → `{n_points, matched, views, errors}`. A long
+`{survey, cloud?: "sparse"}` → `{n_points, matched, views, errors}`. A long
 request. The sparse points' SfM confidence, read from the saved COLMAP
 model. `views` is an `int32 [N]` Array file: how many photos saw each
 point, or 0 when the model lacks it. `errors` is a `float32 [N]` one: the
@@ -227,40 +256,42 @@ from another solve), `cloud.changed` (the cloud changed while they were
 read).
 
 ### `cloud.clean_preview`
-`{min_images, max_error}` → `{keep, total, removed}`. A long request. What
+`{survey, min_images, max_error}` → `{keep, total, removed}`. A long request. What
 a confidence clean would do. It keeps the points seen by at least
 `min_images` photos with an error of at most `max_error` pixels. `removed`
 is a `uint32` Array file of the points it would delete. Problems: as
 `cloud.stats`.
 
 ### `cloud.clean`
-`{min_images, max_error}` → as `cloud.delete`. A long request. Applies the
+`{survey, min_images, max_error}` → as `cloud.delete`. A long request. Applies the
 clean that `cloud.clean_preview` describes, as `cloud.delete` does.
 Problems: as `cloud.stats`.
 
 ### `cameras.list`
-→ `{cameras: [{name, width, height, K, R, t, position, position_crs}], up}`.
-The solved cameras.
+`{survey}` → `{cameras: [{name, width, height, K, R, t, position,
+position_crs}], up}`. The solved cameras, posed in the Project frame.
 
 - `K` and `R` are 3×3 lists of rows and `t` is 3 numbers. A world point
   `X` projects as `K (R X + t)`.
 - `position` is the camera centre, `-Rᵀ t`, in the stored frame.
   `position_crs` adds the reprojected frame's offset, so it is the full CRS
-  coordinate. It equals `position` when the Project isn't reprojected.
-- `up` is the scene's up for the home view: `[0, 0, 1]` when
-  georeferenced, otherwise the normalised mean of the cameras' `-R[1]`
+  coordinate. It equals `position` when the Project isn't reprojected or
+  the Survey isn't aligned.
+- `up` is the scene's up for the home view: `[0, 0, 1]` when the Survey is
+  aligned into a Project frame, otherwise the normalised mean of the cameras' `-R[1]`
   (COLMAP's image y points down). It is null when there are no cameras
   and no georeference.
 
 ### `mesh.geometry`
-→ `{vertices, faces, colors}`: Array files `float32 [V, 3]`,
+`{survey}` → `{vertices, faces, colors}`: Array files `float32 [V, 3]` (in
+the Project frame),
 `int32 [F, 3]` and `uint8 [V, 3]` (`colors` may be null). Problem: `mesh.none`.
 
 ### `mesh.labels`
-→ `{labels}`: `int32 [V]`, nearest-point labels from the dense cloud.
+`{survey}` → `{labels}`: `int32 [V]`, nearest-point labels from the dense cloud.
 
 ### `mesh.estimate`
-`{method?: "poisson"|"delaunay", depth?}` → `{minutes, ram_gb, vertices,
+`{survey, method?: "poisson"|"delaunay", depth?}` → `{minutes, ram_gb, vertices,
 suggested_depth, machine_ram_gb}`. A long request: the first one measures
 the dense cloud's point spacing. A very rough cost of meshing the dense
 cloud. `depth` null means `suggested_depth`, the Poisson depth whose cells
@@ -268,7 +299,7 @@ match the point spacing. `machine_ram_gb` is this machine's RAM, or null.
 Problem: `job.mesh.no_dense`.
 
 ### `transfer.images_to_cloud`
-`{include_auto?: true}` → `{images, sparse, dense?}`. A long request.
+`{survey, include_auto?: true}` → `{images, sparse, dense?}`. A long request.
 Votes the photos' labels onto the sparse cloud and the dense one, with
 user-drawn masks outranking automatic ones. `include_auto` adds the
 U-Net's predictions and the cloud-projected photos that cover the surface.
@@ -277,13 +308,13 @@ keep theirs. Returns the number of points updated. Problems:
 `transfer.no_cloud`, `transfer.no_labelled_images`.
 
 ### `transfer.cloud_to_images`
-→ `{cloud, auto_labelled}`. A long request. Marks `auto` every solved photo
+`{survey}` → `{cloud, auto_labelled}`. A long request. Marks `auto` every solved photo
 the user hasn't drawn on that the labelled cloud reaches. Their overlays
 come from `image.mask`. Problems: `transfer.no_cloud`,
 `transfer.cloud_unlabelled`.
 
 ### `transfer.propagate`
-`{name}` → `{cloud, points, auto_labelled}`. A long request. Spreads one
+`{survey, name}` → `{cloud, points, auto_labelled}`. A long request. Spreads one
 photo's labels through the cloud to the photos that overlap it. A neighbour
 needs 500 labelled pixels to be marked `auto`. Problems:
 `transfer.image_unlabelled`, `transfer.image_unsolved`, `transfer.no_cloud`.
@@ -339,14 +370,15 @@ Params left out keep their values. `projected` needs `export_epsg`.
 Problem: `export.not_georeferenced`.
 
 ### `export.cloud`
-`{path, format: "las"|"csv"|"ply", crs?, cloud?}` → `{path, cloud,
+`{survey, path, format: "las"|"csv"|"ply", crs?, cloud?}` → `{path, cloud,
 n_points, crs}`. A long request. Writes a cloud and its labels.
 
 - `path` is absolute. `.<format>` is appended when it ends otherwise, and
   the result's `path` is the file written.
 - `cloud` defaults to the dense cloud when there is one, else the sparse
   cloud.
-- The coordinates follow the frame. `local` writes the stored ones and
+- The coordinates follow the frame; a Survey that isn't aligned writes
+  its own local frame. `local` writes the stored ones and
   `crs` the full CRS ones (stored plus offset); both ignore the `crs`
   param. For `enu`, `crs` is `{mode: "local"}` or `{mode: "projected",
   epsg, orthometric?}` and is kept as the export settings. Null reuses
@@ -359,21 +391,23 @@ Problems: `cloud.none`, `export.no_folder`, `export.needs_geoid`
 Job, then export again).
 
 ### `export.mesh`
-`{path, format: "ply"|"obj"|"stl", crs?}` → `{path, vertices, faces, crs}`.
+`{survey, path, format: "ply"|"obj"|"stl", crs?}` → `{path, vertices, faces, crs}`.
 A long request. Writes the mesh, with paths and coordinates as
 `export.cloud`. Problems: `mesh.none`, `export.no_folder`,
 `export.needs_geoid`.
 
 ### `ingest.conflicts`
-`{folder}` → `{conflicts}`. The sorted names of the photos in `folder` that
-the image store already holds. The window asks whether to skip or
+`{survey, folder}` → `{conflicts}`. The sorted names of the photos in
+`folder` that the Survey already holds. The window asks whether to skip or
 overwrite them before it plans `ingest`. Problem: `job.ingest.no_folder`.
 
 ### `jobs.kinds`
 → `{kinds: [{kind, group, description}]}`
 
 ### `jobs.facts`
-`{kind}` → what the kind's dialog shows before it is planned. A long
+`{kind, survey?}` → what the kind's dialog shows before it is planned.
+`survey` is needed for `sfm`, `mvs` and `mesh`; `train` counts every
+Survey. A long
 request: it reads EXIF and measures the dense cloud.
 
 | `kind` | Result |
@@ -408,35 +442,46 @@ the Job, and copies the `out` dirs back before `jobs.finish`. Every path in
 `args` under the Project root lies inside an `in` or an `out` dir. `log`
 stays where it is: the core writes it.
 
+With `S` = `surveys/<survey>` and the active Reconstruction's products
+(running a step again replaces its product; a new one is `<slot>-1`):
+
 | Kind | `in` | `out` |
 |---|---|---|
-| `sfm` | `images`, `reconstruction` | `reconstruction` |
-| `mvs` | `images`, `reconstruction` | `reconstruction` |
-| `mesh` | `reconstruction` | `products` |
+| `sfm` | `S/images`, `S/products/sfm-n` | `S/products/sfm-n` |
+| `mvs` | `S/images`, `S/products/sfm-n`, `S/products/mvs-n` | `S/products/mvs-n` |
+| `mesh` | `S/products/mvs-n` | `S/products/mesh-n` |
 
 Until `jobs.finish`, a second plan of the same group is refused (Problem:
 `job.busy`), and so is opening or closing a Project
 (`project.jobs_running`). The kinds, their options, and the Problems
-`jobs.plan` raises (or, marked †, the `error` of `jobs.finish`):
+`jobs.plan` raises (or, marked †, the `error` of `jobs.finish`). The
+kinds marked ‡ work on one Survey and need the option `survey`:
 
 | Kind | Group | GPU | Options | Problems |
 |---|---|---|---|---|
-| `ingest` | reconstruction | no | `folder`, `on_conflict` (`skip` or `overwrite`) | `job.ingest.no_folder` |
-| `sfm` | reconstruction | when `gpu` | `matcher`, `gpu`, `single_camera`, `camera_model`, `max_image_size` | `job.sfm.no_images`, `job.sfm.no_cloud` † |
-| `georef` | reconstruction | no | `max_error` | `job.no_reconstruction`, `job.georef.already` |
-| `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced` |
-| `mvs` | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
-| `mesh` | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
-| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume` | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch` |
-| `predict` | ml | yes | `model` | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing` |
+| `ingest` ‡ | reconstruction | no | `folder`, `on_conflict` (`skip` or `overwrite`) | `job.ingest.no_folder` |
+| `sfm` ‡ | reconstruction | when `gpu` | `matcher`, `gpu`, `single_camera`, `camera_model`, `max_image_size` | `job.sfm.no_images`, `job.sfm.no_cloud` † |
+| `georef` ‡ | reconstruction | no | `max_error` | `job.no_reconstruction`, `job.georef.no_fit` †, `export.needs_geoid` † |
+| `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced`, `job.reproject.no_fit` † |
+| `mvs` ‡ | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
+| `mesh` ‡ | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
+| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume` (pools every Survey's photos) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch` |
+| `predict` | ml | yes | `model` (every Survey's photos not user-labelled; its result is `{predicted: [{survey, name}]}`) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing` |
 | `geoid` | download | no | `epsg` | |
 | `colmap` | download | no | `variant` (`cuda` or `cpu`) | `job.colmap.unsupported` |
 
 `job.mvs.no_colmap`: there is neither a CUDA colmap.exe nor a CUDA pycolmap
 (native Windows without COLMAP). `job.mesh.no_delaunay`: `delaunay` needs
 colmap.exe, so the WSL Environment offers Poisson only.
-`job.georef.already`: the Project is already georeferenced, and aligning it
-again would transform the model twice. `job.train.class_mismatch` (params
+`georef` fits the Survey's cameras to its EXIF GPS and stores the fit as
+the active Reconstruction's Alignment, replacing an earlier one; no product
+is rewritten (ADR-0005). The first one gives the Project its frame (ENU
+about the first GPS photo); later ones fit into that frame's origin, and on
+into its CRS when it is reprojected. `reproject` moves the Project frame
+into a projected CRS by composing the fitted move into every Alignment;
+it, too, rewrites no file. A new `sfm` leaves its Reconstruction without
+an Alignment (`georeferencing_cleared` in its result says one was
+dropped). `job.train.class_mismatch` (params
 `model`, `model_classes`, `project_classes`): `resume` names a saved model
 trained with a different number of classes.
 
@@ -460,7 +505,7 @@ error?}`. The core reports that a planned Job has ended:
 
 - `exit` is its exit code, or null if it never ran or was lost.
 - `results` maps each `RESULT…` line's first word to the rest of the line,
-  for example `{"RESULT": "{\"predicted\": [\"a.jpg\"]}"}`.
+  for example `{"RESULT": "{\"n_gps\": 12}"}`.
 - `cancelled` says the core cancelled it.
 
 When the Job ended well, the Engine updates the open Project, sends

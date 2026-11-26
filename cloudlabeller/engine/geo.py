@@ -23,8 +23,9 @@
 Searching the projected-CRS catalogue, suggesting the site's UTM zone,
 describing the Project's frame, the export settings kept in the manifest,
 and exporting the cloud or the mesh (in the local frame, the stored CRS, or
-a projected CRS from the ENU frame). Registered by importing
-:mod:`cloudlabeller.engine.methods`.
+a projected CRS from the ENU frame). An export names its Survey and writes
+its active Reconstruction in the Project frame; an unaligned one exports its
+own local frame. Registered by importing :mod:`cloudlabeller.engine.methods`.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def crs_search(engine: Engine, params: dict) -> dict:
 
 
 def _geo(engine: Engine) -> dict:
-    geo = engine.project.settings.get("georeferenced")
+    geo = engine.project.frame
     if not geo:
         raise Problem("crs.not_georeferenced", "The Project isn't georeferenced.")
     return geo
@@ -64,7 +65,11 @@ def _origin(engine: Engine, geo: dict):
     from cloudlabeller.photogrammetry.crs import heal_enu_origin
 
     project = engine.project
-    origin, healed = heal_enu_origin(geo, project.reconstruction_dir, project.images_dir)
+    # A legacy origin is recovered from the first SfM product's camera order.
+    sfm = next((s for s in project.surveys.values() if s.sfm_dir is not None), None)
+    workspace = sfm.sfm_dir if sfm else project.root
+    images = sfm.images_dir if sfm else project.root
+    origin, healed = heal_enu_origin(geo, workspace, images)
     if healed:
         project.save_manifest()
         engine.changed("settings")
@@ -88,13 +93,13 @@ def crs_suggest(engine: Engine, params: dict) -> dict:
 def crs_frame(engine: Engine, params: dict) -> dict:
     from cloudlabeller.photogrammetry.crs import frame_labels
 
-    short, full = frame_labels(engine.project.settings.get("georeferenced"))
+    short, full = frame_labels(engine.project.frame)
     return {"short": short, "full": full}
 
 
 # -- export settings ---------------------------------------------------------------
 def _settings(engine: Engine) -> dict:
-    geo = engine.project.settings.get("georeferenced") or {}
+    geo = engine.project.frame or {}
     crs_info = geo.get("crs")
     frame = "local" if not geo else ("crs" if crs_info else "enu")
     return {"frame": frame,
@@ -126,7 +131,7 @@ def _mode_choice(params: dict, default_mode, default_epsg, default_ortho):
 
 @method("export.set_settings")
 def export_set_settings(engine: Engine, params: dict) -> dict:
-    geo = engine.project.settings.get("georeferenced")
+    geo = engine.project.frame
     if not geo:
         raise Problem("export.not_georeferenced",
                       "An unreferenced Project exports its local frame only.")
@@ -154,13 +159,16 @@ def _target(params: dict, formats: tuple) -> Path:
     return path
 
 
-def _export_spec(engine: Engine, params: dict) -> dict:
+def _export_spec(engine: Engine, params: dict, survey) -> dict:
     """How this export writes coordinates (see ``crs.export_spec``). A
     choice made for an ENU Project is kept in the manifest, as the Qt app
-    did (0.2.x); ``crs`` null reuses the kept one."""
+    did (0.2.x); ``crs`` null reuses the kept one. An unaligned Survey
+    exports its own local frame."""
     from cloudlabeller.photogrammetry.crs import export_needs_geoid, export_spec
 
-    geo = engine.project.settings.get("georeferenced")
+    geo = engine.project.frame
+    if not survey.aligned:
+        return export_spec(None)
     if not geo or geo.get("crs"):
         return export_spec(geo)
     choice = optional(params, "crs", dict, None)
@@ -199,7 +207,11 @@ def _crs_text(spec: dict) -> str | None:
 @method("export.cloud")
 def export_cloud_method(engine: Engine, params: dict) -> Deferred:
     """Write a cloud and its labels to LAS, CSV or PLY."""
-    ds, lb = engine.project.dataset, engine.project.labels
+    from cloudlabeller.core.dataset import PointCloud
+    from cloudlabeller.engine.methods import _survey
+
+    survey = _survey(engine, params)
+    ds, lb = survey.dataset, survey.labels
     which = optional(params, "cloud", str, None)
     if which not in (None, "sparse", "dense"):
         raise InvalidParams("cloud must be 'sparse' or 'dense'", param="cloud")
@@ -211,7 +223,14 @@ def export_cloud_method(engine: Engine, params: dict) -> Deferred:
     labels = lb.dense_cloud_labels if which == "dense" else lb.cloud_labels
     labels = labels.copy() if labels is not None and len(labels) == cloud.n_points else None
     path = _target(params, CLOUD_FORMATS)
-    spec = _export_spec(engine, params)
+    spec = _export_spec(engine, params, survey)
+    rec = survey.active
+    raw = cloud
+
+    def framed():
+        return PointCloud(xyz=rec.frame_points(raw.xyz), rgb=raw.rgb,
+                          normals=(rec.frame_normals(raw.normals)
+                                   if raw.normals is not None else None))
 
     def work(progress):
         from cloudlabeller.io.export import export_cloud
@@ -219,7 +238,7 @@ def export_cloud_method(engine: Engine, params: dict) -> Deferred:
 
         transform, crs = build_export_transform(spec, progress)
         progress(0.05, f"Exporting the {which} cloud ({cloud.n_points:,} points)")
-        export_cloud(cloud, labels, path, progress, transform=transform, crs=crs)
+        export_cloud(framed(), labels, path, progress, transform=transform, crs=crs)
 
     def finish(_):
         return {"path": str(path), "cloud": which, "n_points": cloud.n_points,
@@ -231,11 +250,17 @@ def export_cloud_method(engine: Engine, params: dict) -> Deferred:
 @method("export.mesh")
 def export_mesh_method(engine: Engine, params: dict) -> Deferred:
     """Write the mesh to PLY, OBJ or STL."""
-    mesh = engine.project.dataset.mesh
-    if mesh is None:
+    from cloudlabeller.core.dataset import Mesh
+    from cloudlabeller.engine.methods import _survey
+
+    survey = _survey(engine, params)
+    raw = survey.dataset.mesh
+    if raw is None:
         raise Problem("mesh.none", "There is no mesh yet.")
     path = _target(params, MESH_FORMATS)
-    spec = _export_spec(engine, params)
+    spec = _export_spec(engine, params, survey)
+    rec = survey.active
+    mesh = raw
 
     def work(progress):
         from cloudlabeller.io.export import export_mesh
@@ -243,7 +268,9 @@ def export_mesh_method(engine: Engine, params: dict) -> Deferred:
 
         transform, crs = build_export_transform(spec, progress)
         progress(0.05, f"Exporting the mesh ({len(mesh.faces):,} faces)")
-        export_mesh(mesh, path, progress, transform=transform, crs=crs)
+        framed = Mesh(vertices=rec.frame_points(raw.vertices), faces=raw.faces,
+                      vertex_colors=raw.vertex_colors)
+        export_mesh(framed, path, progress, transform=transform, crs=crs)
 
     def finish(_):
         return {"path": str(path), "vertices": len(mesh.vertices),

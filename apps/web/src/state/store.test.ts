@@ -7,6 +7,8 @@ import { type AppState, available, initialState, MAX_LOG, reduce } from "./store
 
 const project = (over: Partial<ProjectState> = {}): ProjectState => ({
   root: "C:/p",
+  surveys: [],
+  survey: "s1",
   schema: [
     { id: 0, name: "rock", color: "#ff0000", hotkey: "1" },
     { id: 1, name: "soil", color: "#00ff00", hotkey: "2" },

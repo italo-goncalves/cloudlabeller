@@ -18,17 +18,18 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Project = a folder on disk. Handles the manifest and (de)serialisation.
+"""Project = a folder on disk holding one site's Surveys (layout v2).
 
-Layout (see DESIGN.md §4)::
+Layout::
 
-    my_project.clproj/
-      project.json
-      images/
-      reconstruction/
-      products/{cloud.ply, mesh.ply}
-      labels/{cloud_labels.npy, images/<name>.npy}
-      ml/{checkpoints/, predictions/}
+    project.json          format_version 2, schema, settings, survey order
+    surveys/<sid>/        each Survey (see :mod:`cloudlabeller.core.survey`)
+    ml/models/            trained models
+
+``settings["georeferenced"]`` is the Project frame: the ENU origin, and
+``crs`` once reprojected. Each Reconstruction's Alignment carries its
+products into that frame (ADR-0005). A 0.3.0 Project (layout v1) is moved
+into this layout when it is opened (:mod:`cloudlabeller.core.migrate`).
 """
 
 from __future__ import annotations
@@ -39,111 +40,51 @@ from pathlib import Path
 
 import numpy as np
 
-from cloudlabeller.core.dataset import Dataset
-from cloudlabeller.core.label_schema import LabelSchema
-from cloudlabeller.core.labels import LabelStore
+from cloudlabeller.core.label_schema import UNLABELLED_ID, LabelSchema
+from cloudlabeller.core.survey import Survey, next_id
 
 MANIFEST = "project.json"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+
+
+class ProjectFormatError(RuntimeError):
+    """The folder holds a Project this version can't read."""
 
 
 @dataclass
 class Project:
-    """A CloudLabeller project: a plain folder plus its in-memory state.
-
-    On disk the ``root`` folder holds ``project.json`` (schema, settings,
-    per-image label status), ``images/`` (the image store), ``reconstruction/``
-    (sparse cloud, cameras, dense cloud, visibility cache), ``products/``
-    (mesh), ``labels/`` (per-point/-vertex/-image label arrays) and ``ml/``
-    (checkpoints, predictions). Projects are portable — copy the folder as-is.
-
-    In memory it bundles the label ``schema``, the reconstructed ``dataset``
-    (images, clouds, mesh), the ``labels`` store, and free-form ``settings``
-    (e.g. ``settings["georeferenced"]`` with the ENU origin / CRS frame).
-    """
-
     root: Path
     schema: LabelSchema = field(default_factory=LabelSchema)
-    dataset: Dataset = field(default_factory=Dataset)
-    labels: LabelStore = field(default_factory=LabelStore)
     settings: dict = field(default_factory=dict)
-    _visibility: object = field(default=None, init=False, repr=False)
-    _adjacency: object = field(default=None, init=False, repr=False)
+    surveys: dict[str, Survey] = field(default_factory=dict)
 
-    def visibility_index(self):
-        """Lazy per-project camera↔point visibility cache (reconstruction/pmap)."""
-        if self._visibility is None:
-            from cloudlabeller.transfer.visibility import VisibilityIndex
-
-            self._visibility = VisibilityIndex(self.reconstruction_dir / "pmap")
-        return self._visibility
-
-    def image_adjacency(self):
-        """The image-overlap (covisibility) graph, or None if underivable.
-
-        Loaded from ``reconstruction/adjacency.json`` (written by SfM). For
-        projects reconstructed before that file existed it is derived once
-        from the sparse cloud's cached per-camera visibility and saved. May
-        take a moment on that first derivation — call from a worker thread.
-        """
-        if self._adjacency is None:
-            from cloudlabeller.photogrammetry.adjacency import (
-                ImageAdjacency,
-                covisibility_from_images,
-            )
-
-            adj = ImageAdjacency.load(self.reconstruction_dir)
-            solved = self.dataset.solved_images()
-            if adj is None and self.dataset.cloud is not None and solved:
-                adj = covisibility_from_images(self.dataset.cloud, solved,
-                                               self.visibility_index())
-                adj.save(self.reconstruction_dir)
-            self._adjacency = adj
-        return self._adjacency
-
-    def overlapping_images(self, name: str) -> "set[str] | None":
-        """Names of images that see surface in common with ``name``.
-
-        None means "unknown" (no graph, or ``name`` not in it) — treat every
-        image as a candidate in that case.
-        """
-        adj = self.image_adjacency()
-        return None if adj is None else adj.overlapping(name)
-
+    # -- paths ------------------------------------------------------------------
     @property
-    def mesh_nn_cache_path(self) -> Path:
-        return self.labels_dir / "mesh_nn.npz"
-
-    # -- standard sub-paths -----------------------------------------------
-    @property
-    def images_dir(self) -> Path:
-        return self.root / "images"
-
-    @property
-    def reconstruction_dir(self) -> Path:
-        return self.root / "reconstruction"
-
-    @property
-    def products_dir(self) -> Path:
-        return self.root / "products"
-
-    @property
-    def labels_dir(self) -> Path:
-        return self.root / "labels"
+    def surveys_dir(self) -> Path:
+        return self.root / "surveys"
 
     @property
     def ml_dir(self) -> Path:
         return self.root / "ml"
 
-    @property
-    def dense_cloud_path(self) -> Path:
-        return self.reconstruction_dir / "dense.npz"
+    # -- surveys ------------------------------------------------------------------
+    def survey(self, sid: str) -> Survey:
+        """The Survey ``sid``, its photos, geometry and labels loaded."""
+        return self.surveys[sid].ensure_loaded()
+
+    def add_survey(self, name: str = "", **meta) -> Survey:
+        sid = next_id("s", self.surveys)
+        survey = Survey.create(self.surveys_dir / sid, sid, name, **meta)
+        self.surveys[sid] = survey
+        self.save_manifest()
+        return survey
 
     @property
-    def mesh_path(self) -> Path:
-        return self.products_dir / "mesh.npz"
+    def frame(self) -> dict | None:
+        """The Project frame (``settings["georeferenced"]``), or None."""
+        return self.settings.get("georeferenced")
 
-    # -- label management --------------------------------------------------
+    # -- classes --------------------------------------------------------------------
     def add_label(self, name: str | None = None, color: str | None = None):
         return self.schema.add(name=name, color=color)
 
@@ -154,75 +95,22 @@ class Project:
         self.schema.set_color(class_id, color)
 
     def delete_label(self, class_id: int) -> None:
-        """Delete a class and remap the stored labels to stay contiguous."""
-        self.labels.remap_after_delete(class_id)
+        """Delete a Class, remapping every Survey's labels (also those of
+        Reconstructions not active) to stay contiguous."""
+        for sid in self.surveys:
+            survey = self.survey(sid)
+            survey.labels.remap_after_delete(class_id)
+            for rec in survey.reconstructions.values():
+                if rec is survey.active or not rec.labels_dir.exists():
+                    continue
+                for f in rec.labels_dir.glob("*.npy"):
+                    arr = np.load(f)
+                    arr[arr == class_id] = UNLABELLED_ID
+                    arr[arr > class_id] -= 1
+                    np.save(f, arr)
         self.schema.remove(class_id)
 
-    # -- auto (derived) image masks -----------------------------------------
-    # Auto-labelled masks are DERIVED data: they are re-rendered from the cloud
-    # labels on demand instead of being materialised for every image (a 21 Mpx
-    # int32 mask is ~84 MB — storing 50+ of them froze the UI and exhausted RAM).
-    def auto_mask_source(self):
-        """The labelled cloud used to render auto masks: dense first, else sparse.
-        Returns (cloud, labels) or None if nothing is labelled."""
-        ds, lb = self.dataset, self.labels
-        if (ds.dense_cloud is not None and lb.dense_cloud_labels is not None
-                and len(lb.dense_cloud_labels) == ds.dense_cloud.n_points
-                and (lb.dense_cloud_labels != -1).any()):
-            return ds.dense_cloud, lb.dense_cloud_labels
-        if (ds.cloud is not None and lb.cloud_labels is not None
-                and (lb.cloud_labels != -1).any()):
-            return ds.cloud, lb.cloud_labels
-        return None
-
-    def render_auto_mask(self, name: str):
-        """Render ``name``'s auto label mask: a stored U-Net prediction when the
-        image's status is 'ml', else projected from the cloud (or None)."""
-        if self.labels.status_of(name) == "ml":
-            pred = self.prediction_mask(name)
-            if pred is not None:
-                return pred
-        source = self.auto_mask_source()
-        record = self.dataset.image_by_name(name)
-        if source is None or record is None or record.camera is None:
-            return None
-        from cloudlabeller.transfer import cloud_to_image  # lazy: heavy deps
-
-        return cloud_to_image(source[0], source[1], record.camera,
-                              name=name, visibility=self.visibility_index())
-
-    # -- U-Net predictions (stored at model resolution) ----------------------
-    @property
-    def predictions_dir(self) -> Path:
-        return self.ml_dir / "predictions"
-
-    def prediction_mask(self, name: str):
-        """Load ``name``'s U-Net prediction and upscale it to the photo's
-        resolution. Returns (H, W) int32 or None. Predictions are stored at
-        the model's training size — full-resolution int32 masks are ~84 MB
-        each, which froze the UI when materialised.
-
-        The upscale is a per-class one-hot resample (see
-        :func:`~cloudlabeller.core.raster.resample_label_mask`) — smooth
-        class boundaries instead of the blocky staircase nearest-neighbour
-        baked in, and never a spurious in-between class. This mask also feeds
-        cloud transfer and retraining, so the boundary quality carries through.
-        """
-        path = self.predictions_dir / f"{name}.npy"
-        if not path.exists():
-            return None
-        small = np.load(path)
-        wh = self.source_resolution()
-        record = self.dataset.image_by_name(name)
-        if record is not None and record.camera is not None:
-            wh = (record.camera.width, record.camera.height)
-        if wh is None or (small.shape[1], small.shape[0]) == wh:
-            return small.astype(np.int32)
-        from cloudlabeller.core.raster import resample_label_mask
-
-        return resample_label_mask(small, (int(wh[0]), int(wh[1]))).astype(np.int32)
-
-    # -- model / ML settings ----------------------------------------------
+    # -- model settings ----------------------------------------------------------------
     def model_spec(self):
         """The persisted U-Net :class:`ModelSpec` (defaults if never set)."""
         from cloudlabeller.ml.model_spec import ModelSpec
@@ -232,91 +120,41 @@ class Project:
     def set_model_spec(self, spec) -> None:
         self.settings["model_spec"] = spec.to_dict()
 
-    def source_resolution(self, cache: bool = True) -> tuple[int, int] | None:
-        """Original (width, height) of the project's images.
+    def source_resolution(self) -> tuple[int, int] | None:
+        """The first Survey's photo size, for the whole-photo model until
+        Tiles replace it."""
+        for sid in self.surveys:
+            wh = self.survey(sid).source_resolution()
+            if wh:
+                return wh
+        return None
 
-        Stored so model predictions — produced at the reduced training size —
-        can be upscaled back to full resolution. Resolved from a solved camera
-        first, else by reading an image header; cached in settings once known.
-        """
-        cached = self.settings.get("source_resolution")
-        if cached:
-            return (int(cached[0]), int(cached[1]))
-
-        wh: tuple[int, int] | None = None
-        for rec in self.dataset.images:
-            if rec.camera is not None:
-                wh = (int(rec.camera.width), int(rec.camera.height))
-                break
-        if wh is None:
-            from PIL import Image
-
-            for rec in self.dataset.images:
-                if rec.path and Path(rec.path).exists():
-                    with Image.open(rec.path) as im:
-                        wh = (int(im.size[0]), int(im.size[1]))
-                    break
-        if wh and cache:
-            self.settings["source_resolution"] = list(wh)
-        return wh
-
-    # -- summary -------------------------------------------------------------
+    # -- summary ---------------------------------------------------------------------
     def summary_info(self) -> list[tuple[str, str]]:
-        """(label, value) rows describing the project — shown in the Project
-        Info dialog and copyable as plain text."""
-        ds, lb = self.dataset, self.labels
+        """(label, value) rows for the Project Info dialog."""
         rows: list[tuple[str, str]] = [("Project", str(self.root))]
-
-        solved = sum(1 for r in ds.images if r.camera is not None)
-        rows.append(("Images", f"{len(ds.images)} in store, {solved} with solved cameras"))
-        statuses = [lb.status_of(r.name) for r in ds.images]
-        rows.append(("Label status",
-                     f"{statuses.count('user')} user-labelled, "
-                     f"{statuses.count('auto') + statuses.count('ml')} auto-labelled "
-                     f"({statuses.count('ml')} by U-Net), "
-                     f"{statuses.count('none')} unlabelled"))
-
-        rows.append(("Reconstruction", self.reconstruction_status()))
-        if ds.cloud is not None:
-            rows.append(("Sparse cloud", f"{ds.cloud.n_points:,} points"))
-        if ds.dense_cloud is not None:
-            rows.append(("Dense cloud", f"{ds.dense_cloud.n_points:,} points"))
-        if ds.mesh is not None:
-            rows.append(("Mesh", f"{len(ds.mesh.vertices):,} vertices, "
-                                 f"{len(ds.mesh.faces):,} faces"))
-
-        geo = self.settings.get("georeferenced")
+        geo = self.frame
         if geo:
             crs_info = geo.get("crs")
             if crs_info:
                 off = crs_info.get("offset") or [0, 0, 0]
-                rows.append(("Coordinates",
-                             f"EPSG:{crs_info.get('epsg')} — "
-                             f"{crs_info.get('name', '?')}"))
+                rows.append(("Coordinates", f"EPSG:{crs_info.get('epsg')} — "
+                                            f"{crs_info.get('name', '?')}"))
                 rows.append(("Heights", "EGM96 (sea level)"
                              if crs_info.get("orthometric") else "ellipsoidal"))
                 if any(off):
-                    rows.append(("Stored offset",
-                                 f"{off[0]:.0f}, {off[1]:.0f}, {off[2]:.0f} "
-                                 "(exports add it back)"))
+                    rows.append(("Stored offset", f"{off[0]:.0f}, {off[1]:.0f}, "
+                                                  f"{off[2]:.0f} (exports add it back)"))
             else:
                 rows.append(("Coordinates",
                              f"{geo.get('frame', 'ENU')} — metres, true north"))
             lat, lon, alt = (geo.get("origin_lla") or [0, 0, 0])
-            rows.append(("Origin (lat, lon, alt)",
-                         f"{lat:.7f}°, {lon:.7f}°, {alt:.1f} m"))
-            scale = geo.get("scale_m_per_unit")
-            if scale:
-                rows.append(("Alignment scale",
-                             f"1 model unit was {scale:.4f} m "
-                             f"({geo.get('n_gps', '?')} GPS images)"))
+            rows.append(("Origin (lat, lon, alt)", f"{lat:.7f}°, {lon:.7f}°, {alt:.1f} m"))
         else:
-            rows.append(("Coordinates", "arbitrary local frame "
-                                        "(not georeferenced)"))
-
+            rows.append(("Coordinates", "arbitrary local frame (not georeferenced)"))
         if self.schema.classes:
-            rows.append(("Classes", ", ".join(
-                f"{c.id}: {c.name}" for c in self.schema.classes)))
+            rows.append(("Classes", ", ".join(f"{c.id}: {c.name}"
+                                              for c in self.schema.classes)))
         spec = self.model_spec()
         rows.append(("U-Net spec", f"1/{spec.resolution_divisor} resolution, "
                                    f"{spec.channels} ch × {spec.blocks} blocks, "
@@ -326,171 +164,65 @@ class Project:
         models = list_models(self.ml_dir)
         if models:
             rows.append(("Saved models", ", ".join(m["name"] for m in models)))
+        for sid in self.surveys:
+            survey = self.survey(sid)
+            rows.append((f"Survey {sid}", survey.name))
+            rows.extend((f"  {k}", v) for k, v in survey.summary_rows())
         return rows
 
-    # -- reconstruction freshness -----------------------------------------
-    def mark_reconstruction_current(self) -> None:
-        self.settings["reconstruction_outdated"] = False
-
-    def mark_reconstruction_outdated(self) -> None:
-        self.settings["reconstruction_outdated"] = True
-
-    def reconstruction_status(self) -> str:
-        """One of: 'none' (no cloud), 'outdated' (store changed since SfM),
-        'current'."""
-        if self.dataset.cloud is None:
-            return "none"
-        return "outdated" if self.settings.get("reconstruction_outdated") else "current"
-
-    def filter_sparse_cloud(self, keep: np.ndarray) -> int:
-        """Keep only the sparse points where ``keep`` is True: rewrite
-        ``cloud.npz``, let the labels follow (which clears the undo history)
-        and return how many points went. The caller saves the Project."""
-        from cloudlabeller.core.dataset import PointCloud
-        from cloudlabeller.photogrammetry.pipeline import CLOUD_FILE
-
-        cloud = self.dataset.cloud
-        keep = np.asarray(keep, bool)
-        if cloud is None or len(keep) != cloud.n_points:
-            raise ValueError("keep must have one entry per sparse point")
-        new_cloud = PointCloud(xyz=cloud.xyz[keep],
-                               rgb=cloud.rgb[keep] if cloud.rgb is not None else None)
-        np.savez(self.reconstruction_dir / CLOUD_FILE, xyz=new_cloud.xyz,
-                 rgb=new_cloud.rgb if new_cloud.rgb is not None
-                 else np.empty((0, 3), np.uint8))
-        self.dataset.cloud = new_cloud
-        self.labels.filter_cloud(keep)
-        return cloud.n_points - new_cloud.n_points
-
-    # -- lifecycle ---------------------------------------------------------
+    # -- lifecycle ---------------------------------------------------------------------
     @classmethod
     def create(cls, root: str | Path, schema: LabelSchema | None = None) -> "Project":
-        """Create the folder structure for a new project and save its manifest."""
+        """A new Project with one empty Survey."""
         root = Path(root)
         proj = cls(root=root, schema=schema or LabelSchema())
-        for d in (proj.images_dir, proj.reconstruction_dir, proj.products_dir,
-                  proj.labels_dir, proj.labels_dir / "images",
-                  proj.ml_dir / "checkpoints", proj.ml_dir / "predictions"):
-            d.mkdir(parents=True, exist_ok=True)
+        (proj.ml_dir / "models").mkdir(parents=True, exist_ok=True)
+        proj.surveys_dir.mkdir(parents=True, exist_ok=True)
+        sid = next_id("s", ())
+        proj.surveys[sid] = Survey.create(proj.surveys_dir / sid, sid)
         proj.save()
         return proj
 
     @classmethod
     def open(cls, root: str | Path) -> "Project":
-        """Load an existing project: manifest, then products, then labels."""
+        """Open a Project (moving a 0.3.0 one into layout v2 first). Surveys'
+        photos, geometry and labels load when first asked for."""
+        from cloudlabeller.core.migrate import migrate_if_needed
+
         root = Path(root)
+        migrate_if_needed(root)
         data = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
-        proj = cls(
-            root=root,
-            schema=LabelSchema.from_dict(data.get("schema", {})),
-            settings=data.get("settings", {}),
-        )
-        proj.labels.image_status = dict(data.get("image_status", {}))
-        proj.load_products()
-        proj._load_labels()
+        version = data.get("format_version", 1)
+        if version != FORMAT_VERSION:
+            raise ProjectFormatError(
+                f"Project format {version} is not one this version reads "
+                f"(it reads {FORMAT_VERSION}).")
+        proj = cls(root=root, schema=LabelSchema.from_dict(data.get("schema", {})),
+                   settings=data.get("settings", {}))
+        order = list(data.get("surveys") or [])
+        if proj.surveys_dir.exists():
+            order += sorted(p.name for p in proj.surveys_dir.iterdir()
+                            if (p / "survey.json").exists() and p.name not in order)
+        for sid in order:
+            if (proj.surveys_dir / sid / "survey.json").exists():
+                proj.surveys[sid] = Survey.load(proj.surveys_dir / sid)
         return proj
 
-    def save_manifest(self) -> None:
-        """Write just project.json (schema, settings, image status). Cheap — used
-        to persist the frustum-dot statuses promptly, without the heavy npy dump."""
-        manifest = {
-            "format_version": FORMAT_VERSION,
-            "schema": self.schema.to_dict(),
-            "settings": self.settings,
-            "images": [im.name for im in self.dataset.images],
-            "image_status": self.labels.image_status,   # drives the frustum dot colours
-        }
+    def _write_manifest(self) -> None:
+        manifest = {"format_version": FORMAT_VERSION, "schema": self.schema.to_dict(),
+                    "settings": self.settings, "surveys": list(self.surveys)}
+        self.root.mkdir(parents=True, exist_ok=True)
         (self.root / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
+    def save_manifest(self) -> None:
+        """``project.json`` and every Survey's manifest: cheap, used for
+        status changes."""
+        self._write_manifest()
+        for survey in self.surveys.values():
+            survey.save_manifest()
+
     def save(self) -> None:
-        """Full save: manifest plus every label array (the heavy part)."""
-        self.save_manifest()
-        self._save_labels()
-
-    # -- label persistence -------------------------------------------------
-    def save_image_mask(self, name: str) -> None:
-        """Write one user-drawn image mask (cheaper than a full save)."""
-        mask = self.labels.image_masks.get(name)
-        if mask is not None:
-            (self.labels_dir / "images").mkdir(parents=True, exist_ok=True)
-            np.save(self.labels_dir / "images" / f"{name}.npy", mask)
-
-    def _save_labels(self) -> None:
-        """Dump cloud/mesh label arrays and user-drawn image masks as .npy."""
-        if self.labels.cloud_labels is not None:
-            np.save(self.labels_dir / "cloud_labels.npy", self.labels.cloud_labels)
-        if self.labels.dense_cloud_labels is not None:
-            np.save(self.labels_dir / "dense_cloud_labels.npy", self.labels.dense_cloud_labels)
-        if self.labels.mesh_labels is not None:
-            np.save(self.labels_dir / "mesh_labels.npy", self.labels.mesh_labels)
-        for name, mask in self.labels.image_masks.items():
-            np.save(self.labels_dir / "images" / f"{name}.npy", mask)
-
-    def _load_labels(self) -> None:
-        """Load label arrays back; stale auto-generated image masks (from an
-        older app version that materialised them) are deleted, not loaded."""
-        cloud_path = self.labels_dir / "cloud_labels.npy"
-        if cloud_path.exists():
-            self.labels.cloud_labels = np.load(cloud_path)
-        dense_path = self.labels_dir / "dense_cloud_labels.npy"
-        if dense_path.exists():
-            self.labels.dense_cloud_labels = np.load(dense_path)
-        mesh_path = self.labels_dir / "mesh_labels.npy"
-        if mesh_path.exists():
-            self.labels.mesh_labels = np.load(mesh_path)
-        img_dir = self.labels_dir / "images"
-        if img_dir.exists():
-            for f in img_dir.glob("*.npy"):
-                if self.labels.status_of(f.stem) == "auto":
-                    # Stale derived mask (an older version materialised auto
-                    # masks). It is regenerated from the cloud on demand —
-                    # loading 50+ full-res masks exhausted RAM.
-                    f.unlink(missing_ok=True)
-                    continue
-                self.labels.image_masks[f.stem] = np.load(f)
-
-    def load_products(self) -> None:
-        """Rebuild the dataset (image store + sparse cloud + cameras) on open.
-
-        The dataset's images come from a union of (a) the image files present in
-        ``project/images/`` and (b) the solved cameras in ``cameras.json`` — so
-        both reconstructed and not-yet-reconstructed images appear, each with a
-        camera when one was solved. The cloud is read from ``cloud.npz``.
-        """
-        self._adjacency = None      # a new reconstruction brings a new overlap graph
-
-        # Lazy imports keep the core package free of a hard photogrammetry dep.
-        import numpy as np
-
-        from cloudlabeller.core.dataset import ImageRecord
-        from cloudlabeller.core.images import list_image_files
-        from cloudlabeller.photogrammetry.pipeline import CLOUD_FILE, load_cameras
-
-        rec = self.reconstruction_dir
-
-        # Images: union of the store contents and any solved cameras.
-        cameras = load_cameras(rec)                       # filename -> Camera
-        store = {Path(n).name for n in list_image_files(self.images_dir)}
-        names = sorted(store | set(cameras))
-        self.dataset.images = [
-            ImageRecord(image_id=i, path=self.images_dir / name, camera=cameras.get(name))
-            for i, name in enumerate(names)
-        ]
-
-        # Sparse cloud.
-        cloud_path = rec / CLOUD_FILE
-        if cloud_path.exists():
-            data = np.load(cloud_path)
-            from cloudlabeller.core.dataset import PointCloud
-            rgb = data["rgb"]
-            self.dataset.cloud = PointCloud(xyz=data["xyz"], rgb=rgb if len(rgb) else None)
-            if (self.labels.cloud_labels is None
-                    or len(self.labels.cloud_labels) != self.dataset.cloud.n_points):
-                self.labels.init_cloud(self.dataset.cloud.n_points)
-
-        # Dense cloud / mesh (from MVS or import), if present.
-        from cloudlabeller.io.geometry import load_cloud_npz, load_mesh_npz
-        if self.dense_cloud_path.exists():
-            self.dataset.dense_cloud = load_cloud_npz(self.dense_cloud_path)
-        if self.mesh_path.exists():
-            self.dataset.mesh = load_mesh_npz(self.mesh_path)
+        """Manifests plus every loaded Survey's label arrays."""
+        self._write_manifest()
+        for survey in self.surveys.values():
+            survey.save()

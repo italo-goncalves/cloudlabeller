@@ -32,7 +32,14 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.engine import arrays
-from cloudlabeller.engine.methods import _cloud, _image, _image_size, _which
+from cloudlabeller.engine.methods import (
+    _cloud,
+    _image,
+    _image_size,
+    _survey,
+    _which,
+    framed_xyz,
+)
 from cloudlabeller.engine.protocol import InvalidParams, Problem
 from cloudlabeller.engine.server import Deferred, Engine, method, optional, require
 
@@ -49,20 +56,22 @@ def cloud_view(engine: Engine, params: dict) -> dict:
     """A seeded, evenly spread subsample of a cloud for display."""
     from cloudlabeller.core.selection import even_subsample
 
+    survey = _survey(engine, params)
     which = _which(params)
-    cloud = _cloud(engine, which)
+    cloud = _cloud(survey, which)
     max_points = optional(params, "max_points", int, 0)
     if max_points < 0:
         raise InvalidParams("max_points must be 0 or more", param="max_points")
-    root = engine.project.root
+    root, base = engine.project.root, f"view/{survey.id}/{which}"
     index = even_subsample(cloud.n_points, max_points)
     xyz = cloud.xyz if index is None else cloud.xyz[index]
+    xyz = survey.active.frame_points(xyz)
     rgb = cloud.rgb if (index is None or cloud.rgb is None) else cloud.rgb[index]
     return {"cloud": which, "n_points": cloud.n_points, "shown": len(xyz),
-            "xyz": arrays.write(root, f"view/{which}/xyz", xyz.astype(np.float32)),
-            "rgb": (arrays.write(root, f"view/{which}/rgb", rgb.astype(np.uint8))
+            "xyz": arrays.write(root, f"{base}/xyz", xyz.astype(np.float32)),
+            "rgb": (arrays.write(root, f"{base}/rgb", rgb.astype(np.uint8))
                     if rgb is not None else None),
-            "index": (arrays.write(root, f"view/{which}/index", index.astype(np.int32))
+            "index": (arrays.write(root, f"{base}/index", index.astype(np.int32))
                       if index is not None else None)}
 
 
@@ -71,8 +80,8 @@ def cloud_select(engine: Engine, params: dict) -> Deferred:
     """The full cloud's points inside a screen-space lasso, hidden ones too."""
     from cloudlabeller.core.selection import select_in_polygon
 
+    survey = _survey(engine, params)
     which = _which(params)
-    cloud = _cloud(engine, which)
     vp = require(params, "view_projection", list)
     if len(vp) != 16:
         raise InvalidParams("view_projection needs 16 numbers", param="view_projection")
@@ -86,7 +95,7 @@ def cloud_select(engine: Engine, params: dict) -> Deferred:
     height = _number(require(params, "height", (int, float)), "height")
     if width <= 0 or height <= 0:
         raise InvalidParams("width and height must be positive", param="width")
-    xyz, root = cloud.xyz, engine.project.root
+    xyz, root = framed_xyz(engine, survey, which), engine.project.root
 
     def work(progress):
         return select_in_polygon(xyz, vp, poly, width, height,
@@ -94,7 +103,7 @@ def cloud_select(engine: Engine, params: dict) -> Deferred:
 
     def finish(indices):
         return {"count": int(indices.size),
-                "indices": arrays.write(root, f"select/{which}", indices)}
+                "indices": arrays.write(root, f"select/{survey.id}/{which}", indices)}
 
     return Deferred(work, finish)
 
@@ -104,23 +113,24 @@ def _sparse_only(params: dict) -> None:
         raise InvalidParams("only the sparse cloud can lose points", param="cloud")
 
 
-def _delete_points(engine: Engine, keep: np.ndarray) -> dict:
+def _delete_points(engine: Engine, survey, keep: np.ndarray) -> dict:
     """Drop the sparse points where ``keep`` is False, as the 0.2.x Qt window's
-    ``_apply_sparse_clean`` did: rewrite the cloud, the labels follow, and
-    the undo history is cleared."""
-    project = engine.project
-    removed = project.filter_sparse_cloud(keep) if not keep.all() else 0
+    ``_apply_sparse_clean`` did: the Reconstruction stops showing them (its
+    product is not edited), the labels follow, and the undo history is
+    cleared."""
+    removed = survey.filter_sparse_cloud(keep) if not keep.all() else 0
     if removed:
-        engine.cache.pop("sparse_stats", None)
+        engine.cache.pop(("sparse_stats", survey.id), None)
         engine.save_project()
-        engine.changed("sparse", "labels")
-    return {"removed": int(removed), "n_points": project.dataset.cloud.n_points}
+        engine.changed("sparse", "labels", survey=survey.id)
+    return {"removed": int(removed), "n_points": survey.dataset.cloud.n_points}
 
 
 @method("cloud.delete")
 def cloud_delete(engine: Engine, params: dict) -> dict:
     _sparse_only(params)
-    cloud = _cloud(engine, "sparse")
+    survey = _survey(engine, params)
+    cloud = _cloud(survey, "sparse")
     ref = require(params, "indices", dict)
     if ref.get("dtype") not in ("int32", "uint32"):
         raise InvalidParams("indices must be int32 or uint32", param="indices")
@@ -130,19 +140,19 @@ def cloud_delete(engine: Engine, params: dict) -> dict:
                       n_points=cloud.n_points)
     keep = np.ones(cloud.n_points, bool)
     keep[indices] = False
-    return _delete_points(engine, keep)
+    return _delete_points(engine, survey, keep)
 
 
-def _with_stats(engine: Engine, then) -> Deferred:
+def _with_stats(engine: Engine, survey, then) -> Deferred:
     """A Deferred that runs ``then(views, errors)`` on the loop thread with
     the sparse cloud's SfM statistics, read from the saved COLMAP model
     (and cached for this cloud)."""
     from cloudlabeller.photogrammetry.extract import MIN_MODEL_MATCH
 
-    project = engine.project
-    cloud = _cloud(engine, "sparse")
-    cached = engine.cache.get("sparse_stats")
-    sparse_root = project.reconstruction_dir / "sparse"
+    cloud = _cloud(survey, "sparse")
+    key = ("sparse_stats", survey.id)
+    cached = engine.cache.get(key)
+    sparse_root = survey.sfm_dir / "sparse"
 
     def work(progress):
         if cached is not None and cached[0] is cloud:
@@ -160,14 +170,14 @@ def _with_stats(engine: Engine, then) -> Deferred:
 
     def finish(stats):
         views, errors = stats
-        if project.dataset.cloud is not cloud:
+        if survey.dataset.cloud is not cloud:
             raise Problem("cloud.changed", "The cloud changed meanwhile. Try again.")
         matched = float((views > 0).mean()) if len(views) else 0.0
         if matched < MIN_MODEL_MATCH:
             raise Problem("cloud.model_mismatch",
                           "The saved COLMAP model doesn't match the cloud: run SfM again.",
                           matched=matched)
-        engine.cache["sparse_stats"] = (cloud, views, errors)
+        engine.cache[key] = (cloud, views, errors)
         return then(views, errors)
 
     return Deferred(work, finish)
@@ -176,13 +186,14 @@ def _with_stats(engine: Engine, then) -> Deferred:
 @method("cloud.stats")
 def cloud_stats(engine: Engine, params: dict) -> Deferred:
     _sparse_only(params)
-    root = engine.project.root
+    survey = _survey(engine, params)
+    root, base = engine.project.root, f"stats/{survey.id}"
 
     def then(views, errors):
         return {"n_points": len(views), "matched": float((views > 0).mean()),
-                "views": arrays.write(root, "stats/views", views.astype(np.int32)),
-                "errors": arrays.write(root, "stats/errors", errors.astype(np.float32))}
-    return _with_stats(engine, then)
+                "views": arrays.write(root, f"{base}/views", views.astype(np.int32)),
+                "errors": arrays.write(root, f"{base}/errors", errors.astype(np.float32))}
+    return _with_stats(engine, survey, then)
 
 
 def _thresholds(params: dict) -> tuple[int, float]:
@@ -195,24 +206,26 @@ def _thresholds(params: dict) -> tuple[int, float]:
 def cloud_clean_preview(engine: Engine, params: dict) -> Deferred:
     from cloudlabeller.photogrammetry.extract import confidence_keep
 
+    survey = _survey(engine, params)
     min_images, max_error = _thresholds(params)
     root = engine.project.root
 
     def then(views, errors):
         keep = confidence_keep(views, errors, min_images, max_error)
         return {"keep": int(keep.sum()), "total": len(keep),
-                "removed": arrays.write(root, "clean/removed",
+                "removed": arrays.write(root, f"clean/{survey.id}/removed",
                                         np.flatnonzero(~keep).astype(np.uint32))}
-    return _with_stats(engine, then)
+    return _with_stats(engine, survey, then)
 
 
 @method("cloud.clean")
 def cloud_clean(engine: Engine, params: dict) -> Deferred:
     from cloudlabeller.photogrammetry.extract import confidence_keep
 
+    survey = _survey(engine, params)
     min_images, max_error = _thresholds(params)
-    return _with_stats(engine, lambda views, errors: _delete_points(
-        engine, confidence_keep(views, errors, min_images, max_error)))
+    return _with_stats(engine, survey, lambda views, errors: _delete_points(
+        engine, survey, confidence_keep(views, errors, min_images, max_error)))
 
 
 # -- cameras and photos ----------------------------------------------------------
@@ -222,13 +235,14 @@ def cameras_list(engine: Engine, params: dict) -> dict:
     from cloudlabeller.photogrammetry.cameras import scene_up
     from cloudlabeller.photogrammetry.crs import frame_offset
 
-    project = engine.project
-    geo = project.settings.get("georeferenced")
-    offset = frame_offset(geo)
-    solved = project.dataset.solved_images()
+    survey = _survey(engine, params)
+    geo = engine.project.frame
+    offset = frame_offset(geo) if survey.aligned else np.zeros(3)
+    rec = survey.active
+    solved = survey.dataset.solved_images()
+    framed = [rec.frame_camera(r.camera) for r in solved]
     cams = []
-    for r in solved:
-        c = r.camera
+    for r, c in zip(solved, framed):
         R = np.asarray(c.R, np.float64)
         t = np.asarray(c.t, np.float64)
         position = -(R.T @ t)
@@ -236,14 +250,15 @@ def cameras_list(engine: Engine, params: dict) -> dict:
                      "K": np.asarray(c.K, np.float64).tolist(), "R": R.tolist(),
                      "t": t.tolist(), "position": position.tolist(),
                      "position_crs": (position + offset).tolist()})
-    up = scene_up([r.camera.R for r in solved], bool(geo))
+    up = scene_up([c.R for c in framed], bool(geo) and survey.aligned)
     return {"cameras": cams, "up": up.tolist() if up is not None else None}
 
 
 @method("image.info")
 def image_info(engine: Engine, params: dict) -> dict:
-    record = _image(engine, params)
-    h, w = _image_size(engine, record)
+    survey = _survey(engine, params)
+    record = _image(survey, params)
+    h, w = _image_size(record)
     path = Path(record.path)
     try:
         rel = path.relative_to(engine.project.root).as_posix()
@@ -262,8 +277,8 @@ def mesh_estimate(engine: Engine, params: dict) -> Deferred:
     if method_ not in ("poisson", "delaunay"):
         raise InvalidParams("method must be 'poisson' or 'delaunay'", param="method")
     depth = optional(params, "depth", int, None)
-    project = engine.project
-    dense = project.dataset.dense_cloud
+    survey = _survey(engine, params)
+    dense = survey.dataset.dense_cloud
     if dense is None:
         raise Problem("job.mesh.no_dense", "Meshing needs the dense cloud.")
     cached = engine.cache.get("poisson_depth")
@@ -282,7 +297,7 @@ def mesh_estimate(engine: Engine, params: dict) -> Deferred:
 
     def finish(out):
         suggested, est = out
-        if project.dataset.dense_cloud is dense:
+        if survey.dataset.dense_cloud is dense:
             engine.cache["poisson_depth"] = (dense, suggested)
         return {"minutes": float(est["minutes"]), "ram_gb": float(est["ram_gb"]),
                 "vertices": float(est["vertices"]), "suggested_depth": suggested,

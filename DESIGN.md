@@ -93,34 +93,46 @@ labelling in one view updates the other.
 ## 4. Domain model
 
 ### `Project`
-A project is a **folder** on disk:
+A project is a **folder** on disk (layout v2, 0.4.0; a 0.3.0 Project is
+moved into it when opened, `core/migrate.py`):
 
 ```
 my_project.clproj/
-├── project.json          # manifest: schema, paths, settings, product registry
-├── images/               # source images (or symlinks/paths to them)
-├── reconstruction/        # COLMAP db + sparse/ + dense/ outputs
-├── products/
-│   ├── cloud.ply         # point cloud (hylite HyCloud-compatible)
-│   └── mesh.ply
-├── labels/
-│   ├── cloud_labels.npy  # int32 per-point class id  (-1 = unlabelled)
-│   ├── images/<name>.npy # int32 per-pixel masks
-│   └── history.json      # undo/redo journal (optional)
-└── ml/
-    ├── checkpoints/
-    └── predictions/       # U-Net masks for all images
+├── project.json            # format 2: schema, settings (Project frame, model spec), Survey order
+├── surveys/<sid>/          # one per Survey (s1, s2, …)
+│   ├── survey.json         # name, timestamp, operator, camera, notes, settings,
+│   │                       #   image status, active Reconstruction
+│   ├── images/             # the photos
+│   ├── masks/<name>.npy    # the user's Masks (int32, -1 = unlabelled)
+│   ├── predictions/        # U-Net predictions, at model resolution
+│   ├── products/
+│   │   ├── sfm-<n>/        # COLMAP db, sparse/, cloud.npz, cameras.json, adjacency.json
+│   │   ├── mvs-<n>/        # dense/ (COLMAP workspace), dense.npz
+│   │   └── mesh-<n>/       # mesh.npz
+│   ├── reconstructions/<rid>/
+│   │   ├── recon.json      # its products per step, its Alignment
+│   │   ├── keep.npy        # the sparse points it keeps (when some were deleted)
+│   │   └── labels/         # sparse.npy, dense.npy, mesh.npy, mesh_nn.npz
+│   └── cache/              # visibility (pmap/), derived adjacency
+└── ml/models/<name>/       # manifest.json + weights
 ```
 
+Products are never edited (ADR-0005). Deleting sparse points records
+`keep.npy`; georeferencing and reprojecting store a similarity, the
+**Alignment**, in `recon.json`, applied when geometry is read for the
+window or for export. MVS and meshing run in the SfM frame.
+
 ### Key classes (see `cloudlabeller/core/`)
-- `LabelSchema` — ordered list of `LabelClass(id, name, color, hotkey)`.
-  `id 0` reserved for *background/unlabelled*.
-- `LabelStore` — owns the label arrays for the cloud and per image; emits
-  `labels_changed(modality, ids)`; provides `undo()`/`redo()` via a command
-  stack.
-- `Dataset` — registry of `ImageRecord`s (path, COLMAP camera/pose), the
-  `PointCloud`, and the `Mesh`.
-- `Project` — load/save, glues the above to disk.
+- `LabelSchema` — ordered list of `LabelClass(id, name, color, hotkey)`,
+  ids `0..N-1`; unlabelled is `-1`. One per Project.
+- `LabelStore` — one per Survey: its Masks and statuses, and the active
+  Reconstruction's cloud and mesh labels; undo/redo via a command stack.
+- `Dataset` — a Survey's `ImageRecord`s (path, camera) and the active
+  Reconstruction's sparse cloud, dense cloud and mesh, in its own frame.
+- `Reconstruction` — product slots, kept points, Alignment and the
+  `frame_*` functions every frame-dependent reader goes through.
+- `Survey` — a Survey's metadata, photos, labels and Reconstructions.
+- `Project` — the schema, the Project frame, the Surveys; load/save.
 
 ---
 

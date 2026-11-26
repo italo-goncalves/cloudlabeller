@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from conftest import product_dir
 import pytest
 from test_engine_contract import (
     H,
@@ -50,13 +51,16 @@ def inproc():
 
 
 def _georeference(root: Path, crs: dict | None = None) -> None:
-    """Mark the Project georeferenced (ENU, exact origin), optionally reprojected."""
+    """Give the Project a frame (ENU, exact origin), optionally reprojected,
+    and align Survey s1 into it as it stands (identity Alignment)."""
     proj = Project.open(root)
     geo = {"frame": "ENU", "origin_lla": list(ORIGIN),
            "origin_convention": "first_gps_image"}
     if crs is not None:
         geo["crs"] = crs
     proj.settings["georeferenced"] = geo
+    proj.survey("s1").active.alignment = {"s": 1.0, "R": np.eye(3).tolist(),
+                                          "t": [0.0, 0.0, 0.0], "source": "gps"}
     proj.save_manifest()
 
 
@@ -65,7 +69,7 @@ def _with_dense(root: Path, n: int = 400) -> None:
 
     rng = np.random.default_rng(1)
     xyz = rng.uniform(0, 1, (n, 3)).astype(np.float32)
-    save_cloud_npz(PointCloud(xyz=xyz), Project.open(root).dense_cloud_path)
+    save_cloud_npz(PointCloud(xyz=xyz), product_dir(Project.open(root), "mvs") / "dense.npz")
 
 
 def _three_view_projection(fov_deg: float = 60.0, aspect: float = W / H,
@@ -89,33 +93,33 @@ def _elements(m: np.ndarray) -> list[float]:
 def test_cloud_view_subsamples_with_its_full_cloud_index(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    full = Project.open(root).dataset.cloud
+    full = Project.open(root).survey("s1").dataset.cloud
 
-    out = pipe.call("cloud.view", {"cloud": "sparse", "max_points": 100})
+    out = pipe.call("cloud.view", {"survey": "s1", "cloud": "sparse", "max_points": 100})
     assert out["n_points"] == 600 and out["shown"] == 100
     index = get_array(root, out["index"])
     assert out["index"]["dtype"] == "int32" and index.shape == (100,)
     assert (np.diff(index) > 0).all() and index.max() < 600
     assert np.allclose(get_array(root, out["xyz"]), full.xyz[index])
     assert np.array_equal(get_array(root, out["rgb"]), full.rgb[index])
-    again = pipe.call("cloud.view", {"cloud": "sparse", "max_points": 100})
+    again = pipe.call("cloud.view", {"survey": "s1", "cloud": "sparse", "max_points": 100})
     assert np.array_equal(get_array(root, again["index"]), index)     # seeded
 
     for max_points in (0, 600, 5000):
-        out = pipe.call("cloud.view", {"max_points": max_points})
+        out = pipe.call("cloud.view", {"survey": "s1", "max_points": max_points})
         assert out["index"] is None and out["shown"] == 600
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.view", {"max_points": -1})
+        pipe.call("cloud.view", {"survey": "s1", "max_points": -1})
     assert err.value.code == protocol.INVALID_PARAMS
 
 
 def test_cloud_select_takes_a_threejs_lasso(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    xyz = Project.open(root).dataset.cloud.xyz.astype(np.float64)
+    xyz = Project.open(root).survey("s1").dataset.cloud.xyz.astype(np.float64)
     m = _three_view_projection()
     left_half = [[0, 0], [W / 2, 0], [W / 2, H], [0, H]]
-    out = pipe.call("cloud.select", {"cloud": "sparse", "view_projection": _elements(m),
+    out = pipe.call("cloud.select", {"survey": "s1", "cloud": "sparse", "view_projection": _elements(m),
                                      "polygon": left_half, "width": W, "height": H})
     indices = get_array(root, out["indices"])
     assert out["indices"]["dtype"] == "uint32" and out["count"] == len(indices)
@@ -129,16 +133,16 @@ def test_cloud_select_takes_a_threejs_lasso(pipe, tmp_path):
     # CSS y points down. This view flips world y, so the screen's top half
     # shows world y < 0.
     top_half = [[0, 0], [W, 0], [W, H / 2], [0, H / 2]]
-    out = pipe.call("cloud.select", {"view_projection": _elements(m), "polygon": top_half,
+    out = pipe.call("cloud.select", {"survey": "s1", "view_projection": _elements(m), "polygon": top_half,
                                      "width": W, "height": H})
     top = get_array(root, out["indices"])
     assert len(top) and (xyz[top, 1] < 0).all()
 
-    assert pipe.call("cloud.select", {"view_projection": _elements(m),
+    assert pipe.call("cloud.select", {"survey": "s1", "view_projection": _elements(m),
                                       "polygon": [[0, 0], [1, 1]], "width": W,
                                       "height": H})["count"] == 0
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.select", {"view_projection": [1, 2, 3], "polygon": left_half,
+        pipe.call("cloud.select", {"survey": "s1", "view_projection": [1, 2, 3], "polygon": left_half,
                                    "width": W, "height": H})
     assert err.value.code == protocol.INVALID_PARAMS
 
@@ -148,32 +152,32 @@ def test_cloud_delete_keeps_the_complement_and_labels_follow(pipe, tmp_path):
     follow the surviving points, and undo is cleared."""
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    pipe.call("cloud.paint", {"class_id": 1,
+    pipe.call("cloud.paint", {"survey": "s1", "class_id": 1,
                               "indices": put_array(root, "p", np.arange(0, 600, 3,
                                                                         dtype=np.int32))})
-    before = get_array(root, pipe.call("cloud.labels")["labels"])
-    full = Project.open(root).dataset.cloud.xyz
-    assert pipe.call("project.state")["can_undo"] is True
+    before = get_array(root, pipe.call("cloud.labels", {"survey": "s1"})["labels"])
+    full = Project.open(root).survey("s1").dataset.cloud.xyz
+    assert pipe.call("project.state")["surveys"][0]["can_undo"] is True
 
     gone = np.arange(100, dtype=np.uint32)
-    out = pipe.call("cloud.delete", {"cloud": "sparse",
+    out = pipe.call("cloud.delete", {"survey": "s1", "cloud": "sparse",
                                      "indices": put_array(root, "d", gone)})
     assert out == {"removed": 100, "n_points": 500}
     assert any("sparse" in n["params"]["parts"] for n in pipe.drained("project.changed"))
     state = pipe.call("project.state")
-    assert state["sparse"] == 500 and state["can_undo"] is False
-    labels = get_array(root, pipe.call("cloud.labels")["labels"])
+    assert state["surveys"][0]["sparse"] == 500 and state["surveys"][0]["can_undo"] is False
+    labels = get_array(root, pipe.call("cloud.labels", {"survey": "s1"})["labels"])
     assert np.array_equal(labels, before[100:])
     reopened = Project.open(root)                       # rewritten and saved
-    assert np.allclose(reopened.dataset.cloud.xyz, full[100:])
-    assert np.array_equal(reopened.labels.cloud_labels, before[100:])
+    assert np.allclose(reopened.survey("s1").dataset.cloud.xyz, full[100:])
+    assert np.array_equal(reopened.survey("s1").labels.cloud_labels, before[100:])
 
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.delete", {"indices": put_array(root, "d",
+        pipe.call("cloud.delete", {"survey": "s1", "indices": put_array(root, "d",
                                                          np.array([500], np.int32))})
     assert err.value.data["code"] == "cloud.bad_indices"
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.delete", {"cloud": "dense",
+        pipe.call("cloud.delete", {"survey": "s1", "cloud": "dense",
                                    "indices": put_array(root, "d", gone)})
     assert err.value.code == protocol.INVALID_PARAMS
 
@@ -188,7 +192,7 @@ def test_cloud_stats_need_the_colmap_model(tmp_path):
     try:
         client.call("project.open", {"root": str(root)})
         with pytest.raises(RpcError) as err:
-            client.call("cloud.stats", timeout=60)
+            client.call("cloud.stats", {"survey": "s1"}, timeout=60)
         assert err.value.data["code"] == "cloud.no_model"
     finally:
         assert client.close() == 0
@@ -213,13 +217,13 @@ def test_cloud_stats_refuse_a_mismatched_model(inproc, tmp_path, monkeypatch):
     _fake_stats(monkeypatch, views, np.ones(600))
     inproc.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        inproc.call("cloud.stats")
+        inproc.call("cloud.stats", {"survey": "s1"})
     assert err.value.data["code"] == "cloud.model_mismatch"
     assert err.value.data["params"]["matched"] == pytest.approx(0.8)
     with pytest.raises(RpcError) as err:
-        inproc.call("cloud.clean", {"min_images": 3, "max_error": 2.0})
+        inproc.call("cloud.clean", {"survey": "s1", "min_images": 3, "max_error": 2.0})
     assert err.value.data["code"] == "cloud.model_mismatch"
-    assert inproc.call("project.state")["sparse"] == 600
+    assert inproc.call("project.state")["surveys"][0]["sparse"] == 600
 
 
 def test_clean_preview_then_clean(inproc, tmp_path, monkeypatch):
@@ -231,31 +235,31 @@ def test_clean_preview_then_clean(inproc, tmp_path, monkeypatch):
     calls = _fake_stats(monkeypatch, views, errors)
     inproc.call("project.open", {"root": str(root)})
 
-    stats = inproc.call("cloud.stats")
+    stats = inproc.call("cloud.stats", {"survey": "s1"})
     assert stats["n_points"] == 600 and stats["matched"] == 1.0
     assert np.array_equal(get_array(root, stats["views"]), views)
     assert get_array(root, stats["errors"]).dtype == np.float32
 
-    preview = inproc.call("cloud.clean_preview", {"min_images": 3, "max_error": 2.0})
+    preview = inproc.call("cloud.clean_preview", {"survey": "s1", "min_images": 3, "max_error": 2.0})
     assert preview["keep"] == 499 and preview["total"] == 600
     removed = get_array(root, preview["removed"])
     assert preview["removed"]["dtype"] == "uint32"
     assert removed.tolist() == list(range(100)) + [599]
     assert len(calls) == 1                                # cached for this cloud
-    assert inproc.call("project.state")["sparse"] == 600  # a preview changes nothing
+    assert inproc.call("project.state")["surveys"][0]["sparse"] == 600  # a preview changes nothing
 
-    out = inproc.call("cloud.clean", {"min_images": 3, "max_error": 2.0})
+    out = inproc.call("cloud.clean", {"survey": "s1", "min_images": 3, "max_error": 2.0})
     assert out == {"removed": 101, "n_points": 499}
-    assert Project.open(root).dataset.cloud.n_points == 499
+    assert Project.open(root).survey("s1").dataset.cloud.n_points == 499
     with pytest.raises(RpcError) as err:
-        inproc.call("cloud.clean", {"min_images": 3.5, "max_error": 2.0})
+        inproc.call("cloud.clean", {"survey": "s1", "min_images": 3.5, "max_error": 2.0})
     assert err.value.code == protocol.INVALID_PARAMS
 
 
 def test_cameras_list_with_up_and_crs_positions(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    out = pipe.call("cameras.list")
+    out = pipe.call("cameras.list", {"survey": "s1"})
     assert [c["name"] for c in out["cameras"]] == ["a.png", "b.png"]
     a, b = out["cameras"]
     assert (a["width"], a["height"]) == (W, H)
@@ -269,7 +273,7 @@ def test_cameras_list_with_up_and_crs_positions(pipe, tmp_path):
     _georeference(root, {"epsg": UTM_SIRGAS_22S, "name": "SIRGAS 2000 / UTM zone 22S",
                          "orthometric": False, "offset": offset})
     pipe.call("project.open", {"root": str(root)})
-    out = pipe.call("cameras.list")
+    out = pipe.call("cameras.list", {"survey": "s1"})
     assert out["up"] == [0.0, 0.0, 1.0]
     b = out["cameras"][1]
     assert np.allclose(b["position_crs"], np.array(b["position"]) + offset)
@@ -278,10 +282,10 @@ def test_cameras_list_with_up_and_crs_positions(pipe, tmp_path):
 def test_image_info(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    assert pipe.call("image.info", {"name": "b.png"}) == {
-        "path": "images/b.png", "width": W, "height": H}
+    assert pipe.call("image.info", {"survey": "s1", "name": "b.png"}) == {
+        "path": "surveys/s1/images/b.png", "width": W, "height": H}
     with pytest.raises(RpcError) as err:
-        pipe.call("image.info", {"name": "zzz.png"})
+        pipe.call("image.info", {"survey": "s1", "name": "zzz.png"})
     assert err.value.data["code"] == "image.not_found"
 
 
@@ -291,22 +295,22 @@ def test_jobs_facts(pipe, tmp_path):
 
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    sfm = pipe.call("jobs.facts", {"kind": "sfm"})
+    sfm = pipe.call("jobs.facts", {"kind": "sfm", "survey": "s1"})
     assert sfm["gps_images"] == 0                         # PNGs without EXIF
     assert sfm["camera_models"] == list(CAMERA_MODELS)
     assert sfm["matchers"] == list(MATCHERS)
     assert isinstance(sfm["gpu"], bool)
-    assert isinstance(pipe.call("jobs.facts", {"kind": "mvs"})["colmap"], bool)
-    mesh = pipe.call("jobs.facts", {"kind": "mesh"})
+    assert isinstance(pipe.call("jobs.facts", {"kind": "mvs", "survey": "s1"})["colmap"], bool)
+    mesh = pipe.call("jobs.facts", {"kind": "mesh", "survey": "s1"})
     assert mesh["suggested_depth"] is None and mesh["delaunay"] is False
     assert mesh["ram_gb"] is None or mesh["ram_gb"] > 0
 
     assert pipe.call("jobs.facts", {"kind": "train"}) == {
         "user_images": 0, "auto_images": 0, "ml_images": 0}
     mask = np.zeros((H, W), np.int32)
-    pipe.call("image.save_mask", {"name": "a.png", "mask": put_array(root, "a", mask)})
-    pipe.call("transfer.images_to_cloud")
-    pipe.call("transfer.cloud_to_images")                 # b.png becomes auto
+    pipe.call("image.save_mask", {"survey": "s1", "name": "a.png", "mask": put_array(root, "a", mask)})
+    pipe.call("transfer.images_to_cloud", {"survey": "s1"})
+    pipe.call("transfer.cloud_to_images", {"survey": "s1"})                 # b.png becomes auto
     assert pipe.call("jobs.facts", {"kind": "train"}) == {
         "user_images": 1, "auto_images": 1, "ml_images": 0}
     with pytest.raises(RpcError) as err:
@@ -318,25 +322,25 @@ def test_mesh_estimate_and_facts_with_a_dense_cloud(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        pipe.call("mesh.estimate")
+        pipe.call("mesh.estimate", {"survey": "s1"})
     assert err.value.data["code"] == "job.mesh.no_dense"
 
     _with_dense(root)
     pipe.call("project.open", {"root": str(root)})
     from cloudlabeller.photogrammetry.meshing import estimate_mesh_cost, suggest_poisson_depth
 
-    suggested = suggest_poisson_depth(Project.open(root).dataset.dense_cloud)
-    assert pipe.call("jobs.facts", {"kind": "mesh"})["suggested_depth"] == suggested
-    out = pipe.call("mesh.estimate", {"method": "poisson"})
+    suggested = suggest_poisson_depth(Project.open(root).survey("s1").dataset.dense_cloud)
+    assert pipe.call("jobs.facts", {"kind": "mesh", "survey": "s1"})["suggested_depth"] == suggested
+    out = pipe.call("mesh.estimate", {"survey": "s1", "method": "poisson"})
     assert out["suggested_depth"] == suggested
     expected = estimate_mesh_cost(400, suggested, suggested)
     assert out["minutes"] == pytest.approx(expected["minutes"])
-    deeper = pipe.call("mesh.estimate", {"method": "poisson", "depth": suggested + 1})
+    deeper = pipe.call("mesh.estimate", {"survey": "s1", "method": "poisson", "depth": suggested + 1})
     assert deeper["ram_gb"] > out["ram_gb"]
-    delaunay = pipe.call("mesh.estimate", {"method": "delaunay"})
+    delaunay = pipe.call("mesh.estimate", {"survey": "s1", "method": "delaunay"})
     assert delaunay["vertices"] == 400.0
     with pytest.raises(RpcError) as err:
-        pipe.call("mesh.estimate", {"method": "marching"})
+        pipe.call("mesh.estimate", {"survey": "s1", "method": "marching"})
     assert err.value.code == protocol.INVALID_PARAMS
 
 
@@ -349,22 +353,36 @@ def test_ingest_conflicts(pipe, tmp_path):
     folder.mkdir()
     for name in ("a.png", "c.png"):
         Image.new("RGB", (4, 4)).save(folder / name)
-    assert pipe.call("ingest.conflicts", {"folder": str(folder)}) == {"conflicts": ["a.png"]}
+    assert pipe.call("ingest.conflicts", {"survey": "s1", "folder": str(folder)}) == {"conflicts": ["a.png"]}
     with pytest.raises(RpcError) as err:
-        pipe.call("ingest.conflicts", {"folder": str(tmp_path / "nowhere")})
+        pipe.call("ingest.conflicts", {"survey": "s1", "folder": str(tmp_path / "nowhere")})
     assert err.value.data["code"] == "job.ingest.no_folder"
 
 
 # -- refusals the Qt dialogs made ---------------------------------------------------
-def test_georef_refuses_a_georeferenced_project(pipe, tmp_path):
-    """Regression: aligning twice would transform the model twice (the Qt
-    window refused; the Engine planned it)."""
+def test_georef_stores_the_alignment_and_keeps_the_files(pipe, tmp_path):
+    """ADR-0005: aligning again replaces the stored Alignment; no product is
+    rewritten (0.3.0 transformed them in place and refused a second time)."""
     root = make_project(tmp_path / "p.clproj")
     _georeference(root)
+    cloud = root / "surveys" / "s1" / "products" / "sfm-1" / "cloud.npz"
+    before = cloud.read_bytes()
     pipe.call("project.open", {"root": str(root)})
-    with pytest.raises(RpcError) as err:
-        pipe.call("jobs.plan", {"kind": "georef"})
-    assert err.value.data["code"] == "job.georef.already"
+    plan = pipe.call("jobs.plan", {"kind": "georef", "options": {"survey": "s1"}})
+    i = plan["args"].index("--origin")                # into the Project's own frame
+    assert [float(v) for v in plan["args"][i + 1:i + 4]] == list(ORIGIN)
+    fit = {"s": 2.0, "R": np.eye(3).tolist(), "t": [10.0, 0.0, 0.0],
+           "origin_lla": list(ORIGIN), "n_gps": 2, "n_inliers": 2, "fit_rms_m": 0.5}
+    done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0,
+                                     "results": {"RESULT": json.dumps(fit)}})
+    assert done["ok"], done
+    assert cloud.read_bytes() == before
+    xyz = Project.open(root).survey("s1").dataset.cloud.xyz
+    view = pipe.call("cloud.points", {"survey": "s1", "cloud": "sparse"})
+    shown = np.fromfile(root / view["xyz"]["path"], "<f4").reshape(-1, 3)
+    assert np.allclose(shown, 2.0 * xyz + [10.0, 0.0, 0.0], atol=1e-4)
+    a = Project.open(root).survey("s1").active.alignment
+    assert a["source"] == "gps" and a["s"] == 2.0 and a["rms"] == 0.5
     assert pipe.call("jobs.list") == {"jobs": []}
 
 
@@ -413,7 +431,7 @@ def test_download_jobs_plan_and_finish(pipe, tmp_path):
     assert plan["group"] == "download" and plan["gpu"] is False and plan["stage"] is None
     assert plan["module"] == "cloudlabeller.photogrammetry.geoid_cli"
     assert plan["args"] == ["--epsg", str(UTM_SIRGAS_22S)]
-    sfm = pipe.call("jobs.plan", {"kind": "sfm"})        # downloads don't block it
+    sfm = pipe.call("jobs.plan", {"kind": "sfm", "options": {"survey": "s1"}})        # downloads don't block it
     pipe.call("jobs.finish", {"plan": sfm["plan"], "exit": None})
     done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0,
                                      "results": {"RESULT": json.dumps({"epsg": 31982})}})
@@ -513,28 +531,28 @@ def test_export_cloud_and_mesh_in_the_local_frame(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        pipe.call("export.mesh", {"path": str(tmp_path / "m"), "format": "ply"})
+        pipe.call("export.mesh", {"survey": "s1", "path": str(tmp_path / "m"), "format": "ply"})
     assert err.value.data["code"] == "mesh.none"
 
-    out = pipe.call("export.cloud", {"path": str(tmp_path / "cloud"), "format": "csv"})
+    out = pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "cloud"), "format": "csv"})
     assert out == {"path": str(tmp_path / "cloud.csv"), "cloud": "sparse",
                    "n_points": 600, "crs": None}
     assert len((tmp_path / "cloud.csv").read_text().splitlines()) == 601
     assert not (tmp_path / "cloud.prj").exists()
-    pipe.call("export.cloud", {"path": str(tmp_path / "cloud.las"), "format": "las"})
+    pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "cloud.las"), "format": "las"})
     assert (tmp_path / "cloud.las").stat().st_size > 0
     with pytest.raises(RpcError) as err:
-        pipe.call("export.cloud", {"path": str(tmp_path / "no" / "c.las"), "format": "las"})
+        pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "no" / "c.las"), "format": "las"})
     assert err.value.data["code"] == "export.no_folder"
     with pytest.raises(RpcError) as err:
-        pipe.call("export.cloud", {"path": str(tmp_path / "c.xyz"), "format": "xyz"})
+        pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "c.xyz"), "format": "xyz"})
     assert err.value.code == protocol.INVALID_PARAMS
 
     mesh = Mesh(vertices=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32),
                 faces=np.array([[0, 1, 2]], np.int32))
-    save_mesh_npz(mesh, Project.open(root).mesh_path)
+    save_mesh_npz(mesh, product_dir(Project.open(root), "mesh") / "mesh.npz")
     pipe.call("project.open", {"root": str(root)})
-    out = pipe.call("export.mesh", {"path": str(tmp_path / "mesh.obj"), "format": "obj"})
+    out = pipe.call("export.mesh", {"survey": "s1", "path": str(tmp_path / "mesh.obj"), "format": "obj"})
     assert out == {"path": str(tmp_path / "mesh.obj"), "vertices": 3, "faces": 1,
                    "crs": None}
     assert (tmp_path / "mesh.obj").exists()
@@ -548,16 +566,16 @@ def test_export_cloud_into_a_projected_crs(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     _georeference(root)
     pipe.call("project.open", {"root": str(root)})
-    out = pipe.call("export.cloud", {"path": str(tmp_path / "utm.las"), "format": "las",
+    out = pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "utm.las"), "format": "las",
                                      "crs": {"mode": "projected", "epsg": UTM_SIRGAS_22S}})
     assert out["crs"].startswith(f"EPSG:{UTM_SIRGAS_22S}")
     las = laspy.read(tmp_path / "utm.las")
     fn, _ = enu_to_crs_transform(ORIGIN, UTM_SIRGAS_22S)
-    expected = fn(Project.open(root).dataset.cloud.xyz.astype(np.float64))
+    expected = fn(Project.open(root).survey("s1").dataset.cloud.xyz.astype(np.float64))
     assert np.allclose(np.column_stack([las.x, las.y, las.z]), expected, atol=0.01)
     assert pipe.call("export.settings")["export_mode"] == "projected"   # kept
 
-    out = pipe.call("export.cloud", {"path": str(tmp_path / "local.csv"), "format": "csv",
+    out = pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "local.csv"), "format": "csv",
                                      "crs": {"mode": "local"}})
     assert out["crs"] is None
 
@@ -568,12 +586,12 @@ def test_export_from_a_reprojected_project_adds_the_offset(pipe, tmp_path):
     _georeference(root, {"epsg": UTM_SIRGAS_22S, "name": "SIRGAS 2000 / UTM zone 22S",
                          "orthometric": False, "offset": offset})
     pipe.call("project.open", {"root": str(root)})
-    out = pipe.call("export.cloud", {"path": str(tmp_path / "c.csv"), "format": "csv",
+    out = pipe.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "c.csv"), "format": "csv",
                                      "crs": {"mode": "local"}})          # ignored
     assert out["crs"].startswith(f"EPSG:{UTM_SIRGAS_22S}")
     assert (tmp_path / "c.prj").exists()
     first = (tmp_path / "c.csv").read_text().splitlines()[1].split(",")
-    xyz = Project.open(root).dataset.cloud.xyz[0].astype(np.float64)
+    xyz = Project.open(root).survey("s1").dataset.cloud.xyz[0].astype(np.float64)
     assert float(first[0]) == pytest.approx(xyz[0] + offset[0], abs=1e-3)
     assert float(first[1]) == pytest.approx(xyz[1] + offset[1], abs=1e-3)
 
@@ -588,7 +606,7 @@ def test_export_asks_for_the_geoid_job_first(inproc, tmp_path, monkeypatch):
     _georeference(root)
     inproc.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        inproc.call("export.cloud", {"path": str(tmp_path / "c.las"), "format": "las",
+        inproc.call("export.cloud", {"survey": "s1", "path": str(tmp_path / "c.las"), "format": "las",
                                      "crs": {"mode": "projected", "epsg": UTM_SIRGAS_22S,
                                              "orthometric": True}})
     assert err.value.data["code"] == "export.needs_geoid"

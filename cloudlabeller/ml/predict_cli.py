@@ -86,21 +86,33 @@ def main(argv: list[str]) -> int:
                   manifest["n_classes"], len(proj.schema.classes))
         return 2
 
-    labels = proj.labels
-    targets = [r.name for r in proj.dataset.images
-               if labels.status_of(r.name) != "user"]     # red + yellow only
-    if not targets:
+    jobs = []                                      # (survey, [names]) per Survey
+    for sid in proj.surveys:
+        survey = proj.survey(sid)
+        names = [r.name for r in survey.dataset.images
+                 if survey.labels.status_of(r.name) != "user"]   # red + yellow only
+        if names:
+            jobs.append((survey, names))
+    total = sum(len(n) for _, n in jobs)
+    if not total:
         print("RESULT " + json.dumps({"predicted": []}), flush=True)
         return 0
 
-    records = {r.name: r.path for r in proj.dataset.images}
     progress(0.01, f"Loading model '{manifest['name']}'…")
     model, _ = model_store.load_model(proj.ml_dir, manifest["name"])
 
-    written = inference.predict_all(
-        model, targets, lambda n: _load_rgb(records[n]), proj.predictions_dir,
-        progress=lambda f, m="": progress(0.05 + 0.95 * f, m))
-    print("RESULT " + json.dumps({"predicted": sorted(written)}), flush=True)
+    predicted, done = [], 0
+    for survey, names in jobs:
+        records = {r.name: r.path for r in survey.dataset.images}
+        start, share = done, len(names) / total
+        written = inference.predict_all(
+            model, names, lambda n, rec=records: _load_rgb(rec[n]),
+            survey.predictions_dir,
+            progress=lambda f, m="", s0=start, sh=share:
+                progress(0.05 + 0.95 * (s0 / total + sh * f), m))
+        predicted += [{"survey": survey.id, "name": n} for n in sorted(written)]
+        done += len(names)
+    print("RESULT " + json.dumps({"predicted": predicted}), flush=True)
     return 0
 
 

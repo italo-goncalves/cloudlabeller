@@ -50,10 +50,11 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+
+import numpy as np
 
 from cloudlabeller.engine.protocol import InvalidParams, Problem
 
@@ -165,36 +166,77 @@ def parse_result(results: dict, key: str = "RESULT") -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# -- surveys --------------------------------------------------------------------
+def _survey(engine, project, options):
+    """The Survey a reconstruction Job works on (option ``survey``)."""
+    sid = _opt(options, "survey", str, None)
+    if not sid:
+        raise InvalidParams("option 'survey' is required", option="survey")
+    if sid not in project.surveys:
+        raise Problem("survey.not_found", "No Survey has that id.", survey=sid)
+    return project.survey(sid)
+
+
+def _logs(survey_or_project) -> Path:
+    d = Path(getattr(survey_or_project, "dir", None) or survey_or_project.root) / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _planned(project, plan: Plan):
+    """The Survey a finished plan was for."""
+    return project.survey(plan.context["survey"])
+
+
 # -- reconstruction -----------------------------------------------------------
 @kind("ingest", "cloudlabeller.photogrammetry.run_cli", "reconstruction",
-      "Copy a folder of photos into the image store")
+      "Copy a folder of photos into a Survey's photos")
 def _prepare_ingest(engine, project, options):
+    survey = _survey(engine, project, options)
     folder = _opt(options, "folder", str, None)
     if not folder:
         raise InvalidParams("option 'folder' is required", option="folder")
     if not Path(folder).is_dir():
         raise Problem("job.ingest.no_folder", "The folder does not exist.", folder=folder)
     policy = _choice(options, "on_conflict", ("skip", "overwrite"), "skip")
-    args = [str(project.images_dir), str(project.reconstruction_dir),
+    survey.images_dir.mkdir(parents=True, exist_ok=True)
+    args = [str(survey.images_dir), str(_logs(survey)),
             "--ingest-from", folder, "--ingest-only", "--on-conflict", policy]
-    return Plan(args, project.reconstruction_dir / "ingest.log")
+    return Plan(args, _logs(survey) / "ingest.log", context={"survey": survey.id})
 
 
 @applies("ingest")
 def _apply_ingest(engine, project, results, plan):
+    survey = _planned(project, plan)
     fields_ = dict(part.split("=", 1) for part in results.get("RESULT_INGEST", "").split()
                    if "=" in part)
     changed = fields_.get("changed") == "1"
-    if changed and project.dataset.cloud is not None:
-        project.mark_reconstruction_outdated()
-    project.load_products()
+    if changed and survey.dataset.cloud is not None:
+        survey.mark_reconstruction_outdated()
+    survey.load_products()
     engine.save_project()
-    engine.changed("images", "settings")
+    engine.changed("images", "settings", survey=survey.id)
     return {"copied": int(fields_.get("copied", 0)),
             "overwritten": int(fields_.get("overwritten", 0)),
             "changed": changed,
-            "n_images": len(project.dataset.images),
-            "reconstruction": project.reconstruction_status()}
+            "n_images": len(survey.dataset.images),
+            "reconstruction": survey.reconstruction_status()}
+
+
+def _product_plan(survey, slot: str) -> tuple[Path, dict]:
+    """Where a step writes, and the plan context that records it."""
+    out = survey.output_dir(slot)
+    out.mkdir(parents=True, exist_ok=True)
+    return out, {"survey": survey.id, "slot": slot, "product": out.name}
+
+
+def _record_product(survey, plan: Plan, clear: tuple[str, ...]) -> None:
+    """Point the active Reconstruction at the product a step wrote; the
+    labels of what it replaced start again."""
+    rec = survey.ensure_active()
+    rec.products[plan.context["slot"]] = plan.context["product"]
+    for attr in clear:
+        setattr(survey.labels, attr, None)
 
 
 @kind("sfm", "cloudlabeller.photogrammetry.run_cli", "reconstruction",
@@ -202,8 +244,9 @@ def _apply_ingest(engine, project, results, plan):
 def _prepare_sfm(engine, project, options):
     from cloudlabeller.photogrammetry.options import CAMERA_MODELS, MATCHERS, SfmOptions
 
-    if not project.dataset.images:
-        raise Problem("job.sfm.no_images", "The Project's image store is empty.")
+    survey = _survey(engine, project, options)
+    if not survey.dataset.images:
+        raise Problem("job.sfm.no_images", "The Survey has no photos.")
     opts = SfmOptions(
         matcher=_choice(options, "matcher", MATCHERS, "spatial"),
         use_gpu=_opt(options, "gpu", bool, False),
@@ -211,88 +254,140 @@ def _prepare_sfm(engine, project, options):
         camera_model=_choice(options, "camera_model", CAMERA_MODELS, "SIMPLE_RADIAL"),
         max_image_size=_opt(options, "max_image_size", int, 3200),
     )
-    args = [str(project.images_dir), str(project.reconstruction_dir), *opts.to_cli_args()]
+    out, context = _product_plan(survey, "sfm")
+    args = [str(survey.images_dir), str(out), *opts.to_cli_args()]
     binary = _colmap_binary()
     if binary:
         args += ["--colmap-binary", binary]
-    return Plan(args, project.reconstruction_dir / "sfm.log", gpu=opts.use_gpu,
-                stage=_stage(project, [project.images_dir, project.reconstruction_dir],
-                             [project.reconstruction_dir]))
+    return Plan(args, _logs(survey) / "sfm.log", gpu=opts.use_gpu, context=context,
+                stage=_stage(project, [survey.images_dir, out], [out]))
 
 
 @applies("sfm")
 def _apply_sfm(engine, project, results, plan):
-    project.load_products()
-    if project.dataset.cloud is None:
+    survey = _planned(project, plan)
+    _record_product(survey, plan, ("cloud_labels",))
+    rec = survey.active
+    rec.save_keep(None)                   # a new solve: every point again
+    # A fresh solve is a new local frame: an earlier Alignment no longer fits.
+    cleared = rec.alignment is not None
+    rec.alignment = None
+    survey.load_products()
+    if survey.dataset.cloud is None:
         raise Problem("job.sfm.no_cloud", "No point cloud was produced.")
-    project.mark_reconstruction_current()
-    # A fresh solve is a new local frame: an earlier alignment no longer fits.
-    cleared = project.settings.pop("georeferenced", None) is not None
-    shutil.rmtree(project.reconstruction_dir / "sparse_prealigned", ignore_errors=True)
+    survey.mark_reconstruction_current()
     engine.save_project()
-    engine.changed("sparse", "images", "labels", "settings")
-    return {"n_points": project.dataset.cloud.n_points,
-            "n_cameras": len(project.dataset.solved_images()),
+    engine.changed("sparse", "images", "labels", "settings", survey=survey.id)
+    return {"n_points": survey.dataset.cloud.n_points,
+            "n_cameras": len(survey.dataset.solved_images()),
             "georeferencing_cleared": cleared}
 
 
 @kind("georef", "cloudlabeller.photogrammetry.georef_cli", "reconstruction",
-      "Align the model to the photos' EXIF GPS (ENU, metres)")
+      "Align a Survey to its photos' EXIF GPS (ENU, metres)")
 def _prepare_georef(engine, project, options):
-    if project.dataset.cloud is None:
+    survey = _survey(engine, project, options)
+    if survey.dataset.cloud is None:
         raise Problem("job.no_reconstruction", "Run SfM first.")
-    if project.settings.get("georeferenced"):
-        raise Problem("job.georef.already",
-                      "The Project is already georeferenced: aligning twice would "
-                      "transform the model twice.")
     max_error = _opt(options, "max_error", (int, float), 5.0)
-    engine.save_project()                         # the child reads the Project from disk
-    return Plan([str(project.root), "--max-error", str(float(max_error))],
-                project.reconstruction_dir / "georef.log")
+    args = [str(survey.sfm_dir), str(survey.images_dir), "--max-error", str(float(max_error))]
+    if project.frame:
+        from cloudlabeller.engine.geo import _origin
+
+        args += ["--origin", *(repr(float(v)) for v in _origin(engine, project.frame).lla)]
+    return Plan(args, _logs(survey) / "georef.log", context={"survey": survey.id})
 
 
 @applies("georef")
 def _apply_georef(engine, project, results, plan):
+    from cloudlabeller.core.reconstruction import apply_points, compose
+
+    survey = _planned(project, plan)
     out = parse_result(results)
-    project.load_products()
-    project.settings["georeferenced"] = {
-        "frame": "ENU", "origin_lla": out.get("origin_lla"),
-        "origin_convention": out.get("origin_convention"),
-        "scale_m_per_unit": out.get("scale_m_per_unit"),
-        "n_gps": out.get("n_gps"),
-    }
+    if not {"s", "R", "t"} <= set(out):
+        raise Problem("job.georef.no_fit", "The fit printed no transform.")
+    alignment = {"s": out["s"], "R": out["R"], "t": out["t"], "source": "gps",
+                 "n_gps": out.get("n_gps"), "n_inliers": out.get("n_inliers"),
+                 "rms": out.get("fit_rms_m"), "scale_m_per_unit": out.get("scale_m_per_unit")}
+    geo = project.frame
+    if not geo:
+        geo = project.settings["georeferenced"] = {
+            "frame": "ENU", "origin_lla": out.get("origin_lla"),
+            "origin_convention": out.get("origin_convention"),
+        }
+    elif geo.get("crs"):
+        # The fit is into ENU about the frame's origin; carry it on into the CRS.
+        from cloudlabeller.photogrammetry.crs import enu_to_frame_similarity, site_samples
+
+        samples = site_samples(apply_points(alignment, survey.dataset.cloud.xyz))
+        try:
+            s, R, t = enu_to_frame_similarity(geo, out.get("origin_lla"), samples)
+        except RuntimeError as exc:
+            raise Problem("export.needs_geoid", str(exc),
+                          epsg=geo["crs"].get("epsg")) from exc
+        alignment = compose({"s": s, "R": np.asarray(R).tolist(),
+                             "t": np.asarray(t).tolist()}, alignment)
+    survey.active.alignment = alignment
     engine.save_project()
-    engine.changed("sparse", "dense", "mesh", "images", "settings")
+    engine.changed("sparse", "dense", "mesh", "images", "settings", survey=survey.id)
     return out
 
 
+def _aligned_samples(project) -> np.ndarray:
+    """Points spread over every aligned Survey, in the Project frame."""
+    from cloudlabeller.photogrammetry.crs import site_samples
+
+    parts = []
+    for sid in project.surveys:
+        survey = project.survey(sid)
+        if survey.aligned and survey.dataset.cloud is not None:
+            parts.append(site_samples(survey.active.frame_points(survey.dataset.cloud.xyz)))
+    return np.vstack(parts) if parts else np.empty((0, 3))
+
+
 @kind("reproject", "cloudlabeller.photogrammetry.reproject_cli", "reconstruction",
-      "Move a georeferenced Project into a projected CRS")
+      "Move the Project frame into a projected CRS")
 def _prepare_reproject(engine, project, options):
-    if project.dataset.cloud is None:
-        raise Problem("job.no_reconstruction", "Run SfM first.")
-    if not project.settings.get("georeferenced"):
+    from cloudlabeller.engine.geo import _origin
+
+    geo = project.frame
+    if not geo:
         raise Problem("job.reproject.not_georeferenced",
                       "Reprojection needs a georeferenced model.")
+    samples = _aligned_samples(project)
+    if not len(samples):
+        raise Problem("job.no_reconstruction", "No aligned Survey to reproject.")
     epsg = _opt(options, "epsg", int, None)
     if epsg is None:
         raise InvalidParams("option 'epsg' is required", option="epsg")
-    args = [str(project.root), "--epsg", str(epsg)]
+    logs = _logs(project)
+    given = logs / "reproject_input.json"
+    given.write_text(json.dumps({"frame": geo, "origin_lla": list(_origin(engine, geo).lla),
+                                 "samples": samples.tolist()}), encoding="utf-8")
+    args = [str(given), "--epsg", str(epsg)]
     if _opt(options, "orthometric", bool, False):
         args.append("--orthometric")
-    engine.save_project()
-    return Plan(args, project.reconstruction_dir / "reproject.log")
+    return Plan(args, logs / "reproject.log")
 
 
 @applies("reproject")
 def _apply_reproject(engine, project, results, plan):
+    from cloudlabeller.core.reconstruction import compose
+
     out = parse_result(results)
-    project.load_products()
-    project.settings.setdefault("georeferenced", {})["crs"] = {
+    if not {"s", "R", "t"} <= set(out):
+        raise Problem("job.reproject.no_fit", "The fit printed no transform.")
+    move = {"s": out["s"], "R": out["R"], "t": out["t"]}
+    for survey in project.surveys.values():
+        for rec in survey.reconstructions.values():
+            if rec.alignment is not None:
+                rec.alignment = compose(move, rec.alignment)
+    project.frame["crs"] = {
         "epsg": out.get("epsg"), "name": out.get("name"),
         "orthometric": out.get("orthometric", False),
         "offset": out.get("offset"),
     }
+    engine.cache.clear()
     engine.save_project()
     engine.changed("sparse", "dense", "mesh", "images", "settings")
     return out
@@ -301,35 +396,41 @@ def _apply_reproject(engine, project, results, plan):
 @kind("mvs", "cloudlabeller.photogrammetry.mvs_cli", "reconstruction",
       "Dense multi-view stereo: the dense cloud")
 def _prepare_mvs(engine, project, options):
-    if project.dataset.cloud is None:
+    survey = _survey(engine, project, options)
+    if survey.dataset.cloud is None:
         raise Problem("job.no_reconstruction", "Run SfM first.")
     binary = _colmap_binary()
     if binary is None and not _pycolmap_has_cuda():
         raise Problem("job.mvs.no_colmap",
                       "Dense MVS needs CUDA: the CUDA COLMAP executable or a CUDA "
                       "build of pycolmap.")
-    args = [str(project.reconstruction_dir), str(project.images_dir),
+    out, context = _product_plan(survey, "mvs")
+    args = [str(survey.sfm_dir), str(survey.images_dir), "--out", str(out),
             "--max-image-size", str(_opt(options, "max_image_size", int, 2000)),
             "--quality", _choice(options, "quality", ("standard", "draft"), "standard")]
     if binary:
         args += ["--colmap-binary", binary]
-    return Plan(args, project.reconstruction_dir / "mvs.log", gpu=True,
-                stage=_stage(project, [project.images_dir, project.reconstruction_dir],
-                             [project.reconstruction_dir]))
+    return Plan(args, _logs(survey) / "mvs.log", gpu=True, context=context,
+                stage=_stage(project, [survey.images_dir, survey.sfm_dir, out], [out]))
 
 
 @applies("mvs")
 def _apply_mvs(engine, project, results, plan):
-    project.load_products()
-    engine.changed("dense")
-    dense = project.dataset.dense_cloud
+    survey = _planned(project, plan)
+    _record_product(survey, plan, ("dense_cloud_labels",))
+    survey.load_products()
+    engine.save_project()
+    engine.changed("dense", survey=survey.id)
+    dense = survey.dataset.dense_cloud
     return {"n_points": dense.n_points if dense is not None else 0}
 
 
 @kind("mesh", "cloudlabeller.photogrammetry.mesh_cli", "reconstruction",
       "Build the triangle mesh from the dense cloud")
 def _prepare_mesh(engine, project, options):
-    if project.dataset.dense_cloud is None or not project.dense_cloud_path.exists():
+    survey = _survey(engine, project, options)
+    dense_path = survey.dense_cloud_path
+    if survey.dataset.dense_cloud is None or dense_path is None or not dense_path.exists():
         raise Problem("job.mesh.no_dense", "Meshing needs the dense cloud.")
     method = _choice(options, "method", ("poisson", "delaunay"), "poisson")
     binary = _colmap_binary()
@@ -338,9 +439,10 @@ def _prepare_mesh(engine, project, options):
         # 4.2 wheels (Windows CPU, Linux CUDA) are not.
         raise Problem("job.mesh.no_delaunay",
                       "Delaunay meshing needs the COLMAP executable; use Poisson.")
-    args = [str(project.dense_cloud_path), str(project.mesh_path), "--method", method]
+    out, context = _product_plan(survey, "mesh")
+    args = [str(dense_path), str(out / "mesh.npz"), "--method", method]
     if method == "delaunay":
-        args += ["--workspace", str(project.reconstruction_dir / "dense")]
+        args += ["--workspace", str(survey.mvs_dir / "dense")]
     else:
         depth = _opt(options, "depth", int, None)
         if depth is not None:
@@ -349,24 +451,28 @@ def _prepare_mesh(engine, project, options):
                  "--point-weight", str(float(_opt(options, "point_weight", (int, float), 1.0)))]
     if binary:
         args += ["--colmap-binary", binary]
-    return Plan(args, project.reconstruction_dir / "mesh.log",
-                stage=_stage(project, [project.reconstruction_dir], [project.products_dir]))
+    return Plan(args, _logs(survey) / "mesh.log", context=context,
+                stage=_stage(project, [survey.mvs_dir], [out]))
 
 
 @applies("mesh")
 def _apply_mesh(engine, project, results, plan):
     from cloudlabeller.engine.methods import sync_mesh_labels
 
-    project.load_products()
-    engine.changed("mesh")
-    sync_mesh_labels(engine)                       # labels follow the dense cloud
-    mesh = project.dataset.mesh
+    survey = _planned(project, plan)
+    _record_product(survey, plan, ("mesh_labels",))
+    survey.load_products()
+    engine.save_project()
+    engine.changed("mesh", survey=survey.id)
+    sync_mesh_labels(engine, survey)               # labels follow the dense cloud
+    mesh = survey.dataset.mesh
     return {"n_vertices": len(mesh.vertices) if mesh is not None else 0,
             "n_faces": len(mesh.faces) if mesh is not None else 0}
 
 
 # -- ml ---------------------------------------------------------------------------
-@kind("train", "cloudlabeller.ml.train_cli", "ml", "Train the U-Net on the labelled photos")
+@kind("train", "cloudlabeller.ml.train_cli", "ml",
+      "Train the U-Net on the labelled photos of every Survey")
 def _prepare_train(engine, project, options):
     if not project.schema.classes:
         raise Problem("job.train.no_classes", "Define some label classes first.")
@@ -431,7 +537,9 @@ def _prepare_predict(engine, project, options):
                       "The model was trained with a different number of classes.",
                       model=model, model_classes=manifest.get("n_classes"),
                       project_classes=n_classes)
-    if not any(project.labels.status_of(r.name) != "user" for r in project.dataset.images):
+    if not any(s.labels.status_of(r.name) != "user"
+               for s in (project.survey(sid) for sid in project.surveys)
+               for r in s.dataset.images):
         raise Problem("job.predict.nothing", "All images are user-labelled.")
     project.save_manifest()                        # the child reads statuses from disk
     return Plan([str(project.root), "--model", model], project.ml_dir / "predict.log",
@@ -440,12 +548,19 @@ def _prepare_predict(engine, project, options):
 
 @applies("predict")
 def _apply_predict(engine, project, results, plan):
-    names = parse_result(results).get("predicted", [])
-    for name in names:
-        project.labels.mark_ml_labeled(name)
+    predicted = parse_result(results).get("predicted", [])
+    by_survey: dict[str, list[str]] = {}
+    for item in predicted:
+        if isinstance(item, dict) and item.get("survey") in project.surveys:
+            by_survey.setdefault(item["survey"], []).append(item.get("name"))
+    for sid, names in by_survey.items():
+        survey = project.survey(sid)
+        for name in names:
+            survey.labels.mark_ml_labeled(name)
     project.save_manifest()
-    engine.changed("status", images=names)
-    return {"predicted": names}
+    for sid, names in by_survey.items():
+        engine.changed("status", survey=sid, images=names)
+    return {"predicted": predicted}
 
 
 # -- downloads --------------------------------------------------------------------
@@ -458,7 +573,7 @@ def _prepare_geoid(engine, project, options):
     epsg = _opt(options, "epsg", int, None)
     if epsg is None:
         raise InvalidParams("option 'epsg' is required", option="epsg")
-    return Plan(["--epsg", str(epsg)], project.reconstruction_dir / "geoid.log")
+    return Plan(["--epsg", str(epsg)], _logs(project) / "geoid.log")
 
 
 @applies("geoid")
@@ -476,10 +591,10 @@ def _prepare_colmap(engine, project, options):
         raise Problem("job.colmap.unsupported",
                       "The COLMAP download is the Windows release; this Environment "
                       "uses pycolmap instead.")
-    stop_file = project.reconstruction_dir / "colmap_download.stop"
+    stop_file = _logs(project) / "colmap_download.stop"
     stop_file.unlink(missing_ok=True)
     return Plan(["--variant", COLMAP_VARIANTS[variant], "--stop-file", str(stop_file)],
-                project.reconstruction_dir / "colmap_download.log", stop_file=stop_file)
+                _logs(project) / "colmap_download.log", stop_file=stop_file)
 
 
 @applies("colmap")
@@ -497,8 +612,9 @@ def _gpu_available() -> bool:
     return _colmap_binary() is not None or _pycolmap_has_cuda()
 
 
-def facts(engine: "Engine", project: "Project", kind_name: str):
-    """What the window shows before planning a Job of ``kind_name``.
+def facts(engine: "Engine", project: "Project", kind_name: str, survey=None):
+    """What the window shows before planning a Job of ``kind_name`` (sfm, mvs
+    and mesh are about ``survey``; train counts every Survey).
 
     Returns ``(work, finish)`` for a Deferred: ``work`` reads files and
     snapshots only, ``finish`` (loop thread) may cache.
@@ -507,7 +623,7 @@ def facts(engine: "Engine", project: "Project", kind_name: str):
         from cloudlabeller.core.images import list_image_files
         from cloudlabeller.photogrammetry.options import CAMERA_MODELS, MATCHERS
 
-        images_dir = project.images_dir
+        images_dir = survey.images_dir
 
         def work(progress):
             from cloudlabeller.photogrammetry.georef import count_gps_images
@@ -523,9 +639,9 @@ def facts(engine: "Engine", project: "Project", kind_name: str):
     if kind_name == "mesh":
         from cloudlabeller.photogrammetry.meshing import delaunay_available, total_ram_gb
 
-        dense = project.dataset.dense_cloud
+        dense = survey.dataset.dense_cloud
         cached = engine.cache.get("poisson_depth")
-        workspace = project.reconstruction_dir / "dense"
+        workspace = survey.mvs_dir / "dense" if survey.mvs_dir else None
 
         def work(progress):
             depth = None
@@ -536,24 +652,27 @@ def facts(engine: "Engine", project: "Project", kind_name: str):
                     from cloudlabeller.photogrammetry.meshing import suggest_poisson_depth
 
                     depth = suggest_poisson_depth(dense)
-            return {"delaunay": _colmap_binary() is not None
+            return {"delaunay": _colmap_binary() is not None and workspace is not None
                     and delaunay_available(workspace),
                     "suggested_depth": depth, "ram_gb": total_ram_gb()}
 
         def finish(out):
-            if dense is not None and project.dataset.dense_cloud is dense:
+            if dense is not None and survey.dataset.dense_cloud is dense:
                 engine.cache["poisson_depth"] = (dense, out["suggested_depth"])
             return out
         return work, finish
     if kind_name == "train":
         from cloudlabeller.core.label_schema import UNLABELLED_ID
 
-        labels = project.labels
-        user = sum(1 for n, m in labels.image_masks.items()
-                   if labels.status_of(n) == "user" and (m != UNLABELLED_ID).any())
-        auto = sum(1 for r in project.dataset.solved_images()
-                   if labels.status_of(r.name) == "auto")
-        ml = sum(1 for r in project.dataset.images if labels.status_of(r.name) == "ml")
+        user = auto = ml = 0
+        for sid in project.surveys:
+            sv = project.survey(sid)
+            labels = sv.labels
+            user += sum(1 for n, m in labels.image_masks.items()
+                        if labels.status_of(n) == "user" and (m != UNLABELLED_ID).any())
+            auto += sum(1 for r in sv.dataset.solved_images()
+                        if labels.status_of(r.name) == "auto")
+            ml += sum(1 for r in sv.dataset.images if labels.status_of(r.name) == "ml")
         out = {"user_images": user, "auto_images": auto, "ml_images": ml}
         return (lambda progress: out), None
     raise InvalidParams("jobs.facts covers sfm, mvs, mesh and train", kind=kind_name,

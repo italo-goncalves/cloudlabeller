@@ -408,19 +408,19 @@ def test_project_adjacency_fallback_and_cache(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
     gx, gy = np.meshgrid(np.linspace(-1, 1, 20), np.linspace(-0.5, 0.5, 10))
     xyz = np.column_stack([gx.ravel(), gy.ravel(), np.full(gx.size, 5.0)])
-    proj.dataset.cloud = PointCloud(xyz=xyz.astype(np.float32))
-    proj.dataset.images = [
+    proj.survey("s1").dataset.cloud = PointCloud(xyz=xyz.astype(np.float32))
+    proj.survey("s1").dataset.images = [
         ImageRecord(0, Path("a.jpg"), _app_camera(0.0)),
         ImageRecord(1, Path("b.jpg"), _app_camera(0.1)),
     ]
 
-    # No adjacency.json (old project): derived from visibility and saved.
-    assert proj.overlapping_images("a.jpg") == {"b.jpg"}
-    assert (proj.reconstruction_dir / ADJACENCY_FILE).exists()
+    # No adjacency.json (old product): derived from visibility, saved in cache/.
+    assert proj.survey("s1").overlapping_images("a.jpg") == {"b.jpg"}
+    assert (proj.survey("s1").cache_dir / ADJACENCY_FILE).exists()
 
     # A reopened project reads the saved file (no cloud/cameras needed).
     reopened = Project.open(proj.root)
-    assert reopened.overlapping_images("a.jpg") == {"b.jpg"}
+    assert reopened.survey("s1").overlapping_images("a.jpg") == {"b.jpg"}
 
 
 def test_save_result_writes_adjacency(tmp_path):

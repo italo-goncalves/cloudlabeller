@@ -25,20 +25,107 @@ export interface ImageRow {
   user_mask: boolean;
 }
 
+/** One Survey as `project.state` reports it. */
+export interface SurveyState {
+  id: string;
+  name: string;
+  timestamp: string | null;
+  operator: string;
+  camera: string;
+  notes: string;
+  images: ImageRow[];
+  reconstruction: Reconstruction;
+  /** The active Reconstruction's id, null before SfM. */
+  active: string | null;
+  /** Whether the active Reconstruction is aligned into the Project frame. */
+  aligned: boolean;
+  sparse: number | null;
+  dense: number | null;
+  mesh: { vertices: number; faces: number } | null;
+  source_resolution: [number, number] | null;
+  can_undo: boolean;
+  can_redo: boolean;
+}
+
+/** What `project.state` answers. */
+export interface RawProjectState {
+  root: string;
+  schema: SchemaClass[];
+  surveys: SurveyState[];
+  /** The Project frame, null when it has none. */
+  georeferenced: Record<string, unknown> | null;
+  dirty: boolean;
+}
+
+/** The Project as the window shows it: the current Survey's fields at the
+ * top level, next to every Survey. */
 export interface ProjectState {
   root: string;
   schema: SchemaClass[];
+  surveys: SurveyState[];
+  /** The current Survey's id. */
+  survey: string;
   images: ImageRow[];
   reconstruction: Reconstruction;
   sparse: number | null;
   dense: number | null;
   mesh: { vertices: number; faces: number } | null;
+  /** The Project has a frame and the current Survey is aligned into it. */
   georeferenced: boolean;
   source_resolution: [number, number] | null;
   can_undo: boolean;
   can_redo: boolean;
   dirty: boolean;
 }
+
+// -- the current Survey ---------------------------------------------------------
+// The window shows one Survey at a time. Every Survey-scoped call below goes to
+// the current one, which `view` sets from the Project's state.
+
+let current: string | null = null;
+
+/** The current Survey's id. */
+export function currentSurvey(): string {
+  if (current === null) throw new Error("no Survey is current");
+  return current;
+}
+
+/** The Project's state seen from Survey `survey` (default: the current one,
+ * else the first); makes it current. */
+export function view(raw: RawProjectState, survey?: string): ProjectState {
+  const want = survey ?? current;
+  const s = raw.surveys.find((x) => x.id === want) ?? raw.surveys[0];
+  if (!s) throw new Error("the Project has no Survey");
+  current = s.id;
+  return {
+    root: raw.root,
+    schema: raw.schema,
+    surveys: raw.surveys,
+    survey: s.id,
+    images: s.images,
+    reconstruction: s.reconstruction,
+    sparse: s.sparse,
+    dense: s.dense,
+    mesh: s.mesh,
+    georeferenced: Boolean(raw.georeferenced) && s.aligned,
+    source_resolution: s.source_resolution,
+    can_undo: s.can_undo,
+    can_redo: s.can_redo,
+    dirty: raw.dirty,
+  };
+}
+
+/** The current Survey's id, or null when no Project is open. */
+export function currentSurveyOrNull(): string | null {
+  return current;
+}
+
+/** Forget the current Survey (the Project closed). */
+export function clearSurvey() {
+  current = null;
+}
+
+const sv = () => ({ survey: currentSurvey() });
 
 export type Changed = { modality: "cloud" | "image"; image: string | null } | null;
 
@@ -73,7 +160,7 @@ const fresh = (what: string) => `${what}-${Date.now()}-${inbound++}`;
 
 // -- the Project --------------------------------------------------------------
 
-export const state = () => engineCall<ProjectState>("project.state");
+export const state = async () => view(await engineCall<RawProjectState>("project.state"));
 export const summary = () => engineCall<{ rows: [string, string][] }>("project.summary");
 export const hello = () =>
   engineCall<{ protocol: number; version: string; methods: string[] }>("engine.hello");
@@ -90,8 +177,8 @@ export const schemaSetColor = (id: number, color: string) =>
 export const schemaDelete = (id: number) =>
   engineCall<{ schema: SchemaClass[] }>("schema.delete", { id });
 
-export const undo = () => engineCall<{ changed: Changed }>("labels.undo");
-export const redo = () => engineCall<{ changed: Changed }>("labels.redo");
+export const undo = () => engineCall<{ changed: Changed }>("labels.undo", sv());
+export const redo = () => engineCall<{ changed: Changed }>("labels.redo", sv());
 
 // -- photos -------------------------------------------------------------------
 
@@ -100,7 +187,7 @@ export interface ImageInfo {
   width: number;
   height: number;
 }
-export const imageInfo = (name: string) => engineCall<ImageInfo>("image.info", { name });
+export const imageInfo = (name: string) => engineCall<ImageInfo>("image.info", { ...sv(), name });
 
 export interface Mask {
   source: "user" | "ml" | "auto" | null;
@@ -112,6 +199,7 @@ export interface Mask {
 
 export async function imageMask(name: string): Promise<Mask> {
   const r = await engineCall<{ source: Mask["source"]; mask: ArrayRef | null }>("image.mask", {
+    ...sv(),
     name,
   });
   if (!r.mask) return { source: r.source, mask: null, width: 0, height: 0 };
@@ -122,6 +210,7 @@ export async function imageMask(name: string): Promise<Mask> {
 export async function saveMask(name: string, mask: Int32Array, width: number, height: number) {
   const ref = await writeArray(fresh("mask"), mask, "int32", [height, width]);
   return engineCall<{ changed_pixels: number; status: Status }>("image.save_mask", {
+    ...sv(),
     name,
     mask: ref,
   });
@@ -147,7 +236,7 @@ export async function cloudView(cloud: CloudName, maxPoints: number): Promise<Cl
     xyz: ArrayRef;
     rgb: ArrayRef | null;
     index: ArrayRef | null;
-  }>("cloud.view", { cloud, max_points: maxPoints });
+  }>("cloud.view", { ...sv(), cloud, max_points: maxPoints });
   return {
     cloud: r.cloud,
     n_points: r.n_points,
@@ -159,13 +248,18 @@ export async function cloudView(cloud: CloudName, maxPoints: number): Promise<Cl
 
 /** Every point's class (−1 unlabelled), the whole cloud. */
 export async function cloudLabels(cloud: CloudName): Promise<Int32Array> {
-  const r = await engineCall<{ labels: ArrayRef }>("cloud.labels", { cloud });
+  const r = await engineCall<{ labels: ArrayRef }>("cloud.labels", { ...sv(), cloud });
   return (await load(r.labels)) as Int32Array;
 }
 
 export async function cloudPaint(cloud: CloudName, indices: Uint32Array, classId: number) {
   const ref = await writeArray(fresh("paint"), indices, "uint32", [indices.length]);
-  return engineCall<{ painted: number }>("cloud.paint", { cloud, indices: ref, class_id: classId });
+  return engineCall<{ painted: number }>("cloud.paint", {
+    ...sv(),
+    cloud,
+    indices: ref,
+    class_id: classId,
+  });
 }
 
 /** The points whose projection is inside a screen loop, through the whole cloud. */
@@ -177,6 +271,7 @@ export async function cloudSelect(
   height: number,
 ): Promise<Uint32Array> {
   const r = await engineCall<{ count: number; indices: ArrayRef }>("cloud.select", {
+    ...sv(),
     cloud,
     view_projection: Array.from(viewProjection),
     polygon,
@@ -188,18 +283,23 @@ export async function cloudSelect(
 
 export async function cloudDelete(cloud: CloudName, indices: Uint32Array) {
   const ref = await writeArray(fresh("delete"), indices, "uint32", [indices.length]);
-  return engineCall<{ removed: number; n_points: number }>("cloud.delete", { cloud, indices: ref });
+  return engineCall<{ removed: number; n_points: number }>("cloud.delete", {
+    ...sv(),
+    cloud,
+    indices: ref,
+  });
 }
 
 export const cloudStats = () =>
   engineCall<{ n_points: number; matched: number; views: ArrayRef; errors: ArrayRef }>(
     "cloud.stats",
+    sv(),
   );
 
 export async function cleanPreview(minImages: number, maxError: number) {
   const r = await engineCall<{ keep: number; total: number; removed: ArrayRef }>(
     "cloud.clean_preview",
-    { min_images: minImages, max_error: maxError },
+    { ...sv(), min_images: minImages, max_error: maxError },
   );
   return {
     keep: r.keep,
@@ -210,6 +310,7 @@ export async function cleanPreview(minImages: number, maxError: number) {
 
 export const clean = (minImages: number, maxError: number) =>
   engineCall<{ removed: number; n_points: number }>("cloud.clean", {
+    ...sv(),
     min_images: minImages,
     max_error: maxError,
   });
@@ -223,6 +324,7 @@ export interface MeshData {
 export async function meshGeometry(): Promise<MeshData> {
   const r = await engineCall<{ vertices: ArrayRef; faces: ArrayRef; colors: ArrayRef | null }>(
     "mesh.geometry",
+    sv(),
   );
   const faces = (await load(r.faces)) as Int32Array;
   return {
@@ -233,7 +335,7 @@ export async function meshGeometry(): Promise<MeshData> {
 }
 
 export async function meshLabels(): Promise<Int32Array> {
-  const r = await engineCall<{ labels: ArrayRef }>("mesh.labels");
+  const r = await engineCall<{ labels: ArrayRef }>("mesh.labels", sv());
   return (await load(r.labels)) as Int32Array;
 }
 
@@ -255,22 +357,22 @@ export interface Camera {
 }
 
 export const cameras = () =>
-  engineCall<{ cameras: Camera[]; up: [number, number, number] | null }>("cameras.list");
+  engineCall<{ cameras: Camera[]; up: [number, number, number] | null }>("cameras.list", sv());
 
 // -- transfers ----------------------------------------------------------------
 
 export const imagesToCloud = (includeAuto: boolean, ticket: string) =>
   engineCall<{ images: number; sparse: number; dense?: number }>(
     "transfer.images_to_cloud",
-    { include_auto: includeAuto },
+    { ...sv(), include_auto: includeAuto },
     ticket,
   );
 export const cloudToImages = (ticket: string) =>
-  engineCall<{ cloud: CloudName; auto_labelled: number }>("transfer.cloud_to_images", {}, ticket);
+  engineCall<{ cloud: CloudName; auto_labelled: number }>("transfer.cloud_to_images", sv(), ticket);
 export const propagate = (name: string, ticket: string) =>
   engineCall<{ cloud: CloudName; points: number; auto_labelled: number }>(
     "transfer.propagate",
-    { name },
+    { ...sv(), name },
     ticket,
   );
 
@@ -318,7 +420,7 @@ export interface Facts {
   [k: string]: unknown;
 }
 
-export const facts = (kind: string) => engineCall<Facts>("jobs.facts", { kind });
+export const facts = (kind: string) => engineCall<Facts>("jobs.facts", { ...sv(), kind });
 export const meshEstimate = (method: string, depth: number) =>
   engineCall<{
     minutes: number;
@@ -327,11 +429,12 @@ export const meshEstimate = (method: string, depth: number) =>
     suggested_depth: number | null;
     machine_ram_gb: number | null;
   }>("mesh.estimate", {
+    ...sv(),
     method,
     depth,
   });
 export const ingestConflicts = (folder: string) =>
-  engineCall<{ conflicts: string[] }>("ingest.conflicts", { folder });
+  engineCall<{ conflicts: string[] }>("ingest.conflicts", { ...sv(), folder });
 
 // -- CRS and export -----------------------------------------------------------
 
@@ -364,10 +467,20 @@ export const exportCloud = (
   format: "las" | "csv" | "ply",
   crs: ExportCrs,
   ticket: string,
-) => engineCall<{ path: string; points: number }>("export.cloud", { path, format, crs }, ticket);
+) =>
+  engineCall<{ path: string; points: number }>(
+    "export.cloud",
+    { ...sv(), path, format, crs },
+    ticket,
+  );
 export const exportMesh = (
   path: string,
   format: "ply" | "obj" | "stl",
   crs: ExportCrs,
   ticket: string,
-) => engineCall<{ path: string; vertices: number }>("export.mesh", { path, format, crs }, ticket);
+) =>
+  engineCall<{ path: string; vertices: number }>(
+    "export.mesh",
+    { ...sv(), path, format, crs },
+    ticket,
+  );

@@ -23,3 +23,17 @@
 The suite runs in the desktop app's Environment as well as the dev env, so
 nothing here may need PySide6, pyvista or vtk.
 """
+
+
+def product_dir(proj, slot: str, sid: str = "s1"):
+    """The folder a test writes a step's product into: the active
+    Reconstruction's ``slot`` product of Survey ``sid``, made (with the
+    Reconstruction) when missing, as running the step would."""
+    survey = proj.survey(sid)
+    rec = survey.ensure_active()
+    if rec.products.get(slot) is None:
+        rec.products[slot] = f"{slot}-1"
+    d = survey.products_dir / rec.products[slot]
+    d.mkdir(parents=True, exist_ok=True)
+    survey.save_manifest()
+    return d

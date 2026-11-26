@@ -471,3 +471,29 @@ def crs_prj_wkt(crs) -> str:
     except Exception:
         pass
     return crs.to_wkt(WktVersion.WKT2_2019)
+
+
+def site_samples(xyz: np.ndarray) -> np.ndarray:
+    """Bounding-box corners and centroid of (N, 3) points: enough to pin down
+    the local similarity that approximates a map projection over a site."""
+    xyz = np.asarray(xyz, np.float64).reshape(-1, 3)
+    lo, hi = xyz.min(axis=0), xyz.max(axis=0)
+    corners = np.array([[x, y, z] for x in (lo[0], hi[0])
+                        for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+    return np.vstack([corners, xyz.mean(axis=0)])
+
+
+def enu_to_frame_similarity(geo: dict, origin_lla, enu_samples: np.ndarray):
+    """The similarity ``(s, R, t)`` taking local ENU (about ``origin_lla``)
+    into a reprojected Project frame (its CRS minus its offset), fitted over
+    ``enu_samples``. For an ENU frame it is the identity."""
+    from cloudlabeller.photogrammetry.georef import umeyama_similarity
+
+    crs_info = (geo or {}).get("crs")
+    if not crs_info:
+        return 1.0, np.eye(3), np.zeros(3)
+    fn, _ = enu_to_crs_transform(origin_lla, int(crs_info["epsg"]),
+                                 bool(crs_info.get("orthometric")))
+    offset = np.asarray(crs_info.get("offset") or (0.0, 0.0, 0.0), np.float64)
+    samples = np.asarray(enu_samples, np.float64).reshape(-1, 3)
+    return umeyama_similarity(samples, fn(samples) - offset)

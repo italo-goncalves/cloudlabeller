@@ -24,6 +24,16 @@ acquisition with its own Photos and Reconstructions, tied together by GCPs.
 The terms are in [GLOSSARY.md](../GLOSSARY.md), and storage follows
 [ADR-0005](adr/0005-reconstructions-are-kept-and-aligned-by-a-stored-transform.md).
 
+Steps, in order (step 4 can run beside 2 and 3):
+
+1. **Layout v2, Surveys under the hood, the stored Alignment.** Built:
+   one Survey per Project for now, a 0.3.0 Project migrated on open,
+   georeferencing and reprojection as stored transforms.
+2. Several Surveys and Reconstructions, in the window.
+3. GCPs and Marks.
+4. Tiles and the Survey picker.
+5. Docs and the release.
+
 - **Surveys.**
   - A 0.3.0 Project opens as a single Survey without asking.
   - Each Survey has a name, a timestamp (by default the median of its

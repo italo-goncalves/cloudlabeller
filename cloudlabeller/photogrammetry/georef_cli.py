@@ -18,26 +18,25 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Subprocess entry point for georeferencing (align the model to EXIF GPS).
+"""Subprocess entry point for georeferencing: fit an Alignment to EXIF GPS.
 
-Aligns natively — no COLMAP executable needed: the images' EXIF GPS is
-converted to a local East-North-Up frame (metres, true north, origin at the
-first GPS coordinate — COLMAP ``model_aligner``'s convention, kept so old
-and new projects resolve the same origin), a robust RANSAC + Umeyama
-similarity is fitted from the solved camera centres, and the transform is
-applied to EVERY product in place: sparse cloud + cameras, dense cloud
-(points + normals), and mesh. Label arrays are per-point/per-vertex and
-follow their geometry unchanged. The COLMAP model on disk is transformed via
-pycolmap (original backed up to ``sparse_prealigned/``) so later stages
-(MVS, confidence cleaning) stay consistent.
+Aligns natively (no COLMAP executable): the photos' EXIF GPS is converted to
+a local East-North-Up frame (metres, true north) and a robust RANSAC +
+Umeyama similarity is fitted from the solved camera centres. Nothing is
+written: the similarity is printed, and the Engine keeps it as the
+Reconstruction's Alignment (ADR-0005).
+
+The ENU origin is ``--origin`` when the Project already has a frame, else
+the first GPS coordinate (COLMAP ``model_aligner``'s convention, kept so old
+and new Projects resolve the same origin).
 
 Usage::
 
-    python -m cloudlabeller.photogrammetry.georef_cli PROJECT_ROOT
-        [--max-error 5.0]
+    python -m cloudlabeller.photogrammetry.georef_cli SFM_DIR IMAGES_DIR
+        [--origin LAT LON ALT] [--max-error 5.0]
 
-Emits ``PROGRESS <frac> <msg>``; prints ``RESULT <json>`` on success
-(scale = metres per model unit).
+Emits ``PROGRESS <frac> <msg>``; prints ``RESULT <json>`` on success with
+``s``, ``R``, ``t`` (SfM frame to ENU), the origin and the fit.
 """
 
 from __future__ import annotations
@@ -57,7 +56,10 @@ log = logging.getLogger("cloudlabeller.georef")
 
 def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="georef_cli")
-    p.add_argument("project_root")
+    p.add_argument("sfm_dir", help="the SfM product (cloud.npz, cameras.json)")
+    p.add_argument("images_dir")
+    p.add_argument("--origin", type=float, nargs=3, default=None,
+                   metavar=("LAT", "LON", "ALT"), help="the Project frame's ENU origin")
     p.add_argument("--max-error", type=float, default=5.0,
                    help="RANSAC threshold in metres (GPS accuracy)")
     return p.parse_args(argv[1:])
@@ -78,21 +80,10 @@ def main(argv: list[str]) -> int:
         ransac_similarity,
     )
     from cloudlabeller.photogrammetry.pipeline import load_result
-    from cloudlabeller.photogrammetry.project_transform import (
-        apply_similarity_to_products,
-    )
-
-    root = Path(args.project_root)
-    rec_dir = root / "reconstruction"
-    backup_dir = rec_dir / "sparse_prealigned"
-    if backup_dir.exists():
-        log.error("this project is already georeferenced (backup exists at %s) "
-                  "— aligning twice would double-transform", backup_dir)
-        return 2
 
     # 1. Gather EXIF GPS for the solved images.
     progress(0.02, "Reading EXIF GPS from the image store…")
-    result = load_result(rec_dir, root / "images")
+    result = load_result(args.sfm_dir, args.images_dir)
     gps: dict[str, tuple[float, float, float]] = {}
     for record in result.images:
         lla = exif_gps(record.path)
@@ -105,7 +96,7 @@ def main(argv: list[str]) -> int:
     # COLMAP's model_aligner anchors the ENU frame at the FIRST reference
     # coordinate (first line of ref_images.txt), so that — not the mean GPS —
     # is the origin that CRS-aware export must use.
-    origin = next(iter(gps.values()))
+    origin = tuple(args.origin) if args.origin else next(iter(gps.values()))
     progress(0.08, f"{len(gps)} images have GPS")
 
     # 2. Native similarity fit: solved camera centres -> GPS in local ENU
@@ -144,16 +135,12 @@ def main(argv: list[str]) -> int:
                     "be unreliable; consider re-checking the imagery's GPS",
                     n_inliers, len(centers))
 
-    # 3. Apply to every product in place (COLMAP model backed up so the
-    #    pre-alignment state stays restorable).
-    apply_similarity_to_products(root, s, R, t, progress,
-                                 model_backup_dir=backup_dir)
-
     from cloudlabeller.photogrammetry.crs import ORIGIN_CONVENTION_FIRST_GPS
     print("RESULT " + json.dumps({
+        "s": float(s), "R": np.asarray(R).tolist(), "t": np.asarray(t).tolist(),
         "scale_m_per_unit": s,
         "origin_lla": [float(v) for v in origin],
-        "origin_convention": ORIGIN_CONVENTION_FIRST_GPS,
+        "origin_convention": ("given" if args.origin else ORIGIN_CONVENTION_FIRST_GPS),
         "n_gps": len(gps),
         "n_inliers": n_inliers,
         "fit_rms_m": rms,

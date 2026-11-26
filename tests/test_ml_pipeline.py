@@ -324,11 +324,11 @@ class TestPriorityVoting:
 class TestPredictionMask:
     def test_upscales_to_source_resolution(self, tmp_path):
         proj = Project.create(tmp_path / "p.clproj")
-        proj.settings["source_resolution"] = [40, 20]
+        proj.survey("s1").settings["source_resolution"] = [40, 20]
         small = np.full((10, 20), -1, np.int32)   # model-res (h=10, w=20)
         small[:5, :10] = 1
-        np.save(proj.predictions_dir / "img.npy", small)
-        mask = proj.prediction_mask("img")
+        np.save(proj.survey("s1").predictions_dir / "img.npy", small)
+        mask = proj.survey("s1").prediction_mask("img")
         assert mask.shape == (20, 40)
         assert mask.dtype == np.int32
         assert set(np.unique(mask)) == {-1, 1}
@@ -336,23 +336,23 @@ class TestPredictionMask:
 
     def test_missing_prediction_is_none(self, tmp_path):
         proj = Project.create(tmp_path / "p.clproj")
-        assert proj.prediction_mask("nope") is None
+        assert proj.survey("s1").prediction_mask("nope") is None
 
     def test_render_auto_mask_prefers_prediction_for_ml_status(self, tmp_path):
         proj = Project.create(tmp_path / "p.clproj")
-        proj.settings["source_resolution"] = [20, 10]
+        proj.survey("s1").settings["source_resolution"] = [20, 10]
         pred = np.full((10, 20), 2, np.int32)
-        np.save(proj.predictions_dir / "img.npy", pred)
-        proj.labels.mark_ml_labeled("img")
-        mask = proj.render_auto_mask("img")
+        np.save(proj.survey("s1").predictions_dir / "img.npy", pred)
+        proj.survey("s1").labels.mark_ml_labeled("img")
+        mask = proj.survey("s1").render_auto_mask("img")
         assert mask is not None and (mask == 2).all()
 
     def test_status_ml_survives_manifest_roundtrip(self, tmp_path):
         proj = Project.create(tmp_path / "p.clproj")
-        proj.labels.mark_ml_labeled("img")
+        proj.survey("s1").labels.mark_ml_labeled("img")
         proj.save()
         reopened = Project.open(proj.root)
-        assert reopened.labels.status_of("img") == "ml"
+        assert reopened.survey("s1").labels.status_of("img") == "ml"
 
 
 class TestMinorImprovements:

@@ -130,14 +130,18 @@ class Engine:
         """Run ``fn`` on the loop thread (from any thread)."""
         self._events.put(("call", fn))
 
-    def changed(self, *parts: str, images: Iterable[str] = ()) -> None:
+    def changed(self, *parts: str, survey: str | None = None,
+                images: Iterable[str] = ()) -> None:
         """Tell the window which parts of the Project changed.
 
-        Parts: ``schema``, ``images``, ``status``, ``sparse``, ``dense``,
-        ``mesh``, ``labels``, ``settings``. ``images`` names the images whose
-        masks or status changed.
+        Parts: ``schema``, ``surveys``, ``images``, ``status``, ``sparse``,
+        ``dense``, ``mesh``, ``labels``, ``settings``. ``survey`` names the
+        Survey the change is in (absent: Project-wide); ``images`` names its
+        photos whose masks or status changed.
         """
         params: dict = {"parts": sorted(set(parts))}
+        if survey is not None:
+            params["survey"] = survey
         names = sorted(set(images))
         if names:
             params["images"] = names

@@ -25,6 +25,7 @@ transfer that are fully implemented in the scaffold.
 """
 
 import numpy as np
+from conftest import product_dir
 import pytest
 
 from cloudlabeller.core.dataset import Mesh, PointCloud
@@ -91,13 +92,13 @@ def test_prediction_mask_upscales_smoothly(tmp_path):
     small = np.zeros((30, 40), np.int32)              # 0 above, 2 below diagonal
     for r in range(30):
         small[r, r * 40 // 30:] = 2
-    proj.predictions_dir.mkdir(parents=True, exist_ok=True)
-    np.save(proj.predictions_dir / "a.jpg.npy", small)
+    proj.survey("s1").predictions_dir.mkdir(parents=True, exist_ok=True)
+    np.save(proj.survey("s1").predictions_dir / "a.jpg.npy", small)
     cam = Camera(K=np.eye(3), R=np.eye(3), t=np.zeros(3), width=400, height=300)
-    proj.dataset.images = [ImageRecord(0, tmp_path / "a.jpg", camera=cam)]
-    proj.labels.mark_ml_labeled("a.jpg")
+    proj.survey("s1").dataset.images = [ImageRecord(0, tmp_path / "a.jpg", camera=cam)]
+    proj.survey("s1").labels.mark_ml_labeled("a.jpg")
 
-    mask = proj.prediction_mask("a.jpg")
+    mask = proj.survey("s1").prediction_mask("a.jpg")
     assert mask.shape == (300, 400)
     assert set(np.unique(mask).tolist()) == {0, 2}    # no averaged-in class 1
 
@@ -163,41 +164,41 @@ def test_label_status_provenance():
 
 def test_dense_cloud_labels_persist(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
-    proj.labels.cloud_labels = np.array([0, 1, -1], np.int32)
-    proj.labels.dense_cloud_labels = np.array([1, 1, 0, -1], np.int32)
+    proj.survey("s1").labels.cloud_labels = np.array([0, 1, -1], np.int32)
+    proj.survey("s1").labels.dense_cloud_labels = np.array([1, 1, 0, -1], np.int32)
     proj.save()
 
     reopened = Project.open(proj.root)
-    assert list(reopened.labels.cloud_labels) == [0, 1, -1]
-    assert list(reopened.labels.dense_cloud_labels) == [1, 1, 0, -1]
+    assert list(reopened.survey("s1").labels.cloud_labels) == [0, 1, -1]
+    assert list(reopened.survey("s1").labels.dense_cloud_labels) == [1, 1, 0, -1]
 
 
 def test_save_manifest_persists_status_without_full_save(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
-    proj.labels.mark_user_labeled("a.jpg")
+    proj.survey("s1").labels.mark_user_labeled("a.jpg")
     proj.save_manifest()                              # cheap, manifest only
-    assert Project.open(proj.root).labels.status_of("a.jpg") == "user"
+    assert Project.open(proj.root).survey("s1").labels.status_of("a.jpg") == "user"
 
 
 def test_auto_mask_source_prefers_labelled_dense(tmp_path):
     from cloudlabeller.core.dataset import PointCloud
 
     proj = Project.create(tmp_path / "p.clproj")
-    proj.dataset.cloud = PointCloud(xyz=np.zeros((4, 3), np.float32))
-    proj.dataset.dense_cloud = PointCloud(xyz=np.zeros((6, 3), np.float32))
-    assert proj.auto_mask_source() is None            # nothing labelled
+    proj.survey("s1").dataset.cloud = PointCloud(xyz=np.zeros((4, 3), np.float32))
+    proj.survey("s1").dataset.dense_cloud = PointCloud(xyz=np.zeros((6, 3), np.float32))
+    assert proj.survey("s1").auto_mask_source() is None            # nothing labelled
 
-    proj.labels.cloud_labels = np.array([0, -1, -1, -1], np.int32)
-    cloud, labels = proj.auto_mask_source()
-    assert cloud is proj.dataset.cloud                # sparse fallback
+    proj.survey("s1").labels.cloud_labels = np.array([0, -1, -1, -1], np.int32)
+    cloud, labels = proj.survey("s1").auto_mask_source()
+    assert cloud is proj.survey("s1").dataset.cloud                # sparse fallback
 
-    proj.labels.dense_cloud_labels = np.array([1, -1, -1, -1, -1, -1], np.int32)
-    cloud, labels = proj.auto_mask_source()
-    assert cloud is proj.dataset.dense_cloud          # labelled dense wins
+    proj.survey("s1").labels.dense_cloud_labels = np.array([1, -1, -1, -1, -1, -1], np.int32)
+    cloud, labels = proj.survey("s1").auto_mask_source()
+    assert cloud is proj.survey("s1").dataset.dense_cloud          # labelled dense wins
 
-    proj.labels.dense_cloud_labels = np.full(3, -1, np.int32)   # stale length
-    cloud, labels = proj.auto_mask_source()
-    assert cloud is proj.dataset.cloud                # mismatched dense ignored
+    proj.survey("s1").labels.dense_cloud_labels = np.full(3, -1, np.int32)   # stale length
+    cloud, labels = proj.survey("s1").auto_mask_source()
+    assert cloud is proj.survey("s1").dataset.cloud                # mismatched dense ignored
 
 
 def test_auto_masks_are_virtual(tmp_path):
@@ -212,18 +213,18 @@ def test_auto_masks_are_virtual(tmp_path):
     K = np.array([[1000.0, 0, 320], [0, 1000.0, 240], [0, 0, 1]])
     cam = Camera(K=K, R=np.eye(3), t=np.zeros(3), width=640, height=480,
                  model="PINHOLE")
-    img_path = proj.images_dir / "a.png"
+    img_path = proj.survey("s1").images_dir / "a.png"
     Image.new("RGB", (cam.width, cam.height), (5, 5, 5)).save(img_path)
-    proj.dataset.images = [ImageRecord(0, img_path, cam)]
+    proj.survey("s1").dataset.images = [ImageRecord(0, img_path, cam)]
     rng = np.random.default_rng(0)
     xyz = np.column_stack([rng.uniform(-1, 1, 300), rng.uniform(-1, 1, 300),
                            rng.uniform(4, 6, 300)]).astype(np.float32)
-    proj.dataset.cloud = PointCloud(xyz=xyz)
-    proj.labels.cloud_labels = np.zeros(300, np.int32)      # all class 0
-    proj.labels.mark_auto_labeled("a.png")
+    proj.survey("s1").dataset.cloud = PointCloud(xyz=xyz)
+    proj.survey("s1").labels.cloud_labels = np.zeros(300, np.int32)      # all class 0
+    proj.survey("s1").labels.mark_auto_labeled("a.png")
 
-    mask = proj.render_auto_mask("a.png")
-    assert "a.png" not in proj.labels.image_masks           # nothing materialised
+    mask = proj.survey("s1").render_auto_mask("a.png")
+    assert "a.png" not in proj.survey("s1").labels.image_masks           # nothing materialised
     assert mask is not None and mask.shape == (480, 640)
     assert (mask != -1).any() and set(np.unique(mask)) <= {-1, 0}
 
@@ -232,29 +233,29 @@ def test_stale_auto_masks_purged_on_open(tmp_path):
     """Masks saved for auto-status images are derived data: skipped and removed
     on open (older versions materialised them, exhausting RAM)."""
     proj = Project.create(tmp_path / "p.clproj")
-    proj.labels.image_masks["user.JPG"] = np.zeros((4, 4), np.int32)
-    proj.labels.mark_user_labeled("user.JPG")
-    proj.labels.image_masks["auto.JPG"] = np.ones((4, 4), np.int32)
-    proj.labels.mark_auto_labeled("auto.JPG")
+    proj.survey("s1").labels.image_masks["user.JPG"] = np.zeros((4, 4), np.int32)
+    proj.survey("s1").labels.mark_user_labeled("user.JPG")
+    proj.survey("s1").labels.image_masks["auto.JPG"] = np.ones((4, 4), np.int32)
+    proj.survey("s1").labels.mark_auto_labeled("auto.JPG")
     proj.save()
-    assert (proj.labels_dir / "images" / "auto.JPG.npy").exists()
+    assert (proj.survey("s1").masks_dir / "auto.JPG.npy").exists()
 
     reopened = Project.open(proj.root)
-    assert "user.JPG" in reopened.labels.image_masks           # kept
-    assert "auto.JPG" not in reopened.labels.image_masks       # derived: not loaded
-    assert not (proj.labels_dir / "images" / "auto.JPG.npy").exists()   # purged
+    assert "user.JPG" in reopened.survey("s1").labels.image_masks           # kept
+    assert "auto.JPG" not in reopened.survey("s1").labels.image_masks       # derived: not loaded
+    assert not (proj.survey("s1").masks_dir / "auto.JPG.npy").exists()   # purged
 
 
 def test_project_persists_image_status(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
-    proj.labels.mark_user_labeled("img1.JPG")
-    proj.labels.mark_auto_labeled("img2.JPG")
+    proj.survey("s1").labels.mark_user_labeled("img1.JPG")
+    proj.survey("s1").labels.mark_auto_labeled("img2.JPG")
     proj.save()
 
     reopened = Project.open(proj.root)
-    assert reopened.labels.status_of("img1.JPG") == "user"
-    assert reopened.labels.status_of("img2.JPG") == "auto"
-    assert reopened.labels.status_of("img3.JPG") == "none"
+    assert reopened.survey("s1").labels.status_of("img1.JPG") == "user"
+    assert reopened.survey("s1").labels.status_of("img2.JPG") == "auto"
+    assert reopened.survey("s1").labels.status_of("img3.JPG") == "none"
 
 
 def test_set_cloud_labels_undo_redo_roundtrip():
@@ -314,10 +315,10 @@ def test_remap_after_delete_includes_mesh():
 
 def test_mesh_labels_persist(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
-    proj.labels.mesh_labels = np.array([1, -1, 0], np.int32)
+    proj.survey("s1").labels.mesh_labels = np.array([1, -1, 0], np.int32)
     proj.save()
     reopened = Project.open(proj.root)
-    assert list(reopened.labels.mesh_labels) == [1, -1, 0]
+    assert list(reopened.survey("s1").labels.mesh_labels) == [1, -1, 0]
 
 
 def test_remap_after_delete_includes_dense():
@@ -344,11 +345,11 @@ def test_project_delete_label_remaps_data(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
     for n in ("a", "b", "c"):
         proj.add_label(n)
-    proj.labels.init_cloud(3)
-    proj.labels.cloud_labels[:] = np.array([0, 1, 2])
+    proj.survey("s1").labels.init_cloud(3)
+    proj.survey("s1").labels.cloud_labels[:] = np.array([0, 1, 2])
     proj.delete_label(1)
     assert [c.name for c in proj.schema.classes] == ["a", "c"]
-    assert list(proj.labels.cloud_labels) == [0, -1, 1]
+    assert list(proj.survey("s1").labels.cloud_labels) == [0, -1, 1]
 
 
 def test_label_store_notifies_listeners():
@@ -382,16 +383,16 @@ def test_project_loads_reconstruction(tmp_path):
     cloud = PointCloud(xyz=np.zeros((10, 3), np.float32), rgb=np.zeros((10, 3), np.uint8))
     cam = Camera(K=np.eye(3), R=np.eye(3), t=np.zeros(3), width=4, height=3)
     images = [ImageRecord(image_id=1, path=Path("/imgs/a.jpg"), camera=cam)]
-    save_result(ReconstructResult(cloud, images), proj.reconstruction_dir)
+    save_result(ReconstructResult(cloud, images), product_dir(proj, "sfm"))
 
     reopened = Project.open(proj.root)
-    assert reopened.dataset.cloud is not None
-    assert reopened.dataset.cloud.n_points == 10
-    assert len(reopened.dataset.images) == 1
-    assert reopened.dataset.images[0].camera is not None
+    assert reopened.survey("s1").dataset.cloud is not None
+    assert reopened.survey("s1").dataset.cloud.n_points == 10
+    assert len(reopened.survey("s1").dataset.images) == 1
+    assert reopened.survey("s1").dataset.images[0].camera is not None
     # label array is initialised to match the loaded cloud
-    assert reopened.labels.cloud_labels is not None
-    assert len(reopened.labels.cloud_labels) == 10
+    assert reopened.survey("s1").labels.cloud_labels is not None
+    assert len(reopened.survey("s1").labels.cloud_labels) == 10
 
 
 def test_ingest_images_copies_only_images(tmp_path):
@@ -453,13 +454,13 @@ def test_reconstruction_status(tmp_path):
     from cloudlabeller.core.dataset import PointCloud
 
     proj = Project.create(tmp_path / "p.clproj")
-    assert proj.reconstruction_status() == "none"            # no cloud yet
-    proj.dataset.cloud = PointCloud(xyz=np.zeros((2, 3), np.float32))
-    assert proj.reconstruction_status() == "current"
-    proj.mark_reconstruction_outdated()
-    assert proj.reconstruction_status() == "outdated"
-    proj.mark_reconstruction_current()
-    assert proj.reconstruction_status() == "current"
+    assert proj.survey("s1").reconstruction_status() == "none"            # no cloud yet
+    proj.survey("s1").dataset.cloud = PointCloud(xyz=np.zeros((2, 3), np.float32))
+    assert proj.survey("s1").reconstruction_status() == "current"
+    proj.survey("s1").mark_reconstruction_outdated()
+    assert proj.survey("s1").reconstruction_status() == "outdated"
+    proj.survey("s1").mark_reconstruction_current()
+    assert proj.survey("s1").reconstruction_status() == "current"
 
 
 def test_project_dataset_unions_store_and_cameras(tmp_path):
@@ -472,15 +473,15 @@ def test_project_dataset_unions_store_and_cameras(tmp_path):
     src.mkdir()
     (src / "a.JPG").write_bytes(b"x")
     (src / "b.JPG").write_bytes(b"x")
-    ingest_images(src, proj.images_dir)                    # both in the store
+    ingest_images(src, proj.survey("s1").images_dir)                    # both in the store
 
     cloud = PointCloud(xyz=np.zeros((3, 3), np.float32))
     cam = Camera(K=np.eye(3), R=np.eye(3), t=np.zeros(3), width=4, height=3)
-    save_result(ReconstructResult(cloud, [ImageRecord(1, proj.images_dir / "a.JPG", cam)]),
-                proj.reconstruction_dir)                   # only a.JPG was solved
+    save_result(ReconstructResult(cloud, [ImageRecord(1, proj.survey("s1").images_dir / "a.JPG", cam)]),
+                product_dir(proj, "sfm"))                   # only a.JPG was solved
 
     reopened = Project.open(proj.root)
-    by_name = {im.path.name: im for im in reopened.dataset.images}
+    by_name = {im.path.name: im for im in reopened.survey("s1").dataset.images}
     assert set(by_name) == {"a.JPG", "b.JPG"}              # union of store + solved
     assert by_name["a.JPG"].camera is not None             # solved
     assert by_name["b.JPG"].camera is None                 # present but unsolved
@@ -514,14 +515,14 @@ def test_project_loads_dense_and_mesh(tmp_path):
     from cloudlabeller.io.geometry import save_cloud_npz, save_mesh_npz
 
     proj = Project.create(tmp_path / "p.clproj")
-    save_cloud_npz(PointCloud(xyz=np.zeros((7, 3), np.float32)), proj.dense_cloud_path)
+    save_cloud_npz(PointCloud(xyz=np.zeros((7, 3), np.float32)), (product_dir(proj, "mvs") / "dense.npz"))
     save_mesh_npz(Mesh(vertices=np.zeros((3, 3), np.float32),
-                       faces=np.array([[0, 1, 2]], np.int32)), proj.mesh_path)
+                       faces=np.array([[0, 1, 2]], np.int32)), (product_dir(proj, "mesh") / "mesh.npz"))
 
     reopened = Project.open(proj.root)
-    assert reopened.dataset.dense_cloud is not None
-    assert reopened.dataset.dense_cloud.n_points == 7
-    assert reopened.dataset.has("dense") and reopened.dataset.has("mesh")
+    assert reopened.survey("s1").dataset.dense_cloud is not None
+    assert reopened.survey("s1").dataset.dense_cloud.n_points == 7
+    assert reopened.survey("s1").dataset.has("dense") and reopened.survey("s1").dataset.has("mesh")
 
 
 def _vis_scene():
@@ -667,14 +668,14 @@ def test_project_roundtrip(tmp_path):
     proj = Project.create(tmp_path / "demo.clproj")
     proj.schema.add("rock", "#ff0000")          # class 0
     proj.schema.add("vegetation", "#00ff00")    # class 1
-    proj.labels.init_cloud(4)
-    proj.labels.paint_cloud(np.array([0, 1]), class_id=1)
+    proj.survey("s1").labels.init_cloud(4)
+    proj.survey("s1").labels.paint_cloud(np.array([0, 1]), class_id=1)
     proj.save()
 
     reopened = Project.open(proj.root)
     assert [c.name for c in reopened.schema.classes] == ["rock", "vegetation"]
-    assert reopened.labels.cloud_labels is not None
-    assert list(reopened.labels.cloud_labels) == [1, 1, -1, -1]   # rest unlabelled
+    assert reopened.survey("s1").labels.cloud_labels is not None
+    assert list(reopened.survey("s1").labels.cloud_labels) == [1, 1, -1, -1]   # rest unlabelled
 
 
 class TestMaskFromFile:
@@ -838,9 +839,9 @@ def test_project_summary_info(tmp_path):
     proj = Project.create(tmp_path / "p.clproj")
     proj.schema.add("rock")
     proj.schema.add("soil")
-    proj.dataset.cloud = PointCloud(xyz=np.zeros((1234, 3), np.float32))
+    proj.survey("s1").dataset.cloud = PointCloud(xyz=np.zeros((1234, 3), np.float32))
     rows = dict(proj.summary_info())
-    assert "1,234 points" in rows["Sparse cloud"]
+    assert "1,234 points" in rows["  Sparse cloud"]
     assert "not georeferenced" in rows["Coordinates"]
     assert "0: rock, 1: soil" == rows["Classes"]
 
@@ -850,4 +851,10 @@ def test_project_summary_info(tmp_path):
     rows = dict(proj.summary_info())
     assert "metres, true north" in rows["Coordinates"]
     assert "-30.5539871°, -53.4158972°, 275.7 m" == rows["Origin (lat, lon, alt)"]
-    assert "36.3597 m" in rows["Alignment scale"] and "57 GPS" in rows["Alignment scale"]
+    sv = proj.survey("s1")
+    sv.ensure_active().alignment = {"s": 36.3597, "R": np.eye(3).tolist(), "t": [0, 0, 0],
+                                    "source": "gps", "n_gps": 57, "n_inliers": 55,
+                                    "rms": 1.2}
+    rows = dict(proj.summary_info())
+    assert "EXIF GPS, scale 36.3597" in rows["  Alignment"]
+    assert "55/57 GPS photos" in rows["  Alignment"]

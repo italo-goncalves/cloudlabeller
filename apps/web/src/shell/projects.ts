@@ -11,12 +11,15 @@ import {
   openProject,
   pickFolder,
 } from "../desktop/bridge";
-import type { ProjectState } from "../engine/api";
+import { clearSurvey, type RawProjectState, view } from "../engine/api";
 import type { App } from "../state/app";
 
 async function adopt(app: App, root: string, create: boolean): Promise<boolean> {
   try {
-    const project = (await openProject(root, create, app.onNote)) as unknown as ProjectState;
+    clearSurvey();
+    const project = view(
+      (await openProject(root, create, app.onNote)) as unknown as RawProjectState,
+    );
     app.dispatch({ type: "opened", project });
     app.dispatch({ type: "log", text: `Opened ${project.root}` });
     await addRecentProject(root).catch(() => undefined);

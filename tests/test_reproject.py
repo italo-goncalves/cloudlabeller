@@ -77,28 +77,30 @@ def test_project_frame_transform_from_offset_frame():
 
 
 # -- reproject_cli end-to-end ---------------------------------------------------
-def _write_manifest(root: Path, geo: dict) -> None:
-    (root / "project.json").write_text(
-        json.dumps({"settings": {"georeferenced": geo}}), encoding="utf-8")
+def _write_input(path: Path, geo, samples: np.ndarray) -> Path:
+    path.write_text(json.dumps({"frame": geo, "origin_lla": list(ORIGIN),
+                                "samples": np.asarray(samples).tolist()}),
+                    encoding="utf-8")
+    return path
 
 
-def test_reproject_cli_enu_to_utm_and_back(tmp_path, capsys):
-    from cloudlabeller.core.dataset import PointCloud
-    from cloudlabeller.io.geometry import load_cloud_npz, save_cloud_npz
+def _fit(out: dict):
+    return out["s"], np.asarray(out["R"]), np.asarray(out["t"])
+
+
+def test_reproject_cli_fits_enu_to_utm_and_on(tmp_path, capsys):
+    """The CLI fits the move of the Project frame; the Engine composes it
+    into each Alignment (ADR-0005), so nothing is read but the input."""
     from cloudlabeller.photogrammetry import reproject_cli
-    from cloudlabeller.photogrammetry.pipeline import load_result
 
-    root, images, cloud = _make_project(tmp_path)
-    rec_dir = root / "reconstruction"
+    _root, images, _cloud = _make_project(tmp_path)
     geo = {"frame": "ENU", "origin_lla": list(ORIGIN),
            "origin_convention": crsmod.ORIGIN_CONVENTION_FIRST_GPS}
-    _write_manifest(root, geo)
     centers = _centers(images)                 # play the role of ENU metres
-    save_cloud_npz(PointCloud(xyz=centers.astype(np.float32)),
-                   rec_dir / "dense.npz")
+    given = _write_input(tmp_path / "in.json", geo, crsmod.site_samples(centers))
 
     # --- ENU -> WGS84 UTM 22S
-    assert reproject_cli.main(["reproject_cli", str(root),
+    assert reproject_cli.main(["reproject_cli", str(given),
                                "--epsg", str(UTM_WGS84_22S)]) == 0
     out = json.loads(capsys.readouterr().out.partition("RESULT ")[2]
                      .splitlines()[0])
@@ -106,39 +108,30 @@ def test_reproject_cli_enu_to_utm_and_back(tmp_path, capsys):
     offset = np.array(out["offset"])
     assert np.all(offset[:2] % 1000 == 0) and offset[2] == 0
     assert out["fit_rms_m"] < 0.01             # tiny site: near-exact fit
-
+    s, R, t = _fit(out)
+    stored1 = centers @ (s * R).T + t
     exact = crsmod.enu_to_crs_transform(ORIGIN, UTM_WGS84_22S)[0]
-    expected_abs = exact(centers)
-    aligned = load_result(rec_dir, root / "images")
-    assert np.allclose(_centers(aligned.images) + offset, expected_abs,
-                       atol=0.01)
-    dense_after = load_cloud_npz(rec_dir / "dense.npz")
-    assert np.allclose(dense_after.xyz + offset, expected_abs, atol=0.1)
+    assert np.allclose(stored1 + offset, exact(centers), atol=0.01)
 
     # --- WGS84 UTM -> SIRGAS 2000 UTM (offset-frame source branch)
     geo["crs"] = {"epsg": out["epsg"], "name": out["name"],
                   "orthometric": False, "offset": out["offset"]}
-    _write_manifest(root, geo)
-    assert reproject_cli.main(["reproject_cli", str(root),
+    given = _write_input(tmp_path / "in2.json", geo, crsmod.site_samples(stored1))
+    assert reproject_cli.main(["reproject_cli", str(given),
                                "--epsg", str(UTM_SIRGAS_22S)]) == 0
     out2 = json.loads(capsys.readouterr().out.partition("RESULT ")[2]
                       .splitlines()[0])
+    s2, R2, t2 = _fit(out2)
     exact2 = crsmod.project_frame_transform(geo, None, UTM_SIRGAS_22S)[0]
-    stored1 = _centers(aligned.images)
-    expected2 = exact2(stored1)
-    aligned2 = load_result(rec_dir, root / "images")
-    assert np.allclose(_centers(aligned2.images) + np.array(out2["offset"]),
-                       expected2, atol=0.01)
+    assert np.allclose(stored1 @ (s2 * R2).T + t2 + np.array(out2["offset"]),
+                       exact2(stored1), atol=0.01)
 
 
-def test_reproject_cli_requires_georeferencing(tmp_path, capsys):
+def test_reproject_cli_requires_a_frame(tmp_path, capsys):
     from cloudlabeller.photogrammetry import reproject_cli
 
-    root, _images, _cloud = _make_project(tmp_path)
-    _write_manifest(root, None)                # settings without georeferenced
-    (root / "project.json").write_text(json.dumps({"settings": {}}),
-                                       encoding="utf-8")
-    assert reproject_cli.main(["reproject_cli", str(root),
+    given = _write_input(tmp_path / "in.json", None, np.zeros((9, 3)))
+    assert reproject_cli.main(["reproject_cli", str(given),
                                "--epsg", str(UTM_WGS84_22S)]) == 2
 
 

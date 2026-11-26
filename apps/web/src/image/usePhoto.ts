@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from "react";
 import { readPhoto } from "../desktop/bridge";
+import { currentSurvey } from "../engine/api";
 
 const MIME: Record<string, string> = {
   jpg: "image/jpeg",
@@ -52,7 +53,7 @@ export function usePhoto(name: string | null): Photo {
     (async () => {
       let decoding = false;
       try {
-        const bytes = await readPhoto(name);
+        const bytes = await readPhoto(currentSurvey(), name);
         if (!live) return;
         decoding = true;
         url = URL.createObjectURL(new Blob([bytes], { type: mimeFor(name) }));

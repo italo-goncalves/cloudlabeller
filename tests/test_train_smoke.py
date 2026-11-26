@@ -112,13 +112,13 @@ def test_train_and_predict_cli_subprocess(tmp_path):
     rng = np.random.default_rng(0)
     for name in ("a.jpg", "b.jpg", "c.jpg"):
         arr = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
-        Image.fromarray(arr).save(proj.images_dir / name)
+        Image.fromarray(arr).save(proj.survey("s1").images_dir / name)
     for name in ("a.jpg", "b.jpg"):                     # green images
         mask = np.zeros((64, 96), np.int32)
         mask[:, 48:] = 1
-        proj.labels.image_masks[name] = mask
-        proj.labels.mark_user_labeled(name)
-    proj.load_products()
+        proj.survey("s1").labels.image_masks[name] = mask
+        proj.survey("s1").labels.mark_user_labeled(name)
+    proj.survey("s1").load_products()
     proj.save()
 
     def run(module, *args):
@@ -156,6 +156,6 @@ def test_train_and_predict_cli_subprocess(tmp_path):
 
     out = run("cloudlabeller.ml.predict_cli", "--model", "cli smoke")
     assert out["predicted"] == ["c.jpg"]                # red only; greens kept
-    pred = np.load(proj.predictions_dir / "c.jpg.npy")
+    pred = np.load(proj.survey("s1").predictions_dir / "c.jpg.npy")
     assert pred.shape == (th, tw)                       # the MODEL's input size
     assert set(np.unique(pred)) <= {0, 1}

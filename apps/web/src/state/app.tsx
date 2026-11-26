@@ -91,6 +91,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const p = note.params;
       switch (note.method) {
         case "project.changed":
+          // A change in another Survey than the one shown only refreshes.
+          if (typeof p.survey === "string" && p.survey !== api.currentSurveyOrNull()) {
+            void refresh();
+            break;
+          }
           dispatch({
             type: "changed",
             parts: (p.parts as string[]) ?? [],
@@ -214,8 +219,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
               break;
           }
         };
-        coreRunJob(kind, options, on).catch((e: unknown) =>
-          end(null, isProblem(e) ? e : { code: "job.call", english: words(e) }),
+        // Survey-scoped Jobs read `survey`; the others ignore it.
+        coreRunJob(kind, { survey: api.currentSurveyOrNull(), ...options }, on).catch(
+          (e: unknown) => end(null, isProblem(e) ? e : { code: "job.call", english: words(e) }),
         );
       }),
     [refresh],

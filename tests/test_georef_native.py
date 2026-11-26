@@ -141,10 +141,9 @@ def _centers(images) -> np.ndarray:
                      for r in images])
 
 
-def test_georef_cli_aligns_project_natively(tmp_path, monkeypatch, capsys):
-    from cloudlabeller.io.geometry import load_cloud_npz, save_cloud_npz
+def test_georef_cli_fits_the_alignment_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    """The fit is printed for the Engine to keep (ADR-0005); no file changes."""
     from cloudlabeller.photogrammetry import georef_cli
-    from cloudlabeller.photogrammetry.pipeline import load_result
 
     root, images, cloud = _make_project(tmp_path)
     rec_dir = root / "reconstruction"
@@ -161,17 +160,10 @@ def test_georef_cli_aligns_project_natively(tmp_path, monkeypatch, capsys):
                    for r, la, lo, al in zip(images, lat, lon, h)}
     monkeypatch.setattr(georef, "exif_gps",
                         lambda p: gps_by_name.get(Path(p).name))
+    files = {f: f.read_bytes() for f in rec_dir.rglob("*") if f.is_file()}
 
-    # A dense cloud whose points coincide with the camera centres — after
-    # alignment they must land on the cameras' GPS ENU positions.
-    from cloudlabeller.core.dataset import PointCloud
-
-    save_cloud_npz(PointCloud(xyz=centers.astype(np.float32)),
-                   rec_dir / "dense.npz")
-
-    rc = georef_cli.main(["georef_cli", str(root)])
+    rc = georef_cli.main(["georef_cli", str(rec_dir), str(root / "images")])
     assert rc == 0
-
     out = capsys.readouterr().out
     result = json.loads(out.partition("RESULT ")[2].splitlines()[0])
     assert result["origin_convention"] == crsmod.ORIGIN_CONVENTION_FIRST_GPS
@@ -179,38 +171,28 @@ def test_georef_cli_aligns_project_natively(tmp_path, monkeypatch, capsys):
     assert result["fit_rms_m"] < 0.01
     assert abs(result["scale_m_per_unit"] - s_true) < 0.01
 
-    # The CLI anchors ENU at the FIRST image's GPS: expected positions are
-    # the GPS coordinates re-expressed in that frame.
+    # The CLI anchors ENU at the FIRST image's GPS: the printed similarity
+    # takes the camera centres onto the GPS re-expressed in that frame.
     first_name = Path(images[0].path).name
     assert tuple(result["origin_lla"]) == gps_by_name[first_name]
     expected = crsmod.lla_to_enu_transform(result["origin_lla"])(
         np.array([gps_by_name[Path(r.path).name] for r in images]))
+    s, R, t = result["s"], np.asarray(result["R"]), np.asarray(result["t"])
+    assert np.allclose(centers @ (s * R).T + t, expected, atol=1e-3)
 
-    aligned = load_result(rec_dir, root / "images")
-    assert np.allclose(_centers(aligned.images), expected, atol=1e-3)
+    # Nothing on disk moved: no products, no COLMAP model, no backup.
+    assert {f: f.read_bytes() for f in rec_dir.rglob("*") if f.is_file()} == files
+    assert not (rec_dir / "sparse_prealigned").exists()
 
-    dense_after = load_cloud_npz(rec_dir / "dense.npz")
-    assert np.allclose(dense_after.xyz, expected, atol=0.1)   # float32 storage
-
-    # Sparse cloud scales rigidly (pairwise distances × s_true).
-    d0 = np.linalg.norm(cloud.xyz[0] - cloud.xyz[1])
-    d1 = np.linalg.norm(aligned.cloud.xyz[0] - aligned.cloud.xyz[1])
-    assert abs(d1 - s_true * d0) < 0.01
-
-    # The COLMAP model on disk was transformed too (float64 — tight).
-    import pycolmap
-
-    rec2 = pycolmap.Reconstruction(str(rec_dir / "sparse" / "0"))
-    got = np.array([im.projection_center()
-                    for im in sorted(rec2.images.values(), key=lambda i: i.name)])
-    want_by_name = {Path(r.path).name: e for r, e in zip(images, expected)}
-    want = np.array([want_by_name[im.name]
-                     for im in sorted(rec2.images.values(), key=lambda i: i.name)])
-    assert np.allclose(got, want, atol=1e-6)
-    assert (rec_dir / "sparse_prealigned" / "0").exists()
-
-    # Aligning twice would double-transform — must refuse.
-    assert georef_cli.main(["georef_cli", str(root)]) == 2
+    # Into an existing Project frame: the given origin anchors the ENU.
+    rc = georef_cli.main(["georef_cli", str(rec_dir), str(root / "images"),
+                          "--origin", *map(str, ORIGIN)])
+    assert rc == 0
+    result = json.loads(capsys.readouterr().out.partition("RESULT ")[2].splitlines()[0])
+    assert tuple(result["origin_lla"]) == tuple(ORIGIN)
+    assert result["origin_convention"] == "given"
+    s, R, t = result["s"], np.asarray(result["R"]), np.asarray(result["t"])
+    assert np.allclose(centers @ (s * R).T + t, enu_true, atol=1e-3)
 
 
 # -- dialogs ------------------------------------------------------------------

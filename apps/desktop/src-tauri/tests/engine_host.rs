@@ -49,10 +49,13 @@ fn the_engine_answers_and_notifies() {
         .call("project.create", json!({"root": engine.root_env, "classes": [{"name": "rock"}]}))
         .unwrap();
     assert_eq!(state["schema"][0]["name"], "rock");
+    assert_eq!(state["surveys"][0]["id"], "s1");
     engine.call("schema.add", json!({"name": "soil"})).unwrap();
 
-    let problem = engine.call("image.mask", json!({"name": "nope.jpg"})).unwrap_err();
+    let problem = engine.call("image.mask", json!({"survey": "s1", "name": "nope.jpg"})).unwrap_err();
     assert_eq!(problem.code, "image.not_found");
+    let problem = engine.call("image.mask", json!({"survey": "s9", "name": "a.jpg"})).unwrap_err();
+    assert_eq!(problem.code, "survey.not_found");
 
     let methods: Vec<String> = seen
         .lock()

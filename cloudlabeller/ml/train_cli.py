@@ -101,7 +101,6 @@ def main(argv: list[str]) -> int:
 
     progress(0.0, "Opening project…")
     proj = Project.open(args.project_root)
-    labels = proj.labels
     source_res = proj.source_resolution()
     if not proj.schema.classes or source_res is None:
         log.error("project has no label classes or no images")
@@ -134,31 +133,38 @@ def main(argv: list[str]) -> int:
             log.error("model settings invalid: %s", error)
             return 2
 
-    user_names = [n for n, m in labels.image_masks.items()
-                  if labels.status_of(n) == "user" and (m != -1).any()]
+    # Photos are pooled over every Survey, keyed "<survey>/<name>".
+    user_names: list[str] = []
     auto_names: list[str] = []
-    if args.include_auto:
-        # Cloud-projected supplements only; never train on U-Net output ('ml').
-        auto_names = [r.name for r in proj.dataset.solved_images()
-                      if r.camera is not None and labels.status_of(r.name) == "auto"]
+    records: dict[str, tuple] = {}
+    for sid in proj.surveys:
+        survey = proj.survey(sid)
+        labels = survey.labels
+        for r in survey.dataset.images:
+            records[f"{sid}/{r.name}"] = (survey, r.name, r.path)
+        user_names += [f"{sid}/{n}" for n, m in labels.image_masks.items()
+                       if labels.status_of(n) == "user" and (m != -1).any()]
+        if args.include_auto:
+            # Cloud-projected supplements only; never train on U-Net output ('ml').
+            auto_names += [f"{sid}/{r.name}" for r in survey.dataset.solved_images()
+                           if labels.status_of(r.name) == "auto"]
     names = user_names + auto_names
     if not names:
         log.error("no labelled images to train on")
         return 2
-
-    records = {r.name: r.path for r in proj.dataset.images}
     # When resuming, the dataset must be built at the SAVED model's input size.
     target_size = (tuple(manifest["input_size"]) if manifest is not None
                    else spec.training_size(*source_res))
 
-    def mask_loader(name):
-        mask = labels.image_masks.get(name)
-        return mask if mask is not None else proj.render_auto_mask(name)
+    def mask_loader(key):
+        survey, name, _ = records[key]
+        mask = survey.labels.image_masks.get(name)
+        return mask if mask is not None else survey.render_auto_mask(name)
 
     progress(0.01, f"Loading {len(names)} images at "
                    f"{target_size[0]}×{target_size[1]} px…")
     ts = build_training_set(
-        names, lambda n: _load_rgb(records[n]), mask_loader,
+        names, lambda k: _load_rgb(records[k][2]), mask_loader,
         projected_weight=0.5, projected_names=set(auto_names),
         target_size=target_size)
     train_set, val_set = (ts.split(args.val_fraction)

@@ -161,12 +161,15 @@ def run_mvs(
     colmap_binary: str | None = None,
     quality: str = "standard",         # "standard" | "draft" (~3-4x faster stereo)
     progress: ProgressFn = lambda f, m="": None,
+    out_dir: str | Path | None = None,
 ) -> tuple[PointCloud, Mesh | None]:
-    """Run dense MVS; return (dense cloud, mesh-or-None)."""
+    """Run dense MVS on the SfM model in ``workspace/sparse``; the COLMAP
+    dense workspace goes to ``out_dir/dense`` (default: ``workspace``).
+    Returns (dense cloud, mesh-or-None)."""
     ws = Path(workspace)
     images = Path(images_dir)
     sparse = find_sparse_model(ws / "sparse")
-    dense = ws / "dense"
+    dense = Path(out_dir if out_dir is not None else ws) / "dense"
     kept = prepare_dense_workspace(dense, max_image_size, quality, progress)
 
     exe = find_colmap_binary(colmap_binary)

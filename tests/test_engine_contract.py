@@ -20,6 +20,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
+from conftest import product_dir
 import pytest
 
 import cloudlabeller.engine.methods  # noqa: F401  (registers the methods)
@@ -200,14 +201,14 @@ def make_project(root: Path, n_classes: int = 2) -> Path:
         proj.add_label()
     proj.save()
     for name in ("a.png", "b.png"):
-        Image.new("RGB", (W, H), (120, 120, 120)).save(proj.images_dir / name)
+        Image.new("RGB", (W, H), (120, 120, 120)).save(proj.survey("s1").images_dir / name)
     rng = np.random.default_rng(0)
     xyz = np.column_stack([rng.uniform(-1.5, 1.5, 600), rng.uniform(-1, 1, 600),
                            rng.uniform(4, 6, 600)]).astype(np.float32)
     cloud = PointCloud(xyz=xyz, rgb=np.full((600, 3), 200, np.uint8))
-    images = [ImageRecord(0, proj.images_dir / "a.png", _camera(0.0)),
-              ImageRecord(1, proj.images_dir / "b.png", _camera(0.2))]
-    save_result(ReconstructResult(cloud, images), proj.reconstruction_dir)
+    images = [ImageRecord(0, proj.survey("s1").images_dir / "a.png", _camera(0.0)),
+              ImageRecord(1, proj.survey("s1").images_dir / "b.png", _camera(0.2))]
+    save_result(ReconstructResult(cloud, images), product_dir(proj, "sfm"))
     return root
 
 
@@ -295,7 +296,7 @@ def test_create_then_schema_edits(pipe, tmp_path):
     state = pipe.call("project.create", {"root": str(root),
                                          "classes": [{"name": "rock"}, {"name": "soil"}]})
     assert [c["name"] for c in state["schema"]] == ["rock", "soil"]
-    assert state["images"] == [] and state["reconstruction"] == "none"
+    assert state["surveys"][0]["images"] == [] and state["surveys"][0]["reconstruction"] == "none"
 
     schema = pipe.call("schema.add", {"name": "water", "color": "#0000ff"})["schema"]
     assert [c["id"] for c in schema] == [0, 1, 2]
@@ -321,28 +322,28 @@ def test_create_then_schema_edits(pipe, tmp_path):
 def test_open_reports_state(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     state = pipe.call("project.open", {"root": str(root)})
-    assert [(i["name"], i["status"], i["solved"]) for i in state["images"]] == [
+    assert [(i["name"], i["status"], i["solved"]) for i in state["surveys"][0]["images"]] == [
         ("a.png", "none", True), ("b.png", "none", True)]
-    assert state["sparse"] == 600 and state["dense"] is None and state["mesh"] is None
-    assert state["reconstruction"] == "current"
-    assert state["source_resolution"] == [W, H]
+    assert state["surveys"][0]["sparse"] == 600 and state["surveys"][0]["dense"] is None and state["surveys"][0]["mesh"] is None
+    assert state["surveys"][0]["reconstruction"] == "current"
+    assert state["surveys"][0]["source_resolution"] == [W, H]
     rows = dict(map(tuple, pipe.call("project.summary")["rows"]))
-    assert rows["Sparse cloud"] == "600 points"
+    assert rows["  Sparse cloud"] == "600 points"
 
 
 # -- arrays ------------------------------------------------------------------------
 def test_cloud_points_arrive_as_array_files(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    out = pipe.call("cloud.points", {"cloud": "sparse"})
+    out = pipe.call("cloud.points", {"survey": "s1", "cloud": "sparse"})
     assert out["xyz"]["dtype"] == "float32" and out["xyz"]["shape"] == [600, 3]
     assert out["xyz"]["path"].startswith(".arrays/")
     raw = np.fromfile(root / out["xyz"]["path"], dtype="<f4").reshape(600, 3)
-    assert np.allclose(raw, Project.open(root).dataset.cloud.xyz)
+    assert np.allclose(raw, Project.open(root).survey("s1").dataset.cloud.xyz)
     assert get_array(root, out["rgb"]).dtype == np.uint8
 
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.points", {"cloud": "dense"})
+        pipe.call("cloud.points", {"survey": "s1", "cloud": "dense"})
     assert err.value.data["code"] == "cloud.none"
 
 
@@ -351,13 +352,13 @@ def test_inbound_arrays_are_checked(pipe, tmp_path):
     pipe.call("project.open", {"root": str(root)})
     outside = {"path": "labels/cloud_labels.npy", "dtype": "int32", "shape": [1]}
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.paint", {"cloud": "sparse", "class_id": 0, "indices": outside})
+        pipe.call("cloud.paint", {"survey": "s1", "cloud": "sparse", "class_id": 0, "indices": outside})
     assert err.value.code == protocol.INVALID_PARAMS
 
     ref = put_array(root, "idx", np.arange(5, dtype=np.int32))
     ref["shape"] = [6]                                     # lies about its size
     with pytest.raises(RpcError) as err:
-        pipe.call("cloud.paint", {"cloud": "sparse", "class_id": 0, "indices": ref})
+        pipe.call("cloud.paint", {"survey": "s1", "cloud": "sparse", "class_id": 0, "indices": ref})
     assert err.value.code == protocol.INVALID_PARAMS
     assert "size" in err.value.data["english"]
 
@@ -366,45 +367,45 @@ def test_inbound_arrays_are_checked(pipe, tmp_path):
 def test_save_mask_is_undoable_and_persisted(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    assert pipe.call("image.mask", {"name": "a.png"}) == {"source": None, "mask": None}
+    assert pipe.call("image.mask", {"survey": "s1", "name": "a.png"}) == {"source": None, "mask": None}
 
     mask = np.full((H, W), -1, np.int32)
     mask[:, : W // 2] = 0
     mask[:, W // 2:] = 1
     ref = put_array(root, "a", mask)
-    out = pipe.call("image.save_mask", {"name": "a.png", "mask": ref})
+    out = pipe.call("image.save_mask", {"survey": "s1", "name": "a.png", "mask": ref})
     assert out == {"changed_pixels": H * W, "status": "user"}
     assert not (root / ref["path"]).exists()               # inbound files are consumed
-    assert (root / "labels" / "images" / "a.png.npy").exists()
-    assert Project.open(root).labels.status_of("a.png") == "user"
+    assert (root / "surveys" / "s1" / "masks" / "a.png.npy").exists()
+    assert Project.open(root).survey("s1").labels.status_of("a.png") == "user"
     changed = pipe.drained("project.changed")
     assert any(n["params"].get("images") == ["a.png"] for n in changed)
 
-    shown = pipe.call("image.mask", {"name": "a.png"})
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "a.png"})
     assert shown["source"] == "user"
     assert np.array_equal(get_array(root, shown["mask"]), mask)
 
-    undo = pipe.call("labels.undo")
+    undo = pipe.call("labels.undo", {"survey": "s1"})
     assert undo == {"changed": {"modality": "image", "image": "a.png"}}
-    shown = pipe.call("image.mask", {"name": "a.png"})
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "a.png"})
     assert (get_array(root, shown["mask"]) == -1).all()
-    assert pipe.call("labels.redo")["changed"]["image"] == "a.png"
-    assert pipe.call("project.state")["can_redo"] is False
+    assert pipe.call("labels.redo", {"survey": "s1"})["changed"]["image"] == "a.png"
+    assert pipe.call("project.state")["surveys"][0]["can_redo"] is False
 
 
 def test_save_mask_refuses_wrong_shape_and_ids(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        pipe.call("image.save_mask", {"name": "a.png",
+        pipe.call("image.save_mask", {"survey": "s1", "name": "a.png",
                                       "mask": put_array(root, "a", np.zeros((3, 3), np.int32))})
     assert err.value.data["code"] == "image.mask_shape"
     with pytest.raises(RpcError) as err:
-        pipe.call("image.save_mask", {"name": "a.png",
+        pipe.call("image.save_mask", {"survey": "s1", "name": "a.png",
                                       "mask": put_array(root, "a", np.full((H, W), 5, np.int32))})
     assert err.value.data["code"] == "image.mask_values"
     with pytest.raises(RpcError) as err:
-        pipe.call("image.mask", {"name": "zzz.png"})
+        pipe.call("image.mask", {"survey": "s1", "name": "zzz.png"})
     assert err.value.data["code"] == "image.not_found"
 
 
@@ -412,17 +413,17 @@ def test_lasso_paint_undo_and_save_on_close(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     idx = put_array(root, "idx", np.arange(0, 600, 3, dtype=np.int32))
-    assert pipe.call("cloud.paint", {"cloud": "sparse", "class_id": 1, "indices": idx}) == {
+    assert pipe.call("cloud.paint", {"survey": "s1", "cloud": "sparse", "class_id": 1, "indices": idx}) == {
         "painted": 200}
-    labels = get_array(root, pipe.call("cloud.labels", {"cloud": "sparse"})["labels"])
+    labels = get_array(root, pipe.call("cloud.labels", {"survey": "s1", "cloud": "sparse"})["labels"])
     assert (labels[::3] == 1).all() and (np.delete(labels, np.s_[::3]) == -1).all()
     assert pipe.call("project.state")["dirty"] is True
 
-    pipe.call("labels.undo")
-    pipe.call("labels.redo")
+    pipe.call("labels.undo", {"survey": "s1"})
+    pipe.call("labels.redo", {"survey": "s1"})
     pipe.call("project.close")
     reopened = Project.open(root)
-    assert (reopened.labels.cloud_labels[::3] == 1).all()
+    assert (reopened.survey("s1").labels.cloud_labels[::3] == 1).all()
     assert not (root / ".arrays").exists()                 # emptied on close
 
 
@@ -431,33 +432,33 @@ def test_images_to_cloud_then_cloud_to_images(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
     with pytest.raises(RpcError) as err:
-        pipe.call("transfer.images_to_cloud")
+        pipe.call("transfer.images_to_cloud", {"survey": "s1"})
     assert err.value.data["code"] == "transfer.no_labelled_images"
 
     mask = np.zeros((H, W), np.int32)
     mask[:, W // 2:] = 1
-    pipe.call("image.save_mask", {"name": "a.png", "mask": put_array(root, "a", mask)})
+    pipe.call("image.save_mask", {"survey": "s1", "name": "a.png", "mask": put_array(root, "a", mask)})
 
-    msg = pipe.request("transfer.images_to_cloud", {"include_auto": True}, req_id="i2c")
+    msg = pipe.request("transfer.images_to_cloud", {"survey": "s1", "include_auto": True}, req_id="i2c")
     out = msg["result"]
     assert out["images"] == 1 and out["sparse"] > 0
     progress = pipe.drained("request.progress")
     assert progress and all(p["params"]["id"] == "i2c" for p in progress)
     assert progress[-1]["params"]["fraction"] == 1.0
-    cloud_labels = get_array(root, pipe.call("cloud.labels")["labels"])
+    cloud_labels = get_array(root, pipe.call("cloud.labels", {"survey": "s1"})["labels"])
     assert set(np.unique(cloud_labels)) <= {-1, 0, 1} and (cloud_labels == 1).any()
 
-    out = pipe.call("transfer.cloud_to_images")
+    out = pipe.call("transfer.cloud_to_images", {"survey": "s1"})
     assert out == {"cloud": "sparse", "auto_labelled": ["b.png"]}
-    statuses = {i["name"]: i["status"] for i in pipe.call("project.state")["images"]}
+    statuses = {i["name"]: i["status"] for i in pipe.call("project.state")["surveys"][0]["images"]}
     assert statuses == {"a.png": "user", "b.png": "auto"}
-    shown = pipe.call("image.mask", {"name": "b.png"})
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
     assert shown["source"] == "auto" and shown["mask"]["shape"] == [H, W]
 
-    out = pipe.call("transfer.propagate", {"name": "a.png"})
+    out = pipe.call("transfer.propagate", {"survey": "s1", "name": "a.png"})
     assert out["cloud"] == "sparse"
     with pytest.raises(RpcError) as err:
-        pipe.call("transfer.propagate", {"name": "b.png"})
+        pipe.call("transfer.propagate", {"survey": "s1", "name": "b.png"})
     assert err.value.data["code"] == "transfer.image_unlabelled"
 
 
@@ -487,13 +488,13 @@ def test_jobs_refuse_what_cannot_run(pipe, tmp_path):
         pipe.call("jobs.plan", {"kind": "reproject", "options": {"epsg": 32723}})
     assert err.value.data["code"] == "job.reproject.not_georeferenced"
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.plan", {"kind": "mesh"})
+        pipe.call("jobs.plan", {"kind": "mesh", "options": {"survey": "s1"}})
     assert err.value.data["code"] == "job.mesh.no_dense"
     with pytest.raises(RpcError) as err:
         pipe.call("jobs.plan", {"kind": "warp"})
     assert err.value.code == protocol.INVALID_PARAMS
     with pytest.raises(RpcError) as err:
-        pipe.call("jobs.plan", {"kind": "sfm", "options": {"matcher": "psychic"}})
+        pipe.call("jobs.plan", {"kind": "sfm", "options": {"survey": "s1", "matcher": "psychic"}})
     assert err.value.code == protocol.INVALID_PARAMS
     assert pipe.call("jobs.list") == {"jobs": []}
 
@@ -507,8 +508,9 @@ def test_job_arguments_match_the_clis(tmp_path):
     root = make_project(tmp_path / "p.clproj")
     engine = Engine(lambda data: None)
     engine.project = Project.open(root)
-    options = {"ingest": {"folder": str(tmp_path)}, "sfm": {"gpu": True},
-               "georef": {}, "reproject": {"epsg": 32723, "orthometric": True},
+    options = {"ingest": {"survey": "s1", "folder": str(tmp_path)},
+               "sfm": {"survey": "s1", "gpu": True},
+               "georef": {"survey": "s1"}, "reproject": {"epsg": 32723, "orthometric": True},
                # resume: the tiny test photos are too small for a fresh spec
                "train": {"name": "m1", "epochs": 3, "include_auto": True, "resume": True},
                "geoid": {"epsg": 31982}}
@@ -517,8 +519,12 @@ def test_job_arguments_match_the_clis(tmp_path):
     parsed = {}
     for name, opts in options.items():
         kind = KINDS[name]
-        if name == "reproject":                     # georef refuses a georeferenced one
-            engine.project.settings["georeferenced"] = {"frame": "ENU"}
+        if name == "reproject":                     # it needs a frame and an aligned Survey
+            engine.project.settings["georeferenced"] = {
+                "frame": "ENU", "origin_lla": [-30.0, -53.0, 100.0],
+                "origin_convention": "first_gps_image"}
+            engine.project.survey("s1").active.alignment = {
+                "s": 1.0, "R": np.eye(3).tolist(), "t": [0, 0, 0], "source": "gps"}
         plan = kind.prepare(engine, engine.project, opts)
         cli = importlib.import_module(kind.module)
         parsed[name] = cli._parse([kind.module, *plan.args])   # exits on a bad flag
@@ -531,8 +537,9 @@ def test_job_arguments_match_the_clis(tmp_path):
     if "colmap" in parsed:
         assert parsed["colmap"].variant == "nocuda"
         assert parsed["colmap"].stop_file.endswith("colmap_download.stop")
-    assert KINDS["sfm"].prepare(engine, engine.project, {"gpu": True}).gpu is True
-    assert KINDS["sfm"].prepare(engine, engine.project, {}).gpu is False
+    assert KINDS["sfm"].prepare(engine, engine.project,
+                                {"survey": "s1", "gpu": True}).gpu is True
+    assert KINDS["sfm"].prepare(engine, engine.project, {"survey": "s1"}).gpu is False
     assert KINDS["train"].prepare(engine, engine.project, {"resume": True}).gpu is True
     with pytest.raises(Exception) as err:                  # a fresh spec is checked
         KINDS["train"].prepare(engine, engine.project, {})
@@ -550,8 +557,8 @@ def test_native_libraries_load_on_worker_threads(tmp_path):
     try:
         client.call("project.open", {"root": str(root)})
         mask = np.zeros((H, W), np.int32)
-        client.call("image.save_mask", {"name": "a.png", "mask": put_array(root, "a", mask)})
-        out = client.call("transfer.propagate", {"name": "a.png"}, timeout=60)
+        client.call("image.save_mask", {"survey": "s1", "name": "a.png", "mask": put_array(root, "a", mask)})
+        out = client.call("transfer.propagate", {"survey": "s1", "name": "a.png"}, timeout=60)
         assert out["cloud"] == "sparse"
     finally:
         assert client.close() == 0
@@ -568,13 +575,14 @@ def test_autosave_runs_while_requests_keep_coming(tmp_path):
     try:
         client.call("project.open", {"root": str(root)})
         idx = put_array(root, "idx", np.arange(10, dtype=np.int32))
-        client.call("cloud.paint", {"cloud": "sparse", "class_id": 0, "indices": idx})
+        client.call("cloud.paint", {"survey": "s1", "cloud": "sparse", "class_id": 0, "indices": idx})
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:                 # never idle for 0.3 s
             client.call("engine.hello")
             time.sleep(0.05)
         assert client.call("project.state")["dirty"] is False
-        assert (np.load(root / "labels" / "cloud_labels.npy")[:10] == 0).all()
+        labels = root / "surveys" / "s1" / "reconstructions" / "r1" / "labels" / "sparse.npy"
+        assert (np.load(labels)[:10] == 0).all()
     finally:
         client.close()
 
@@ -626,15 +634,16 @@ def test_plan_says_how_to_run_and_finish_applies(pipe, tmp_path):
     assert plan["log"].endswith("predict.log") and plan["stop_file"] is None
     assert pipe.call("jobs.list") == {"jobs": [plan]}
 
-    result_line = json.dumps({"predicted": ["b.png"]})
+    predicted = [{"survey": "s1", "name": "b.png"}]
+    result_line = json.dumps({"predicted": predicted})
     done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0,
                                      "results": {"RESULT": result_line}})
     assert done == {"plan": plan["plan"], "kind": "predict", "ok": True,
-                    "result": {"predicted": ["b.png"]}, "stopped": False}
-    statuses = {i["name"]: i["status"] for i in pipe.call("project.state")["images"]}
+                    "result": {"predicted": predicted}, "stopped": False}
+    statuses = {i["name"]: i["status"] for i in pipe.call("project.state")["surveys"][0]["images"]}
     assert statuses["b.png"] == "ml"
     assert any(n["params"].get("images") == ["b.png"] for n in pipe.drained("project.changed"))
-    assert Project.open(root).labels.status_of("b.png") == "ml"   # persisted
+    assert Project.open(root).survey("s1").labels.status_of("b.png") == "ml"   # persisted
     assert pipe.call("jobs.list") == {"jobs": []}
 
 
@@ -649,13 +658,13 @@ def test_outstanding_plans_guard_the_project(pipe, tmp_path):
     with pytest.raises(RpcError) as err:
         pipe.call("project.close")
     assert err.value.data["code"] == "project.jobs_running"
-    other = pipe.call("jobs.plan", {"kind": "georef"})       # another group is fine
+    other = pipe.call("jobs.plan", {"kind": "georef", "options": {"survey": "s1"}})       # another group is fine
     pipe.call("jobs.finish", {"plan": other["plan"], "exit": None})
 
     done = pipe.call("jobs.finish", {"plan": plan, "exit": 3})
     assert done["ok"] is False and done["error"]["code"] == "job.failed"
     assert done["error"]["params"]["exit"] == 3
-    assert pipe.call("project.state")["images"][1]["status"] == "none"   # nothing applied
+    assert pipe.call("project.state")["surveys"][0]["images"][1]["status"] == "none"   # nothing applied
     with pytest.raises(RpcError) as err:
         pipe.call("jobs.finish", {"plan": plan, "exit": 0})
     assert err.value.data["code"] == "job.unknown_plan"
@@ -665,10 +674,10 @@ def test_outstanding_plans_guard_the_project(pipe, tmp_path):
 def test_finish_reports_lost_and_cancelled_jobs(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    plan = pipe.call("jobs.plan", {"kind": "georef"})["plan"]
+    plan = pipe.call("jobs.plan", {"kind": "georef", "options": {"survey": "s1"}})["plan"]
     lost = pipe.call("jobs.finish", {"plan": plan, "exit": None})
     assert lost["error"]["code"] == "job.lost"
-    plan = pipe.call("jobs.plan", {"kind": "georef"})["plan"]
+    plan = pipe.call("jobs.plan", {"kind": "georef", "options": {"survey": "s1"}})["plan"]
     killed = pipe.call("jobs.finish", {"plan": plan, "exit": 1, "cancelled": True})
     assert killed["error"]["code"] == "job.cancelled"
     with pytest.raises(RpcError) as err:
@@ -703,7 +712,7 @@ def _staged_engine(tmp_path, monkeypatch, *, binary, cuda):
     monkeypatch.setattr(jobs, "_pycolmap_has_cuda", lambda: cuda)
     root = make_project(tmp_path / "p.clproj")
     proj = Project.open(root)
-    save_cloud_npz(PointCloud(xyz=np.zeros((10, 3), np.float32)), proj.dense_cloud_path)
+    save_cloud_npz(PointCloud(xyz=np.zeros((10, 3), np.float32)), (product_dir(proj, "mvs") / "dense.npz"))
     engine = Engine(lambda data: None)
     engine.project = Project.open(root)
     return engine
@@ -720,12 +729,15 @@ def test_plans_name_the_dirs_to_stage(tmp_path, monkeypatch):
     engine = _staged_engine(tmp_path, monkeypatch, binary=None, cuda=True)
     project = engine.project
     root = Path(project.root)
-    expected = {"sfm": {"in": ["images", "reconstruction"], "out": ["reconstruction"]},
-                "mvs": {"in": ["images", "reconstruction"], "out": ["reconstruction"]},
-                "mesh": {"in": ["reconstruction"], "out": ["products"]}}
+    s = "surveys/s1"
+    expected = {"sfm": {"in": [f"{s}/images", f"{s}/products/sfm-1"],
+                        "out": [f"{s}/products/sfm-1"]},
+                "mvs": {"in": [f"{s}/images", f"{s}/products/sfm-1", f"{s}/products/mvs-1"],
+                        "out": [f"{s}/products/mvs-1"]},
+                "mesh": {"in": [f"{s}/products/mvs-1"], "out": [f"{s}/products/mesh-1"]}}
     for name, stage in expected.items():
         kind = KINDS[name]
-        plan = kind.prepare(engine, project, {})
+        plan = kind.prepare(engine, project, {"survey": "s1"})
         described = Outstanding(1, kind, plan, project).describe()
         assert described["stage"] == stage, name
         dirs = [root / d for d in stage["in"] + stage["out"]]
@@ -733,7 +745,8 @@ def test_plans_name_the_dirs_to_stage(tmp_path, monkeypatch):
             if arg.startswith(str(root)):
                 assert any(Path(arg).is_relative_to(d) for d in dirs), (name, arg)
         importlib.import_module(kind.module)._parse([kind.module, *plan.args])
-    for name, opts in {"georef": {}, "ingest": {"folder": str(tmp_path)}}.items():
+    for name, opts in {"georef": {"survey": "s1"},
+                       "ingest": {"survey": "s1", "folder": str(tmp_path)}}.items():
         plan = KINDS[name].prepare(engine, project, opts)
         assert Outstanding(1, KINDS[name], plan, project).describe()["stage"] is None
 
@@ -741,8 +754,9 @@ def test_plans_name_the_dirs_to_stage(tmp_path, monkeypatch):
 def test_plan_over_the_pipe_carries_stage(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    plan = pipe.call("jobs.plan", {"kind": "sfm"})
-    assert plan["stage"] == {"in": ["images", "reconstruction"], "out": ["reconstruction"]}
+    plan = pipe.call("jobs.plan", {"kind": "sfm", "options": {"survey": "s1"}})
+    assert plan["stage"] == {"in": ["surveys/s1/images", "surveys/s1/products/sfm-1"],
+                             "out": ["surveys/s1/products/sfm-1"]}
     pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 1})
     _fake_model(root)
     plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
@@ -754,12 +768,12 @@ def test_mvs_runs_on_a_cuda_pycolmap_without_colmap_exe(tmp_path, monkeypatch):
     from cloudlabeller.engine.protocol import Problem
 
     engine = _staged_engine(tmp_path, monkeypatch, binary=None, cuda=True)
-    plan = KINDS["mvs"].prepare(engine, engine.project, {})
+    plan = KINDS["mvs"].prepare(engine, engine.project, {"survey": "s1"})
     assert plan.gpu and "--colmap-binary" not in plan.args
 
     engine = _staged_engine(tmp_path / "cpu", monkeypatch, binary=None, cuda=False)
     with pytest.raises(Problem) as err:
-        KINDS["mvs"].prepare(engine, engine.project, {})
+        KINDS["mvs"].prepare(engine, engine.project, {"survey": "s1"})
     assert err.value.code == "job.mvs.no_colmap"
 
 
@@ -769,11 +783,11 @@ def test_delaunay_mesh_needs_colmap_exe(tmp_path, monkeypatch):
 
     engine = _staged_engine(tmp_path, monkeypatch, binary=None, cuda=True)
     with pytest.raises(Problem) as err:
-        KINDS["mesh"].prepare(engine, engine.project, {"method": "delaunay"})
+        KINDS["mesh"].prepare(engine, engine.project, {"survey": "s1", "method": "delaunay"})
     assert err.value.code == "job.mesh.no_delaunay"
-    assert KINDS["mesh"].prepare(engine, engine.project, {}).args[2:4] == [
+    assert KINDS["mesh"].prepare(engine, engine.project, {"survey": "s1"}).args[2:4] == [
         "--method", "poisson"]
 
     engine = _staged_engine(tmp_path / "exe", monkeypatch, binary="colmap.exe", cuda=False)
-    plan = KINDS["mesh"].prepare(engine, engine.project, {"method": "delaunay"})
+    plan = KINDS["mesh"].prepare(engine, engine.project, {"survey": "s1", "method": "delaunay"})
     assert plan.args[-2:] == ["--colmap-binary", "colmap.exe"]

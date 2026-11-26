@@ -25,9 +25,16 @@ JSON-able result, or a :class:`Deferred` for work that takes a while. The
 handlers carry over what the 0.2.x Qt window decided around each action (which
 images a transfer reads, what a status change persists), not any UI.
 
-Persistence is as it was in the 0.2.x Qt app: a status change writes ``project.json`` at
-once; a painted image mask is written at once; other label arrays are marked
-dirty and saved within a minute, on ``project.save`` and on close.
+Every method about photos, clouds or the mesh names its Survey (``survey``)
+and works on that Survey's active Reconstruction. Geometry sent to the
+window is in the Project frame (the Reconstruction's Alignment applied);
+transfers work in the Reconstruction's own frame, where cameras and clouds
+agree.
+
+Persistence is as it was in the 0.2.x Qt app: a status change writes the
+manifests at once; a painted image mask is written at once; other label
+arrays are marked dirty and saved within a minute, on ``project.save`` and
+on close.
 """
 
 from __future__ import annotations
@@ -67,6 +74,39 @@ def engine_cancel(engine: Engine, params: dict) -> dict:
     return {"cancelled": engine.cancel_request(req_id)}
 
 
+# -- surveys ------------------------------------------------------------------
+def _survey(engine: Engine, params: dict):
+    """The Survey a request names (``survey``), loaded."""
+    sid = require(params, "survey", str)
+    project = engine.require_project()
+    if sid not in project.surveys:
+        raise Problem("survey.not_found", "No Survey has that id.", survey=sid)
+    return project.survey(sid)
+
+
+def survey_state(survey) -> dict:
+    ds, lb = survey.dataset, survey.labels
+    rec = survey.active
+    return {
+        "id": survey.id, "name": survey.name, "timestamp": survey.timestamp,
+        "operator": survey.operator, "camera": survey.camera, "notes": survey.notes,
+        "images": [{"name": r.name, "status": lb.status_of(r.name),
+                    "solved": r.camera is not None,
+                    "user_mask": r.name in lb.image_masks}
+                   for r in ds.images],
+        "reconstruction": survey.reconstruction_status(),
+        "active": rec.id if rec is not None else None,
+        "aligned": survey.aligned,
+        "sparse": ds.cloud.n_points if ds.cloud is not None else None,
+        "dense": ds.dense_cloud.n_points if ds.dense_cloud is not None else None,
+        "mesh": ({"vertices": len(ds.mesh.vertices), "faces": len(ds.mesh.faces)}
+                 if ds.mesh is not None else None),
+        "source_resolution": survey.source_resolution(cache=False),
+        "can_undo": lb.can_undo(),
+        "can_redo": lb.can_redo(),
+    }
+
+
 # -- project ------------------------------------------------------------------
 def _schema(project) -> list[dict]:
     return [{"id": c.id, "name": c.name, "color": c.color, "hotkey": c.hotkey}
@@ -75,23 +115,11 @@ def _schema(project) -> list[dict]:
 
 def project_state(engine: Engine) -> dict:
     project = engine.require_project()
-    ds, lb = project.dataset, project.labels
     return {
         "root": str(project.root),
         "schema": _schema(project),
-        "images": [{"name": r.name, "status": lb.status_of(r.name),
-                    "solved": r.camera is not None,
-                    "user_mask": r.name in lb.image_masks}
-                   for r in ds.images],
-        "reconstruction": project.reconstruction_status(),
-        "sparse": ds.cloud.n_points if ds.cloud is not None else None,
-        "dense": ds.dense_cloud.n_points if ds.dense_cloud is not None else None,
-        "mesh": ({"vertices": len(ds.mesh.vertices), "faces": len(ds.mesh.faces)}
-                 if ds.mesh is not None else None),
-        "georeferenced": project.settings.get("georeferenced"),
-        "source_resolution": project.source_resolution(cache=False),
-        "can_undo": lb.can_undo(),
-        "can_redo": lb.can_redo(),
+        "surveys": [survey_state(project.survey(sid)) for sid in project.surveys],
+        "georeferenced": project.frame,
         "dirty": engine.dirty,
     }
 
@@ -118,14 +146,17 @@ def project_create(engine: Engine, params: dict) -> dict:
 
 @method("project.open", needs_project=False)
 def project_open(engine: Engine, params: dict) -> dict:
-    from cloudlabeller.core.project import MANIFEST, Project
+    from cloudlabeller.core.project import MANIFEST, Project, ProjectFormatError
 
     root = Path(require(params, "root", str))
     if not (root / MANIFEST).is_file():
         raise Problem("project.not_found", "No Project there.", root=str(root))
     _no_outstanding_jobs(engine)
     engine.close_project()
-    engine.project = Project.open(root)
+    try:
+        engine.project = Project.open(root)
+    except ProjectFormatError as exc:
+        raise Problem("project.format", str(exc), root=str(root)) from exc
     arrays.clear(root)
     return project_state(engine)
 
@@ -196,15 +227,17 @@ def schema_set_color(engine: Engine, params: dict) -> dict:
 def schema_delete(engine: Engine, params: dict) -> dict:
     """Delete a class: its points and pixels become unlabelled, higher ids
     shift down by one, and the undo history is cleared."""
-    engine.project.delete_label(_class_id(engine, params))
+    project = engine.project
+    project.delete_label(_class_id(engine, params))
     engine.dirty = True
     result = _schema_changed(engine)
-    engine.changed("labels", images=engine.project.labels.image_masks)
+    for sid, survey in project.surveys.items():
+        engine.changed("labels", survey=sid, images=survey.labels.image_masks)
     return result
 
 
 # -- undo / redo -------------------------------------------------------------------
-def _after_history(engine: Engine, changed) -> dict:
+def _after_history(engine: Engine, survey, changed) -> dict:
     from cloudlabeller.core.labels import Modality
 
     if changed is None:
@@ -212,33 +245,36 @@ def _after_history(engine: Engine, changed) -> dict:
     modality, key = changed
     engine.dirty = True
     if modality is Modality.IMAGE and key:
-        engine.changed("labels", images=[key])
+        engine.changed("labels", survey=survey.id, images=[key])
     else:
-        engine.changed("labels")
-        sync_mesh_labels(engine)
+        engine.changed("labels", survey=survey.id)
+        sync_mesh_labels(engine, survey)
     return {"changed": {"modality": modality.value, "image": key}}
 
 
 @method("labels.undo")
 def labels_undo(engine: Engine, params: dict) -> dict:
-    return _after_history(engine, engine.project.labels.undo())
+    survey = _survey(engine, params)
+    return _after_history(engine, survey, survey.labels.undo())
 
 
 @method("labels.redo")
 def labels_redo(engine: Engine, params: dict) -> dict:
-    return _after_history(engine, engine.project.labels.redo())
+    survey = _survey(engine, params)
+    return _after_history(engine, survey, survey.labels.redo())
 
 
 # -- images ------------------------------------------------------------------------
-def _image(engine: Engine, params: dict):
+def _image(survey, params: dict):
     name = require(params, "name", str)
-    record = engine.project.dataset.image_by_name(name)
+    record = survey.dataset.image_by_name(name)
     if record is None:
-        raise Problem("image.not_found", "No image has that name.", name=name)
+        raise Problem("image.not_found", "No image has that name.", name=name,
+                      survey=survey.id)
     return record
 
 
-def _image_size(engine: Engine, record) -> tuple[int, int]:
+def _image_size(record) -> tuple[int, int]:
     """(height, width) of an image: its camera, else its file header."""
     if record.camera is not None:
         return int(record.camera.height), int(record.camera.width)
@@ -252,18 +288,20 @@ def _image_size(engine: Engine, record) -> tuple[int, int]:
 def image_mask(engine: Engine, params: dict) -> dict:
     """The mask to show over a photo: the user's own, else the U-Net's
     prediction or the cloud's projection (``source`` says which)."""
-    record = _image(engine, params)
-    project, name = engine.project, record.name
-    mask = project.labels.image_masks.get(name)
+    survey = _survey(engine, params)
+    record = _image(survey, params)
+    name = record.name
+    mask = survey.labels.image_masks.get(name)
     source = "user" if mask is not None else None
     if mask is None:
-        mask = project.render_auto_mask(name)
+        mask = survey.render_auto_mask(name)
         if mask is not None:
-            source = "ml" if project.labels.status_of(name) == "ml" else "auto"
+            source = "ml" if survey.labels.status_of(name) == "ml" else "auto"
     if mask is None:
         return {"source": None, "mask": None}
     return {"source": source,
-            "mask": arrays.write(project.root, f"mask/{name}", mask.astype(np.int32))}
+            "mask": arrays.write(engine.project.root, f"mask/{survey.id}/{name}",
+                                 mask.astype(np.int32))}
 
 
 @method("image.save_mask")
@@ -273,9 +311,10 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     The window sends the whole mask, already seeded from whatever overlay it
     showed; only the pixels that differ are recorded for undo.
     """
-    record = _image(engine, params)
+    survey = _survey(engine, params)
+    record = _image(survey, params)
     project, name = engine.project, record.name
-    h, w = _image_size(engine, record)
+    h, w = _image_size(record)
     new = arrays.read(project.root, require(params, "mask", dict), dtype="int32", ndim=2)
     if new.shape != (h, w):
         raise Problem("image.mask_shape", "The mask is not the photo's size.",
@@ -284,7 +323,7 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     if new.size and (new.min() < UNLABELLED_ID or new.max() >= n_classes):
         raise Problem("image.mask_values", "The mask holds ids outside the schema.",
                       n_classes=n_classes)
-    labels = project.labels
+    labels = survey.labels
     if name not in labels.image_masks:
         labels.init_image(name, h, w)
     old = labels.image_masks[name]
@@ -292,9 +331,9 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     if changed.size:
         labels.paint_image(name, changed, new.reshape(-1)[changed])
     labels.mark_user_labeled(name)
-    project.save_image_mask(name)
-    project.save_manifest()
-    engine.changed("labels", "status", images=[name])
+    survey.save_mask(name)
+    survey.save_manifest()
+    engine.changed("labels", "status", survey=survey.id, images=[name])
     return {"changed_pixels": int(changed.size), "status": labels.status_of(name)}
 
 
@@ -306,16 +345,31 @@ def _which(params: dict) -> str:
     return which
 
 
-def _cloud(engine: Engine, which: str):
-    ds = engine.project.dataset
+def _cloud(survey, which: str):
+    ds = survey.dataset
     cloud = ds.cloud if which == "sparse" else ds.dense_cloud
     if cloud is None:
-        raise Problem("cloud.none", "That cloud doesn't exist yet.", cloud=which)
+        raise Problem("cloud.none", "That cloud doesn't exist yet.", cloud=which,
+                      survey=survey.id)
     return cloud
 
 
-def _cloud_labels(engine: Engine, which: str, n: int) -> np.ndarray:
-    lb = engine.project.labels
+def framed_xyz(engine: Engine, survey, which: str) -> np.ndarray:
+    """A cloud's points in the Project frame (cached for this cloud and
+    Alignment)."""
+    cloud = _cloud(survey, which)
+    rec = survey.active
+    key = ("framed", survey.id, which)
+    cached = engine.cache.get(key)
+    if cached is not None and cached[0] is cloud and cached[1] == rec.alignment:
+        return cached[2]
+    xyz = rec.frame_points(cloud.xyz)
+    engine.cache[key] = (cloud, rec.alignment, xyz)
+    return xyz
+
+
+def _cloud_labels(survey, which: str, n: int) -> np.ndarray:
+    lb = survey.labels
     labels = lb.cloud_labels if which == "sparse" else lb.dense_cloud_labels
     if labels is None or len(labels) != n:
         if which == "sparse":
@@ -328,30 +382,33 @@ def _cloud_labels(engine: Engine, which: str, n: int) -> np.ndarray:
 
 @method("cloud.points")
 def cloud_points(engine: Engine, params: dict) -> dict:
+    survey = _survey(engine, params)
     which = _which(params)
-    cloud = _cloud(engine, which)
-    root = engine.project.root
+    cloud = _cloud(survey, which)
+    root, base = engine.project.root, f"cloud/{survey.id}/{which}"
     return {"cloud": which, "n_points": cloud.n_points,
-            "xyz": arrays.write(root, f"cloud/{which}/xyz", cloud.xyz.astype(np.float32)),
-            "rgb": (arrays.write(root, f"cloud/{which}/rgb", cloud.rgb.astype(np.uint8))
+            "xyz": arrays.write(root, f"{base}/xyz", framed_xyz(engine, survey, which)),
+            "rgb": (arrays.write(root, f"{base}/rgb", cloud.rgb.astype(np.uint8))
                     if cloud.rgb is not None else None)}
 
 
 @method("cloud.labels")
 def cloud_labels(engine: Engine, params: dict) -> dict:
+    survey = _survey(engine, params)
     which = _which(params)
-    cloud = _cloud(engine, which)
-    labels = _cloud_labels(engine, which, cloud.n_points)
+    cloud = _cloud(survey, which)
+    labels = _cloud_labels(survey, which, cloud.n_points)
     return {"cloud": which,
-            "labels": arrays.write(engine.project.root, f"cloud/{which}/labels",
+            "labels": arrays.write(engine.project.root, f"cloud/{survey.id}/{which}/labels",
                                    labels.astype(np.int32))}
 
 
 @method("cloud.paint")
 def cloud_paint(engine: Engine, params: dict) -> dict:
     """Give the chosen points one class (the lasso): one undoable edit."""
+    survey = _survey(engine, params)
     which = _which(params)
-    cloud = _cloud(engine, which)
+    cloud = _cloud(survey, which)
     class_id = require(params, "class_id", int)
     if not UNLABELLED_ID <= class_id < len(engine.project.schema.classes):
         raise Problem("schema.no_class", "No class has that id.", id=class_id)
@@ -362,75 +419,83 @@ def cloud_paint(engine: Engine, params: dict) -> dict:
     if indices.size and (indices.min() < 0 or indices.max() >= cloud.n_points):
         raise Problem("cloud.bad_indices", "Some indices are outside the cloud.",
                       n_points=cloud.n_points)
-    _cloud_labels(engine, which, cloud.n_points)
-    lb = engine.project.labels
+    _cloud_labels(survey, which, cloud.n_points)
+    lb = survey.labels
     if indices.size:
         if which == "sparse":
             lb.paint_cloud(indices, class_id)
         else:
             lb.paint_dense_cloud(indices, class_id)
         engine.dirty = True
-        engine.changed("labels")
+        engine.changed("labels", survey=survey.id)
         if which == "dense":
-            sync_mesh_labels(engine)
+            sync_mesh_labels(engine, survey)
     return {"painted": int(indices.size)}
+
+
+def _mesh(survey):
+    mesh = survey.dataset.mesh
+    if mesh is None:
+        raise Problem("mesh.none", "There is no mesh yet.", survey=survey.id)
+    return mesh
 
 
 @method("mesh.geometry")
 def mesh_geometry(engine: Engine, params: dict) -> dict:
-    mesh = engine.project.dataset.mesh
-    if mesh is None:
-        raise Problem("mesh.none", "There is no mesh yet.")
-    root = engine.project.root
-    return {"vertices": arrays.write(root, "mesh/vertices", mesh.vertices.astype(np.float32)),
-            "faces": arrays.write(root, "mesh/faces", mesh.faces.astype(np.int32)),
-            "colors": (arrays.write(root, "mesh/colors", mesh.vertex_colors.astype(np.uint8))
+    survey = _survey(engine, params)
+    mesh = _mesh(survey)
+    root, base = engine.project.root, f"mesh/{survey.id}"
+    vertices = survey.active.frame_points(mesh.vertices)
+    return {"vertices": arrays.write(root, f"{base}/vertices", vertices),
+            "faces": arrays.write(root, f"{base}/faces", mesh.faces.astype(np.int32)),
+            "colors": (arrays.write(root, f"{base}/colors",
+                                    mesh.vertex_colors.astype(np.uint8))
                        if mesh.vertex_colors is not None else None)}
 
 
 @method("mesh.labels")
 def mesh_labels(engine: Engine, params: dict) -> dict:
-    mesh = engine.project.dataset.mesh
-    if mesh is None:
-        raise Problem("mesh.none", "There is no mesh yet.")
-    labels = engine.project.labels.mesh_labels
+    survey = _survey(engine, params)
+    mesh = _mesh(survey)
+    labels = survey.labels.mesh_labels
     if labels is None or len(labels) != len(mesh.vertices):
         labels = np.full(len(mesh.vertices), UNLABELLED_ID, np.int32)
-    return {"labels": arrays.write(engine.project.root, "mesh/labels", labels.astype(np.int32))}
+    return {"labels": arrays.write(engine.project.root, f"mesh/{survey.id}/labels",
+                                   labels.astype(np.int32))}
 
 
-def sync_mesh_labels(engine: Engine) -> None:
+def sync_mesh_labels(engine: Engine, survey) -> None:
     """Recompute the mesh's labels from the dense cloud (nearest point), in
     the background. Called whenever the dense labels or the mesh change."""
-    project = engine.project
-    mesh, dense = project.dataset.mesh, project.dataset.dense_cloud
+    mesh, dense = survey.dataset.mesh, survey.dataset.dense_cloud
     if mesh is None or dense is None:
         return
-    labels = project.labels.dense_cloud_labels
+    labels = survey.labels.dense_cloud_labels
     if labels is None or len(labels) != dense.n_points or not (labels != UNLABELLED_ID).any():
-        project.labels.mesh_labels = np.full(len(mesh.vertices), UNLABELLED_ID, np.int32)
+        survey.labels.mesh_labels = np.full(len(mesh.vertices), UNLABELLED_ID, np.int32)
         engine.dirty = True
-        engine.changed("labels")
+        engine.changed("labels", survey=survey.id)
         return
     from cloudlabeller.transfer.mesh_cloud import cloud_to_mesh
 
     snapshot = labels.copy()
-    cache = project.mesh_nn_cache_path
+    cache = survey.mesh_nn_cache_path
+    cache.parent.mkdir(parents=True, exist_ok=True)
 
     def finish(mesh_labels) -> None:
-        if project.dataset.mesh is mesh:
-            project.labels.mesh_labels = mesh_labels
+        if survey.dataset.mesh is mesh:
+            survey.labels.mesh_labels = mesh_labels
             engine.dirty = True
-            engine.changed("labels")
+            engine.changed("labels", survey=survey.id)
 
     engine.run_background(lambda: cloud_to_mesh(dense, snapshot, mesh, cache_path=cache),
                           finish)
 
 
 # -- transfers -----------------------------------------------------------------------
-def _labelled_source(project):
+def _labelled_source(survey):
     """The cloud whose labels are projected onto photos: dense when labelled."""
-    ds, lb = project.dataset, project.labels
+    ds, lb = survey.dataset, survey.labels
     if (ds.dense_cloud is not None and lb.dense_cloud_labels is not None
             and len(lb.dense_cloud_labels) == ds.dense_cloud.n_points
             and (lb.dense_cloud_labels != UNLABELLED_ID).any()):
@@ -440,11 +505,11 @@ def _labelled_source(project):
     return None
 
 
-def _mark_auto(engine: Engine, counts: dict, min_px: int) -> list[str]:
+def _mark_auto(survey, counts: dict, min_px: int) -> list[str]:
     marked = [name for name, n_px in counts.items() if n_px >= min_px]
     for name in marked:
-        engine.project.labels.mark_auto_labeled(name)
-    engine.project.save_manifest()
+        survey.labels.mark_auto_labeled(name)
+    survey.save_manifest()
     return marked
 
 
@@ -460,13 +525,13 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
     from cloudlabeller.transfer import images_to_cloud
     from cloudlabeller.transfer.project_to_cloud import MaskSource
 
-    project = engine.project
-    ds, labels = project.dataset, project.labels
+    survey = _survey(engine, params)
+    ds, labels = survey.dataset, survey.labels
     if ds.cloud is None:
         raise Problem("transfer.no_cloud", "Run SfM first.")
     include_auto = optional(params, "include_auto", bool, True)
     masks = dict(labels.image_masks)
-    n_classes = len(project.schema.classes)
+    n_classes = len(engine.project.schema.classes)
     n_user = sum(1 for m in masks.values() if (m != UNLABELLED_ID).any())
     auto_names = [r.name for r in ds.solved_images()
                   if r.name not in masks and labels.status_of(r.name) in ("auto", "ml")]
@@ -477,18 +542,18 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
     pure_auto = [n for n in auto_names if labels.status_of(n) == "auto"]
     ml_names = [n for n in auto_names if labels.status_of(n) == "ml"]
     sparse, dense = ds.cloud, ds.dense_cloud
-    vis = project.visibility_index()
+    vis = survey.visibility_index()
     hard = set(masks)
 
     def work(progress):
         selected = auto_names
         if pure_auto:
-            adj = project.image_adjacency()
+            adj = survey.image_adjacency()
             if adj is not None:
                 from cloudlabeller.photogrammetry.adjacency import select_covering
 
                 selected = ml_names + select_covering(pure_auto, adj)
-        source = MaskSource(masks, selected, project.render_auto_mask)
+        source = MaskSource(masks, selected, survey.render_auto_mask)
         progress(0.0, f"Transferring labels from {n_user + len(selected)} images")
         out = {"images": n_user + len(selected)}
         out["sparse"] = images_to_cloud(
@@ -509,8 +574,8 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
         if "dense" in out:
             result["dense"] = labels.merge_cloud_labels(out["dense"], dense=True)
         engine.dirty = True
-        engine.changed("labels")
-        sync_mesh_labels(engine)
+        engine.changed("labels", survey=survey.id)
+        sync_mesh_labels(engine, survey)
         return result
 
     return Deferred(work, finish)
@@ -523,16 +588,16 @@ def transfer_cloud_to_images(engine: Engine, params: dict) -> Deferred:
     are rendered from the cloud on request (``image.mask``)."""
     from cloudlabeller.transfer import cloud_to_image
 
-    project = engine.project
-    if project.dataset.cloud is None:
+    survey = _survey(engine, params)
+    if survey.dataset.cloud is None:
         raise Problem("transfer.no_cloud", "Run SfM first.")
-    source = _labelled_source(project)
+    source = _labelled_source(survey)
     if source is None:
         raise Problem("transfer.cloud_unlabelled", "Label the cloud first.")
     kind, cloud, cloud_labels_ = source
-    targets = [(r.name, r.camera) for r in project.dataset.solved_images()
-               if project.labels.status_of(r.name) != "user"]
-    vis = project.visibility_index()
+    targets = [(r.name, r.camera) for r in survey.dataset.solved_images()
+               if survey.labels.status_of(r.name) != "user"]
+    vis = survey.visibility_index()
 
     def work(progress):
         counts = {}
@@ -543,8 +608,8 @@ def transfer_cloud_to_images(engine: Engine, params: dict) -> Deferred:
         return counts
 
     def finish(counts):
-        marked = _mark_auto(engine, counts, 1)
-        engine.changed("status", images=counts)
+        marked = _mark_auto(survey, counts, 1)
+        engine.changed("status", survey=survey.id, images=counts)
         return {"cloud": kind, "auto_labelled": marked}
 
     return Deferred(work, finish)
@@ -560,9 +625,10 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
     from cloudlabeller.core.dataset import Dataset
     from cloudlabeller.transfer import cloud_to_image, images_to_cloud
 
-    record = _image(engine, params)
-    project, name = engine.project, record.name
-    labels, ds = project.labels, project.dataset
+    survey = _survey(engine, params)
+    record = _image(survey, params)
+    name = record.name
+    labels, ds = survey.labels, survey.dataset
     mask = labels.image_masks.get(name)
     if mask is None or not (mask != UNLABELLED_ID).any():
         raise Problem("transfer.image_unlabelled", "That photo has no labels.", name=name)
@@ -573,15 +639,15 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
     if cloud is None:
         raise Problem("transfer.no_cloud", "Run SfM first.")
     kind = "dense" if cloud is ds.dense_cloud else "sparse"
-    n_classes = len(project.schema.classes)
+    n_classes = len(engine.project.schema.classes)
     targets = [(r.name, r.camera) for r in ds.solved_images()
                if r.name != name and labels.status_of(r.name) != "user"]
-    vis = project.visibility_index()
+    vis = survey.visibility_index()
     mask = mask.copy()
 
     def work(progress):
         progress(0.0, f"Finding images overlapping {name}")
-        overlap = project.overlapping_images(name)
+        overlap = survey.overlapping_images(name)
         cand = targets if overlap is None else [t for t in targets if t[0] in overlap]
         temp = images_to_cloud(cloud, Dataset(images=[record]), {name: mask},
                                n_classes, visibility=vis)
@@ -595,12 +661,12 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
 
     def finish(out):
         n = labels.merge_cloud_labels(out["labels"], dense=(kind == "dense"))
-        marked = _mark_auto(engine, out["counts"], PROPAGATE_MIN_PX)
+        marked = _mark_auto(survey, out["counts"], PROPAGATE_MIN_PX)
         if n:
             engine.dirty = True
-            engine.changed("labels")
-            sync_mesh_labels(engine)
-        engine.changed("status", images=out["counts"])
+            engine.changed("labels", survey=survey.id)
+            sync_mesh_labels(engine, survey)
+        engine.changed("status", survey=survey.id, images=out["counts"])
         return {"cloud": kind, "points": n, "auto_labelled": marked}
 
     return Deferred(work, finish)
@@ -677,23 +743,27 @@ def jobs_list(engine: Engine, params: dict) -> dict:
 
 @method("jobs.facts")
 def jobs_facts(engine: Engine, params: dict) -> Deferred:
-    """What a Job's dialog shows before planning it (GPS, GPU, depth, counts)."""
+    """What a Job's dialog shows before planning it (GPS, GPU, depth, counts).
+    ``survey`` is needed for sfm, mvs and mesh."""
     from cloudlabeller.engine.jobs import facts
 
-    work, finish = facts(engine, engine.project, require(params, "kind", str))
+    kind_name = require(params, "kind", str)
+    survey = _survey(engine, params) if kind_name in ("sfm", "mvs", "mesh") else None
+    work, finish = facts(engine, engine.project, kind_name, survey)
     return Deferred(work, finish)
 
 
 # -- ingest -------------------------------------------------------------------------
 @method("ingest.conflicts")
 def ingest_conflicts(engine: Engine, params: dict) -> dict:
-    """The photos in a folder whose names are already in the image store."""
+    """The photos in a folder whose names are already in the Survey's photos."""
     from cloudlabeller.core.images import find_conflicts
 
+    survey = _survey(engine, params)
     folder = require(params, "folder", str)
     if not Path(folder).is_dir():
         raise Problem("job.ingest.no_folder", "The folder does not exist.", folder=folder)
-    return {"conflicts": find_conflicts(folder, engine.project.images_dir)}
+    return {"conflicts": find_conflicts(folder, survey.images_dir)}
 
 
 # -- models -------------------------------------------------------------------------

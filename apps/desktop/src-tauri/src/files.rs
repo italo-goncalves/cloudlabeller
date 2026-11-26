@@ -50,8 +50,19 @@ fn key(p: &Path) -> PathBuf {
     PathBuf::from(if cfg!(windows) { s.to_lowercase() } else { s })
 }
 
-/// `name` as a photo of the Project at `root`: one plain file name in `images/`.
-pub fn photo_path(root: &Path, name: &str) -> Result<PathBuf, Problem> {
+/// A Survey's id: lowercase ASCII letters, digits and `-` (`s1`, `s12`).
+fn survey_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `name` as a photo of Survey `survey` of the Project at `root`: one plain
+/// file name in `surveys/<survey>/images/`.
+pub fn photo_path(root: &Path, survey: &str, name: &str) -> Result<PathBuf, Problem> {
+    if !survey_id_ok(survey) {
+        return Err(Problem::new("photo.bad_survey", "Not a Survey's id.").with("survey", survey.to_string()));
+    }
     let ok = !name.is_empty()
         && name != "."
         && name != ".."
@@ -59,7 +70,7 @@ pub fn photo_path(root: &Path, name: &str) -> Result<PathBuf, Problem> {
         && !name.ends_with(' ')
         && !name.chars().any(|c| matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 0x20);
     if ok {
-        Ok(root.join("images").join(name))
+        Ok(root.join("surveys").join(survey).join("images").join(name))
     } else {
         Err(Problem::new("photo.bad_name", "Not a photo's name.").with("name", name.to_string()))
     }
@@ -72,11 +83,11 @@ pub struct Filter {
     pub extensions: Vec<String>,
 }
 
-/// A photo of the open Project, as its file's bytes.
+/// A photo of a Survey of the open Project, as its file's bytes.
 #[tauri::command]
-pub fn photo_read(open: State<'_, Open>, name: String) -> Result<Response, Problem> {
+pub fn photo_read(open: State<'_, Open>, survey: String, name: String) -> Result<Response, Problem> {
     let engine = open.engine()?;
-    let file = photo_path(&engine.root, &name)?;
+    let file = photo_path(&engine.root, &survey, &name)?;
     std::fs::read(&file).map(Response::new).map_err(|e| {
         Problem::new("photo.read", "The photo can't be read.")
             .with("name", name.clone())
@@ -230,11 +241,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn photos_are_plain_names_in_images() {
+    fn photos_are_plain_names_in_a_surveys_images() {
         let root = Path::new(r"C:\p");
-        assert_eq!(photo_path(root, "DJI_0001.JPG").unwrap(), root.join("images").join("DJI_0001.JPG"));
+        assert_eq!(
+            photo_path(root, "s1", "DJI_0001.JPG").unwrap(),
+            root.join("surveys").join("s1").join("images").join("DJI_0001.JPG")
+        );
         for bad in ["", "..", "a/b.jpg", r"a\b.jpg", "c:x.jpg", "x.jpg.", "x\u{1}.jpg"] {
-            assert!(photo_path(root, bad).is_err(), "{bad:?}");
+            assert!(photo_path(root, "s1", bad).is_err(), "{bad:?}");
+        }
+        for bad in ["", "..", "S1", "s1/x", r"s1\x", "s 1"] {
+            assert!(photo_path(root, bad, "a.jpg").is_err(), "{bad:?}");
         }
     }
 

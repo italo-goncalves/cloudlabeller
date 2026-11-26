@@ -209,9 +209,9 @@ export async function installUpdate(on: (d: Downloading) => void): Promise<void>
 
 // -- files ----------------------------------------------------------------------
 
-/** A photo of the open Project, as its file's bytes (JPEG, PNG, TIFF…). */
-export function readPhoto(name: string): Promise<ArrayBuffer> {
-  return invoke<ArrayBuffer>("photo_read", { name });
+/** A photo of a Survey of the open Project, as its file's bytes (JPEG, PNG, TIFF…). */
+export function readPhoto(survey: string, name: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("photo_read", { survey, name });
 }
 
 export interface FileFilter {
