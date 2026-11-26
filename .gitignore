@@ -37,3 +37,11 @@ Thumbs.db
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# desktop app (apps/): installs, builds, fetched resources
+node_modules/
+apps/web/dist/
+apps/desktop/resources/
+apps/desktop/publish/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

@@ -41,6 +41,11 @@ dev = [
 [project.scripts]
 cloudlabeller = "cloudlabeller.app:main"
 
+# The repo also holds apps/, tools/, scripts/ and tests/: only the app's own
+# package goes into the wheel the desktop app's Environment installs.
+[tool.setuptools.packages.find]
+include = ["cloudlabeller*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

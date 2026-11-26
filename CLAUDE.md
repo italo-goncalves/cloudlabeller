@@ -52,8 +52,11 @@ Rules:
   anything, and `docs/adr/` before revisiting the 0.3.0 Tauri migration.
 
 - The dev environment is `/c/Python_envs/cloudlabeller/python.exe`
-  (Python 3.10, outside the repo, with an editable install of this working
-  tree). There is no `.venv` in the repo. The `python` on PATH is a bare
+  (Python 3.10, outside the repo). `cloudlabeller` is *not* installed in
+  it: it imports the working tree only when run from the repo root (or with
+  it on `PYTHONPATH`), so isolated mode (`-I`) can't see it. A debug build
+  of the desktop app uses it when `CLOUDLABELLER_DEV_PYTHON` names it.
+  There is no `.venv` in the repo. The `python` on PATH is a bare
   3.12 without the app's dependencies. Don't test with the installed app's
   embedded Python either (`C:\Programas\CloudLabeller`): it imports its own
   installed copy of the app.
@@ -61,6 +64,12 @@ Rules:
 - Tests: `QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true
   /c/Python_envs/cloudlabeller/python.exe -m pytest tests/ -q` — keep the
   suite green; add a regression test with every bug fix.
+- The desktop app (0.3.0) is in `apps/` (`apps/web` the page,
+  `apps/desktop/src-tauri` the Rust core); see `docs/desktop.md`.
+  `pnpm check` runs Biome, tsc, vitest, the node tests and `cargo test`;
+  `pnpm desktop` runs it, and `pnpm bundle` builds the installer. Never copy
+  code from GeoScape: it is closed and CloudLabeller is GPL. Shared code
+  comes only from geokit, pinned by tag.
 - `graft` (a context graph in `graft/`, hooks in `.claude/settings.json`):
   run `graft ask "<question>"` before grepping the tree, and
   `graft callers <symbol>` for what a change touches. `graft/` is a local,

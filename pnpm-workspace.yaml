@@ -1,0 +1,6 @@
+packages:
+  - apps/*
+
+# Packages whose install scripts may run.
+allowBuilds:
+  esbuild: true

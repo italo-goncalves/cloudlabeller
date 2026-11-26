@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-array-write"
+description = "Enables the array_write command without any pre-configured scope."
+commands.allow = ["array_write"]
+
+[[permission]]
+identifier = "deny-array-write"
+description = "Denies the array_write command without any pre-configured scope."
+commands.deny = ["array_write"]

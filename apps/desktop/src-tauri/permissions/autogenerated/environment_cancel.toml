@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-environment-cancel"
+description = "Enables the environment_cancel command without any pre-configured scope."
+commands.allow = ["environment_cancel"]
+
+[[permission]]
+identifier = "deny-environment-cancel"
+description = "Denies the environment_cancel command without any pre-configured scope."
+commands.deny = ["environment_cancel"]

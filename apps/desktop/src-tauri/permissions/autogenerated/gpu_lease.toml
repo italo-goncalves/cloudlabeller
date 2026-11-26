@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-gpu-lease"
+description = "Enables the gpu_lease command without any pre-configured scope."
+commands.allow = ["gpu_lease"]
+
+[[permission]]
+identifier = "deny-gpu-lease"
+description = "Denies the gpu_lease command without any pre-configured scope."
+commands.deny = ["gpu_lease"]

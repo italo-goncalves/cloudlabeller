@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-job-run"
+description = "Enables the job_run command without any pre-configured scope."
+commands.allow = ["job_run"]
+
+[[permission]]
+identifier = "deny-job-run"
+description = "Denies the job_run command without any pre-configured scope."
+commands.deny = ["job_run"]

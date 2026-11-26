@@ -1,0 +1,20 @@
+{
+  "name": "@cloudlabeller/desktop",
+  "version": "0.2.1",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "resources": "node scripts/resources.mjs",
+    "desktop": "node scripts/resources.mjs && tauri dev",
+    "bundle": "node scripts/resources.mjs && tauri build",
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test \"scripts/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}

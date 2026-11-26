@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-array-read"
+description = "Enables the array_read command without any pre-configured scope."
+commands.allow = ["array_read"]
+
+[[permission]]
+identifier = "deny-array-read"
+description = "Denies the array_read command without any pre-configured scope."
+commands.deny = ["array_read"]

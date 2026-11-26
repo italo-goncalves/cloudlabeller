@@ -1,0 +1,24 @@
+/* CloudLabeller's page styles: the kit's tokens, then CloudLabeller's own.
+   The brand slots keep the kit's defaults for now; CloudLabeller's own
+   colours go in the :root block below when they are chosen. */
+
+@import "tailwindcss";
+@import "@geokit/ui/tokens.css";
+
+:root {
+  /* --gk-brand-*: the kit's defaults */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--gk-surface-0);
+  color: var(--gk-fg);
+  font-family: "Inter Variable", system-ui, sans-serif;
+  font-size: var(--text-ui);
+}

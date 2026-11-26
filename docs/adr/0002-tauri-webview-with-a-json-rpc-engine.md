@@ -33,3 +33,9 @@ feature parity, the Qt app keeps shipping as 0.2.x.
   the Tauri updater. The Environment is installed on first run from a
   committed uv lockfile. The 941 MiB portable zip is dropped.
 - 0.3.0 targets Windows only.
+- The Tauri core starts the Engine itself, with `std::process` and the
+  command line from geokit's `programs::python`, because geokit's process
+  spawner closes a child's input and the Engine needs stdin. Nothing else
+  needs this, so it stays in CloudLabeller (decided 2026-11-25). The
+  Engine starts no processes, so ending it ends nothing else. Jobs go
+  through geokit's `Processes` (ADR-0004).

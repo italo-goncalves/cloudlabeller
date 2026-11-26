@@ -42,6 +42,11 @@ spike is done: all of COLMAP runs in WSL, see ADR-0003.)
      works there, otherwise native on the CPU;
    - uv with Python 3.12, from a committed lockfile, keeping TensorFlow 2.19;
    - pycolmap moved from 4.1 to 4.2;
+   - *Under way (2026-11-25): the shell, the Environment setup, the Engine
+     host, the Job runner and the release pipeline are in `apps/`
+     ([desktop.md](desktop.md)), checked by `pnpm check`. Still to do: the
+     lockfile and Python 3.12 (Part A), the signing key, and an
+     end-to-end run on the installer.*
    - running the Jobs the Engine plans ([ADR-0004](adr/0004-the-tauri-core-starts-every-job.md)),
      the GPU Lease, Workspace staging for WSL COLMAP Jobs, the per-user NSIS
      installer and the updater.

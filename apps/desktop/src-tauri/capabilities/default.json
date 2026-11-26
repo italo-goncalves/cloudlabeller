@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the main window's page may call: the core's own commands only.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-environment-ensure",
+    "allow-environment-cancel",
+    "allow-environment-current",
+    "allow-folder-pick",
+    "allow-project-open",
+    "allow-project-close",
+    "allow-engine-call",
+    "allow-engine-cancel",
+    "allow-array-read",
+    "allow-array-write",
+    "allow-job-run",
+    "allow-job-cancel",
+    "allow-gpu-lease",
+    "allow-update-check",
+    "allow-update-install"
+  ]
+}

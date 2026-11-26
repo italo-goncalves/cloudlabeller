@@ -1,0 +1,25 @@
+{
+  "name": "cloudlabeller-workspace",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @cloudlabeller/web dev",
+    "desktop": "pnpm --filter @cloudlabeller/desktop desktop",
+    "bundle": "pnpm --filter @cloudlabeller/desktop bundle",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:core",
+    "test:core": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@12.4.2"
+}
