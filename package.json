@@ -14,7 +14,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:core",
-    "test:core": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+    "test:core": "pnpm --filter @cloudlabeller/desktop resources && pnpm --filter @cloudlabeller/web build && cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.2.0",

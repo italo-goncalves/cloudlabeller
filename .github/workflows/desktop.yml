@@ -38,8 +38,8 @@ jobs:
           workspaces: apps/desktop/src-tauri
       - uses: astral-sh/setup-uv@v6
       - run: pnpm install --frozen-lockfile
+      # also makes the resources and the page's build, which Tauri's build needs
       - run: pnpm check
-      - run: pnpm --filter @cloudlabeller/desktop resources
       - name: Build (signed)
         if: env.SIGN == 'true'
         env:
