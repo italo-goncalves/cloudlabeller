@@ -264,6 +264,30 @@ fn a_wsl_colmap_job_runs_in_a_workspace() {
     assert_eq!(k.iter().filter(|s| *s == "staging").count(), 2);
 }
 
+/// Regression (2026-11-26): `reconstruction/` was staged with the last run's
+/// `sfm.log` in it, and copying it back put that over the log the core had
+/// just written in the Project.
+#[test]
+fn staging_in_drops_the_live_log_so_staging_out_cant_overwrite_it() {
+    let stage = json!({"in": ["images", "reconstruction"], "out": ["reconstruction"]});
+    let engine = FakeEngine::new(plan(false, None, stage), Machine::Wsl, ".".into());
+    let spawner = Arc::new(Scripted::new(|p| {
+        if p.args.join(" ").contains("$HOME") { Script::ok().says("/home/u") } else { Script::ok() }
+    }));
+    let procs = Processes::new(spawner.clone());
+    let (tell, _) = collect();
+    run_job(&engine, &procs, &Jobs::default(), "sfm", json!({}), tell);
+
+    let stage_in = spawner.spawned()[1].args.join(" ");
+    let staged_log = "/home/u/.local/share/cloudlabeller/workspaces/7/reconstruction/sfm.log";
+    let copy = stage_in.find("cp -a").unwrap();
+    let drop = stage_in.find(&format!("rm -f '{staged_log}'")).expect(&stage_in);
+    assert!(drop > copy, "the staged log is deleted after the copy: {stage_in}");
+
+    let script = stage_script("/proj", "/ws", &[], &[], &["../log".into()], true);
+    assert!(script.is_err(), "a live file outside the Workspace is refused");
+}
+
 #[test]
 fn line_protocol_and_staging_helpers() {
     assert_eq!(progress_line("PROGRESS 0.250 Matching"), Some((0.25, "Matching".into())));
@@ -273,6 +297,6 @@ fn line_protocol_and_staging_helpers() {
     assert_eq!(result_line("nothing"), None);
     let args: Vec<String> = ["/proj/images", "/projector", "--x", "/proj"].iter().map(|s| s.to_string()).collect();
     assert_eq!(staged_args(&args, "/proj", "/ws"), vec!["/ws/images", "/projector", "--x", "/ws"]);
-    assert!(stage_script("/proj", "/ws", &["../etc".into()], &[], true).is_err());
-    assert!(stage_script("/proj", "/ws", &["images".into()], &["products".into()], true).is_ok());
+    assert!(stage_script("/proj", "/ws", &["../etc".into()], &[], &[], true).is_err());
+    assert!(stage_script("/proj", "/ws", &["images".into()], &["products".into()], &[], true).is_ok());
 }

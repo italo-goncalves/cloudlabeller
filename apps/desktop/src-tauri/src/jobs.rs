@@ -172,7 +172,19 @@ fn stage_dir(d: &str) -> Result<&str, Problem> {
 }
 
 /// The bash script that copies the Workspace in (or out).
-pub fn stage_script(root_env: &str, workspace: &str, dirs: &[String], outs: &[String], into: bool) -> Result<String, Problem> {
+///
+/// `live` are files, relative to the Project, that the core writes in the
+/// Project itself while the Job runs (its log, its stop file). Their staged
+/// copies are deleted on the way in, so copying out can't put the old ones
+/// back over the new.
+pub fn stage_script(
+    root_env: &str,
+    workspace: &str,
+    dirs: &[String],
+    outs: &[String],
+    live: &[String],
+    into: bool,
+) -> Result<String, Problem> {
     let mut s = String::from("set -e\n");
     if into {
         s.push_str(&format!("rm -rf {ws}\nmkdir -p {ws}\n", ws = sh(workspace)));
@@ -185,6 +197,10 @@ pub fn stage_script(root_env: &str, workspace: &str, dirs: &[String], outs: &[St
         for d in outs {
             let d = stage_dir(d)?;
             s.push_str(&format!("mkdir -p {}\n", sh(&format!("{workspace}/{d}"))));
+        }
+        for f in live {
+            let f = stage_dir(f)?;
+            s.push_str(&format!("rm -f {}\n", sh(&format!("{workspace}/{f}"))));
         }
     } else {
         for d in outs {
@@ -289,8 +305,13 @@ fn run_job_inner(
         let (ins, outs) = (strings(&stage["in"]), strings(&stage["out"]));
         let home = wsl_home(procs, &env.distro)?;
         let workspace = format!("{home}/.local/share/{}/workspaces/{token}", crate::environment::APP);
+        // the log and stop file stay in the Project: the core writes them there
+        let live: Vec<String> = ["log", "stop_file"]
+            .iter()
+            .filter_map(|k| plan[*k].as_str()?.strip_prefix(&format!("{root_env}/")).map(str::to_string))
+            .collect();
         tell(JobSaid::Staging { direction: "in" });
-        if let Err(p) = run_script(procs, &env.distro, &stage_script(&root_env, &workspace, &ins, &outs, true)?) {
+        if let Err(p) = run_script(procs, &env.distro, &stage_script(&root_env, &workspace, &ins, &outs, &live, true)?) {
             forget();
             drop(held);
             let outcome = finish(None, &BTreeMap::new(), false)?;
@@ -380,7 +401,7 @@ fn run_job_inner(
     if let Some((workspace, outs)) = staged {
         if exit.success() {
             tell(JobSaid::Staging { direction: "out" });
-            if let Err(p) = run_script(procs, &env.distro, &stage_script(&root_env, &workspace, &[], &outs, false)?) {
+            if let Err(p) = run_script(procs, &env.distro, &stage_script(&root_env, &workspace, &[], &outs, &[], false)?) {
                 let outcome = finish(None, &BTreeMap::new(), was_cancelled)?;
                 tell(JobSaid::Failed { problem: p });
                 tell(JobSaid::Finished { outcome });
