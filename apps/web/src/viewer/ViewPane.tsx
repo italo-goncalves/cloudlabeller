@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ítalo Gomes Gonçalves
 
-// The left "View" pane: what the 3D viewer shows and how, the cameras, the
-// home view and the lasso with what it does to its selection. Replaces the
+// The left "View" pane: a toolbar (the home view, the lasso and what it does
+// to its selection), then what the 3D viewer shows and how, and the cameras. Replaces the
 // Qt app's ui/view_panel.py.
 
 import { type ReactNode, useId } from "react";
@@ -10,7 +10,8 @@ import { VIEW_DETAIL } from "../detail";
 import * as api from "../engine/api";
 import { useApp } from "../state/app";
 import type { Representation, ViewDetail, ViewSettings } from "../state/store";
-import { Button, Check, PaneTitle, Radios, Select, Slider } from "../ui/controls";
+import { Check, IconButton, PaneTitle, Radios, Select, Slider } from "../ui/controls";
+import { ClearIcon, HomeIcon, LabelIcon, LassoIcon, TrashIcon } from "../ui/icons";
 import { pointsLabel } from "./adapt";
 import { goHome } from "./home";
 
@@ -76,6 +77,51 @@ export function ViewPane() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PaneTitle>View</PaneTitle>
+      <div className="flex items-center gap-0.5 border-b border-border px-2 py-1">
+        <IconButton title="Home view" onClick={goHome}>
+          <HomeIcon />
+        </IconButton>
+        <span className="mx-1 h-5 w-px bg-border" />
+        <IconButton
+          title={
+            view.representation === "mesh"
+              ? "Lasso select (on a cloud only)"
+              : "Lasso select: left-drag draws a loop on the cloud; middle and right still move the view"
+          }
+          pressed={view.lasso}
+          disabled={view.representation === "mesh"}
+          onClick={() => set({ lasso: !view.lasso })}
+        >
+          <LassoIcon />
+        </IconButton>
+        <IconButton
+          title={
+            className ? `Label the selected points “${className}”` : "Label the selected points"
+          }
+          disabled={!canPaint}
+          onClick={() => void apply()}
+        >
+          <LabelIcon />
+        </IconButton>
+        <IconButton
+          title="Delete the selected points (sparse cloud only)"
+          className="hover:text-danger"
+          disabled={!canDelete}
+          onClick={() => void remove()}
+        >
+          <TrashIcon />
+        </IconButton>
+        <IconButton
+          title="Clear the selection"
+          disabled={selection === null}
+          onClick={() => dispatch({ type: "selection", selection: null })}
+        >
+          <ClearIcon />
+        </IconButton>
+        <span className="ml-auto truncate pl-1 text-table text-fg-muted">
+          {count === 0 ? "" : `${count.toLocaleString()} selected`}
+        </span>
+      </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
         <Section title="Show">
           <Radios<Representation>
@@ -148,53 +194,6 @@ export function ViewPane() {
               step={0.01}
               onChange={(frustumScale) => set({ frustumScale })}
             />
-          </div>
-        </Section>
-
-        <Section title="View">
-          <Button onClick={goHome}>Home</Button>
-        </Section>
-
-        <Section title="Lasso">
-          <Button
-            kind={view.lasso ? "primary" : "plain"}
-            aria-pressed={view.lasso}
-            disabled={view.representation === "mesh"}
-            title="Left-drag draws a loop on the cloud; middle and right still move the view."
-            onClick={() => set({ lasso: !view.lasso })}
-          >
-            Lasso select
-          </Button>
-          <p className="my-2 text-fg-muted">
-            {count === 0
-              ? "No selection"
-              : `${count.toLocaleString()} ${count === 1 ? "point" : "points"} selected`}
-          </p>
-          <div className="flex flex-col items-start gap-2">
-            <Button
-              disabled={!canPaint}
-              title={
-                className ? `Label the selected points “${className}”` : "Label the selected points"
-              }
-              onClick={() => void apply()}
-            >
-              Apply active label
-            </Button>
-            <Button
-              kind="danger"
-              disabled={!canDelete}
-              title="Remove the selected points from the sparse cloud (sparse only)"
-              onClick={() => void remove()}
-            >
-              Delete points
-            </Button>
-            <Button
-              kind="quiet"
-              disabled={selection === null}
-              onClick={() => dispatch({ type: "selection", selection: null })}
-            >
-              Clear selection
-            </Button>
           </div>
         </Section>
       </div>

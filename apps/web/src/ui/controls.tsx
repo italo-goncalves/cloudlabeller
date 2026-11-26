@@ -38,6 +38,37 @@ export function Button({
   );
 }
 
+/** A small square button showing an icon; `title` names it, for the tooltip and screen readers.
+ *  `pressed` makes it a toggle. */
+export function IconButton({
+  title,
+  kind = "quiet",
+  pressed,
+  className,
+  children,
+  ...rest
+}: { title: string; kind?: ButtonKind; pressed?: boolean } & Omit<
+  React.ButtonHTMLAttributes<HTMLButtonElement>,
+  "title"
+>) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={pressed}
+      className={cn(
+        "inline-flex size-8 items-center justify-center rounded-md disabled:cursor-default disabled:opacity-40",
+        pressed ? BUTTON.primary : BUTTON[kind],
+        className,
+      )}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
+}
+
 /** A modal dialog: Escape and the backdrop close it, unless it is `busy`. */
 export function Dialog({
   title,
@@ -53,17 +84,22 @@ export function Dialog({
   wide?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
+  // the latest onClose, so a parent handing a new function on each render
+  // doesn't re-run the effect below (which would pull focus back to the
+  // first field on every keystroke)
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        closeRef.current();
       }
     };
     window.addEventListener("keydown", key, true);
     box.current?.querySelector<HTMLElement>("input, select, button")?.focus();
     return () => window.removeEventListener("keydown", key, true);
-  }, [onClose]);
+  }, []);
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: a click on the backdrop closes, as Escape does
     <div

@@ -19,6 +19,7 @@ import { LogPane } from "../panes/LogPane";
 import { useApp } from "../state/app";
 import type { DialogName, Panes } from "../state/store";
 import { Button, ProgressBar } from "../ui/controls";
+import { Splitter, useSizes } from "../ui/split";
 import { Viewer3D } from "../viewer/Viewer3D";
 import { ViewPane } from "../viewer/ViewPane";
 import { type Menu, Menubar } from "./Menubar";
@@ -26,6 +27,12 @@ import { closeFlow, newFlow, openFlow } from "./projects";
 import { Welcome } from "./Welcome";
 
 const PANES_KEY = "cloudlabeller.panes";
+const SIZES_KEY = "cloudlabeller.sizes";
+
+/** Pane sizes in pixels, as a new window opens them. */
+const SIZES = { left: 320, right: 520, log: 176, labels: 240, view: 380 };
+/** The least the 3D view keeps when docks grow. */
+const CENTRE_MIN = 320;
 
 function loadPanes(): Partial<Panes> {
   try {
@@ -304,44 +311,116 @@ export function Window() {
     return () => off?.();
   }, []);
 
+  const [sizes, setSize] = useSizes(SIZES_KEY, SIZES);
+  const dock = useRef<HTMLElement>(null);
+  const left = panes.labels || panes.view || panes.dataset;
+  const widthLeft = () => window.innerWidth - CENTRE_MIN - (panes.image ? sizes.right : 0);
+  const widthRight = () => window.innerWidth - CENTRE_MIN - (left ? sizes.left : 0);
+  const dockHeight = () => dock.current?.clientHeight ?? window.innerHeight;
+
   return (
     <div className="flex h-full flex-col">
       <Menubar menus={menus} />
       {project ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1">
-            {(panes.labels || panes.view || panes.dataset) && (
-              <aside className="flex w-dock-wide shrink-0 flex-col border-r border-border bg-surface-1">
-                {panes.labels && (
-                  <section className="flex max-h-[34%] min-h-0 flex-col border-b border-border">
-                    <LabelsPane />
-                  </section>
-                )}
-                {panes.view && (
-                  <section className="min-h-0 shrink-0 overflow-auto border-b border-border">
-                    <ViewPane />
-                  </section>
-                )}
-                {panes.dataset && (
-                  <section className="flex min-h-0 flex-1 flex-col">
-                    <DatasetPane />
-                  </section>
-                )}
-              </aside>
+            {left && (
+              <>
+                <aside
+                  ref={dock}
+                  className="flex shrink-0 flex-col bg-surface-1"
+                  style={{ width: sizes.left }}
+                >
+                  {panes.labels && (
+                    <section
+                      className="flex min-h-0 shrink-0 flex-col"
+                      style={panes.view || panes.dataset ? { height: sizes.labels } : { flex: 1 }}
+                    >
+                      <LabelsPane />
+                    </section>
+                  )}
+                  {panes.labels && (panes.view || panes.dataset) && (
+                    <Splitter
+                      axis="y"
+                      label="Resize the Labels pane"
+                      value={sizes.labels}
+                      min={80}
+                      max={() => dockHeight() - (panes.view && panes.dataset ? sizes.view : 0) - 80}
+                      onChange={(v) => setSize("labels", v)}
+                    />
+                  )}
+                  {panes.view && (
+                    <section
+                      className="min-h-0 overflow-auto"
+                      style={panes.dataset ? { height: sizes.view, flexShrink: 0 } : { flex: 1 }}
+                    >
+                      <ViewPane />
+                    </section>
+                  )}
+                  {panes.view && panes.dataset && (
+                    <Splitter
+                      axis="y"
+                      label="Resize the View pane"
+                      value={sizes.view}
+                      min={80}
+                      max={() => dockHeight() - (panes.labels ? sizes.labels : 0) - 80}
+                      onChange={(v) => setSize("view", v)}
+                    />
+                  )}
+                  {panes.dataset && (
+                    <section className="flex min-h-0 flex-1 flex-col">
+                      <DatasetPane />
+                    </section>
+                  )}
+                </aside>
+                <Splitter
+                  axis="x"
+                  label="Resize the left panes"
+                  value={sizes.left}
+                  min={220}
+                  max={widthLeft}
+                  onChange={(v) => setSize("left", v)}
+                />
+              </>
             )}
             <main className="relative min-w-0 flex-1 bg-viewport">
               <Viewer3D />
             </main>
             {panes.image && (
-              <aside className="flex w-[38%] min-w-80 shrink-0 flex-col border-l border-border bg-surface-1">
-                <ImageView />
-              </aside>
+              <>
+                <Splitter
+                  axis="x"
+                  invert
+                  label="Resize the Image pane"
+                  value={sizes.right}
+                  min={280}
+                  max={widthRight}
+                  onChange={(v) => setSize("right", v)}
+                />
+                <aside
+                  className="flex shrink-0 flex-col bg-surface-1"
+                  style={{ width: sizes.right }}
+                >
+                  <ImageView />
+                </aside>
+              </>
             )}
           </div>
           {panes.log && (
-            <section className="h-44 shrink-0 border-t border-border bg-surface-1">
-              <LogPane />
-            </section>
+            <>
+              <Splitter
+                axis="y"
+                invert
+                label="Resize the Log pane"
+                value={sizes.log}
+                min={60}
+                max={() => window.innerHeight - 240}
+                onChange={(v) => setSize("log", v)}
+              />
+              <section className="shrink-0 bg-surface-1" style={{ height: sizes.log }}>
+                <LogPane />
+              </section>
+            </>
           )}
         </div>
       ) : (

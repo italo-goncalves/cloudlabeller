@@ -3,14 +3,14 @@
 
 // The plain dialogs: a message, a question, Project Info and About.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as api from "../engine/api";
 import { useApp } from "../state/app";
 import { Button, Dialog } from "../ui/controls";
 
 export function useClose() {
-  const app = useApp();
-  return () => app.dispatch({ type: "dialog", dialog: null });
+  const { dispatch } = useApp();
+  return useCallback(() => dispatch({ type: "dialog", dialog: null }), [dispatch]);
 }
 
 export function MessageDialog({ title, text }: { title: string; text: string }) {
