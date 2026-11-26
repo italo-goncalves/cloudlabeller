@@ -20,6 +20,11 @@
 
 """Triangulated mesh from the dense cloud (COLMAP Screened Poisson / Delaunay).
 
+Poisson runs through colmap.exe when there is one (native Windows), else
+through pycolmap (the WSL Environment). Delaunay needs colmap.exe: pycolmap
+binds it only in CGAL builds, and the 4.2 wheels (Windows CPU, Linux CUDA 12)
+are not.
+
 The mesh is a *product of the dense cloud*: it is (re)built whenever the dense
 cloud changes (after Dense MVS, after importing a dense cloud) and on demand via
 Photogrammetry → Create Mesh. Vertex colours come from the mesher's colour
@@ -159,9 +164,6 @@ def create_mesh(
             "Run Dense (MVS) has them; imported clouds may not — re-run MVS or "
             "import a cloud that includes normals.")
     exe = find_colmap_binary(colmap_binary)
-    if exe is None:
-        raise RuntimeError("COLMAP executable not found — dense meshing uses "
-                           "colmap.exe (poisson_mesher).")
 
     progress(0.02, "Estimating cloud density…")
     suggested = suggest_poisson_depth(cloud)
@@ -184,15 +186,27 @@ def create_mesh(
 
         progress(0.15, f"Poisson meshing (depth {depth})…")
         from cloudlabeller.workers.resources import worker_threads
-        args = ["poisson_mesher",
-                "--input_path", str(cloud_ply),
-                "--output_path", str(mesh_ply),
-                "--PoissonMeshing.depth", str(depth),
-                "--PoissonMeshing.trim", str(trim),
-                "--PoissonMeshing.num_threads", str(worker_threads())]
-        if point_weight != 1.0:
-            args += ["--PoissonMeshing.point_weight", str(point_weight)]
-        _colmap(exe, args)
+        if exe is not None:
+            args = ["poisson_mesher",
+                    "--input_path", str(cloud_ply),
+                    "--output_path", str(mesh_ply),
+                    "--PoissonMeshing.depth", str(depth),
+                    "--PoissonMeshing.trim", str(trim),
+                    "--PoissonMeshing.num_threads", str(worker_threads())]
+            if point_weight != 1.0:
+                args += ["--PoissonMeshing.point_weight", str(point_weight)]
+            _colmap(exe, args)
+        else:
+            import pycolmap
+
+            opts = pycolmap.PoissonMeshingOptions()
+            opts.depth = int(depth)
+            opts.trim = float(trim)
+            opts.point_weight = float(point_weight)
+            opts.num_threads = worker_threads()
+            pycolmap.poisson_meshing(cloud_ply, mesh_ply, options=opts)
+            if not mesh_ply.exists():
+                raise RuntimeError("Poisson meshing produced no mesh.")
 
         progress(0.85, "Loading mesh…")
         mesh = load_mesh(mesh_ply)
@@ -224,8 +238,8 @@ def create_mesh_delaunay(
             "Run Dense (MVS) first, or use Poisson meshing.")
     exe = find_colmap_binary(colmap_binary)
     if exe is None:
-        raise RuntimeError("COLMAP executable not found — dense meshing uses "
-                           "colmap.exe (delaunay_mesher).")
+        raise RuntimeError("COLMAP executable not found — Delaunay meshing uses "
+                           "colmap.exe (delaunay_mesher); use Poisson meshing.")
 
     est = estimate_mesh_cost(cloud.n_points, 0, 0, method="delaunay")
     progress(0.05, f"Delaunay meshing {cloud.n_points:,} fused points "

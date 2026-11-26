@@ -1,36 +1,41 @@
+# CloudLabeller dependencies — the authoritative, commented list; pyproject.toml
+# mirrors it. The desktop app's Environment installs the pinned lock made from
+# these (apps/desktop/environment/requirements.lock, tools/lock_environment.py).
+#
+# Dev env (the 0.2.x Qt app + tests):  pip install -e .[qt,dev]
+
 # Core
 numpy>=1.24
 scipy>=1.10
-opencv-python>=4.8
+# Headless: the app never opens an OpenCV window (the GUI build also bundles
+# its own Qt on Linux). Don't install opencv-python beside it: both own cv2/.
+opencv-python-headless>=4.8
 pillow>=10          # polygon rasterisation (core/raster.py)
 
-# UI / 3D
+# Geometry / IO — PLY is read by trimesh and written by io/ply.py (no plyfile).
+trimesh>=4.0
+laspy>=2.5
+pyproj>=3.6          # CRS-aware export (ENU -> projected EPSG)
+
+# Photogrammetry — written against the pycolmap 4.2 API. Both packages provide
+# the same `pycolmap` module: the CPU build on Windows (GPU SIFT/MVS there go
+# through colmap.exe), the CUDA 12 build on Linux/WSL (GPU SIFT in-process).
+pycolmap==4.2.*; sys_platform == "win32"
+pycolmap-cuda12==4.2.*; sys_platform == "linux"
+
+# ML — Ítalo's U-Net is TensorFlow/Keras. Pin 2.19: 2.20+ wheels failed to
+# load on this machine. NOTE: importing TF needs the MSVC-runtime preload in
+# cloudlabeller/__init__.py (Anaconda ships a 2020 msvcp140.dll that otherwise
+# shadows System32's and breaks the TF DLL init). Native-Windows TF is
+# CPU-only since 2.11; GPU training runs in WSL, with the CUDA wheels.
+tensorflow==2.19.*
+tensorflow[and-cuda]==2.19.*; sys_platform == "linux"
+scikit-image>=0.22   # augmentation (gamma correction) in ml/dataset_builder.py
+
+# --- extra `qt`: the 0.2.x Qt app (not in the desktop app's Environment) ---
 # Pin PySide6 < 6.8: the 6.8+ Qt Windows build links icuuc.dll (ICU), which
 # clashes with the ICU shipped by Anaconda / Windows (WinError 127 on import).
 # 6.7.3 is verified working in the Anaconda-based venv on this machine.
 PySide6==6.7.3
 pyvista>=0.43
 pyvistaqt>=0.11
-
-# Geometry / IO
-trimesh>=4.0
-laspy>=2.5
-pyproj>=3.6          # CRS-aware export (ENU -> projected EPSG)
-
-# Photogrammetry — code is written against the pycolmap 4.x API
-# (cam_from_world as method, camera_mode kwarg, etc.)
-pycolmap>=4,<5
-
-# Label transfer — camera conversion verified against hylite 1.36's proj_persp.
-# NOTE: hylite pulls in plyfile (GPLv3). The app never imports it (hylite only
-# uses it lazily in its own PLY reader), and it is DELETED from binary
-# distributions to keep them GPL-free — see tools/gen_third_party_licenses.py.
-hylite>=1.36
-
-# ML — Ítalo's U-Net is TensorFlow/Keras. Pin 2.19: 2.20+ wheels failed to
-# load on this machine. NOTE: importing TF needs the MSVC-runtime preload in
-# cloudlabeller/__init__.py (Anaconda ships a 2020 msvcp140.dll that otherwise
-# shadows System32's and breaks the TF DLL init). Native-Windows TF is
-# CPU-only since 2.11; GPU training would require WSL2.
-tensorflow==2.19.*
-scikit-image>=0.22   # augmentation (gamma correction) in ml/dataset_builder.py

@@ -219,10 +219,10 @@ at for this Project's photos, and why that size won't work (or null).
 
 ### `jobs.plan`
 `{kind, options?}` → `{plan, kind, group, gpu, module, args, log, stop_file,
-project}`. Checks that a Job can run, saves what it will read, and says how
-to run it. The Tauri core then runs `<Environment python> -m <module>
-<args…>`, with the Environment's own interpreter and paths as the Engine
-sees them. While it runs, the core:
+project, stage}`. Checks that a Job can run, saves what it will read, and
+says how to run it. The Tauri core then runs `<Environment python> -m
+<module> <args…>`, with the Environment's own interpreter and paths as the
+Engine sees them. While it runs, the core:
 
 - takes the GPU Lease first when `gpu` is true;
 - writes the Job's output to `log`;
@@ -230,6 +230,21 @@ sees them. While it runs, the core:
 - keeps its `RESULT…` lines for `jobs.finish`;
 - cancels it by creating `stop_file` when there is one (training stops
   after its epoch and still saves the model), and kills it otherwise.
+
+`stage` is `{in, out}` for the kinds with heavy file I/O (`sfm`, `mvs`,
+`mesh`) and null for the others. `in` and `out` are lists of directories,
+relative to the Project root with `/` separators: what the Job reads and
+what it writes. In the WSL Environment the core copies the `in` dirs to
+WSL's own disk, rewrites the Project-root prefix of `args` to the copy, runs
+the Job, and copies the `out` dirs back before `jobs.finish`. Every path in
+`args` under the Project root lies inside an `in` or an `out` dir. `log`
+stays where it is: the core writes it.
+
+| Kind | `in` | `out` |
+|---|---|---|
+| `sfm` | `images`, `reconstruction` | `reconstruction` |
+| `mvs` | `images`, `reconstruction` | `reconstruction` |
+| `mesh` | `reconstruction` | `products` |
 
 Until `jobs.finish`, a second plan of the same group is refused (Problem:
 `job.busy`), and so is opening or closing a Project
@@ -243,9 +258,13 @@ Until `jobs.finish`, a second plan of the same group is refused (Problem:
 | `georef` | reconstruction | no | `max_error` | `job.no_reconstruction` |
 | `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced` |
 | `mvs` | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
-| `mesh` | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense` |
+| `mesh` | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
 | `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume` | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec` |
 | `predict` | ml | yes | `model` | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing` |
+
+`job.mvs.no_colmap`: there is neither a CUDA colmap.exe nor a CUDA pycolmap
+(native Windows without COLMAP). `job.mesh.no_delaunay`: `delaunay` needs
+colmap.exe, so the WSL Environment offers Poisson only.
 
 The Engine doesn't chain stages (SfM → georeferencing → MVS → mesh). The
 window does.

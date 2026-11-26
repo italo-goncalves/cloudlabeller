@@ -222,7 +222,7 @@ def covisibility_from_images(cloud, records, visibility=None) -> ImageAdjacency:
     :class:`~cloudlabeller.transfer.visibility.VisibilityIndex` (reuses the
     per-camera cache; without it each camera is projected directly).
     """
-    from cloudlabeller.transfer.hylite_bridge import visible_point_pixels
+    from cloudlabeller.transfer.projection import visible_point_pixels
 
     names: list[str] = []
     parts_rows: list[np.ndarray] = []

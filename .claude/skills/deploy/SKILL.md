@@ -48,10 +48,11 @@ touched.
   (`C:\Programas\CloudLabeller\python.exe -m pip install <pkg>`), then
   deploy.
 - License hygiene: CloudLabeller is GPL-3.0-or-later (dual-licensed with a
-  commercial option — see README.md). GPL dependencies (`plyfile`, the
-  COLMAP bundle) are compatible with the public GPL build; they only need
-  stripping from a future COMMERCIAL build (plyfile is unused by the app —
-  hylite imports it lazily in a code path CloudLabeller never calls). After
+  commercial option — see README.md). GPL dependencies (the COLMAP
+  bundle) are compatible with the public GPL build; they only need
+  stripping from a future COMMERCIAL build. Since 0.3.0 the app has no
+  hylite/plyfile dependency (PLY files are written by `io/ply.py`); if an
+  older embedded Python still has them, `pip uninstall hylite plyfile`. After
   any pip change in the embedded Python, regenerate the notices:
   `C:\Programas\CloudLabeller\python.exe tools\gen_third_party_licenses.py
   --out C:\Programas\CloudLabeller\THIRD_PARTY_LICENSES.txt`. Public

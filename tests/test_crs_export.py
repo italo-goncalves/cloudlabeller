@@ -187,7 +187,7 @@ def test_las_export_embeds_crs_and_survives_roundtrip(tmp_path):
 
 
 def test_ply_export_writes_f8_and_prj_sidecar(tmp_path):
-    from plyfile import PlyData
+    from cloudlabeller.io.ply import read_ply
 
     from cloudlabeller.io.export import export_cloud
 
@@ -195,8 +195,8 @@ def test_ply_export_writes_f8_and_prj_sidecar(tmp_path):
     fn, crs = crsmod.enu_to_crs_transform(ORIGIN, UTM_SIRGAS_22S)
     path = tmp_path / "out.ply"
     export_cloud(cloud, labels, path, transform=fn, crs=crs)
-    v = PlyData.read(str(path))["vertex"]
-    assert v.data.dtype["x"] == np.float64      # f4 would round ~0.5 m at UTM
+    v = read_ply(path)["vertex"]
+    assert v.dtype["x"] == np.float64      # f4 would round ~0.5 m at UTM
     got = np.column_stack([v["x"], v["y"], v["z"]])
     assert np.allclose(got, fn(cloud.xyz), atol=1e-6)
     _check_prj(tmp_path / "out.prj", UTM_SIRGAS_22S)
@@ -226,7 +226,7 @@ def test_local_export_unchanged_writes_no_prj(tmp_path):
 
 
 def test_mesh_ply_export_is_f8_with_prj(tmp_path):
-    from plyfile import PlyData
+    from cloudlabeller.io.ply import read_ply
 
     from cloudlabeller.io.export import export_mesh
 
@@ -237,9 +237,9 @@ def test_mesh_ply_export_is_f8_with_prj(tmp_path):
     fn, crs = crsmod.enu_to_crs_transform(ORIGIN, UTM_SIRGAS_22S)
     path = tmp_path / "mesh.ply"
     export_mesh(mesh, path, transform=fn, crs=crs)
-    ply = PlyData.read(str(path))
+    ply = read_ply(path)
     v = ply["vertex"]
-    assert v.data.dtype["x"] == np.float64
+    assert v.dtype["x"] == np.float64
     got = np.column_stack([v["x"], v["y"], v["z"]])
     assert np.allclose(got, fn(mesh.vertices), atol=1e-6)
     assert np.array_equal(ply["face"]["vertex_indices"][0], [0, 1, 2])

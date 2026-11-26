@@ -18,10 +18,10 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Label transfer between modalities via hylite.
+"""Label transfer between images and the cloud.
 
-All direct hylite calls are confined to :mod:`hylite_bridge` so that adapting to
-a specific hylite version touches only one file.
+The camera model (projection, distortion, occlusion) lives in
+:mod:`cloudlabeller.transfer.projection`.
 """
 
 from cloudlabeller.transfer.project_to_cloud import images_to_cloud

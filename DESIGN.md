@@ -4,6 +4,10 @@
 > labelling of 2D images ↔ 3D products (point clouds / meshes), with label
 > transfer powered by [hylite](https://github.com/hifexplo/hylite) and a U-Net
 > model that propagates a few hand-labelled images to the entire dataset.
+>
+> **0.3.0 note:** hylite is no longer a dependency. The projection it inspired
+> (full COLMAP camera model, occlusion) lives in `transfer/projection.py`; the
+> hylite sections below are the original design.
 
 ---
 
@@ -234,10 +238,10 @@ import existing cameras+cloud (Metashape/COLMAP export) → label & transfer.
 | `core/events.py` | Qt signal bus connecting views |
 | `photogrammetry/sfm.py` | pycolmap SfM wrapper |
 | `photogrammetry/mvs.py` | dense cloud + meshing |
-| `photogrammetry/cameras.py` | COLMAP ↔ hylite camera conversion |
+| `photogrammetry/cameras.py` | COLMAP cameras → app `Camera` (intrinsics, distortion) |
 | `photogrammetry/adjacency.py` | image-overlap (covisibility) graph from SfM point tracks; restricts per-image transfers to overlapping images |
 | `photogrammetry/colmap_fetch.py` | one-click download of the official COLMAP release into `~/.cloudlabeller` (COLMAP is not shipped with the app: its bundle links GPL components) |
-| `transfer/hylite_bridge.py` | all hylite calls (HyScene/HyCloud/HyImage) |
+| `transfer/projection.py` | full COLMAP camera projection + occlusion (z-buffer, back-face culling) |
 | `transfer/project_to_cloud.py` | image labels → cloud (voting) |
 | `transfer/project_to_image.py` | cloud labels → image masks (splatting) |
 | `transfer/mesh_cloud.py` | cloud ↔ mesh label mapping |

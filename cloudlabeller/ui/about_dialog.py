@@ -51,7 +51,7 @@ DISCLAIMER = (
 CREDITS = ("Licensed under the GNU GPL v3 or later; commercial licenses "
            "are available from the author (see README.md).<br>"
            "Built on COLMAP / pycolmap, PySide6, PyVista, TensorFlow, "
-           "hylite, laspy and trimesh. Open-source license texts are "
+           "laspy and trimesh. Open-source license texts are "
            "collected in THIRD_PARTY_LICENSES.txt, distributed with the app.")
 
 

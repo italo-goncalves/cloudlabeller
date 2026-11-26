@@ -79,7 +79,7 @@ class LabelStore:
     mesh_labels: np.ndarray | None = None           # (V,) int32 per-vertex (derived
     #                                                 from the dense cloud by NN)
     image_masks: dict[str, np.ndarray] = field(default_factory=dict)  # name -> (H,W) int32
-    # Per-image label provenance: "user" (drawn polygons) > "auto" (hylite/ML).
+    # Per-image label provenance: "user" (drawn polygons) > "auto" (transfer/ML).
     # Absent = "none" (unlabelled). Drives the frustum dot colour.
     image_status: dict[str, str] = field(default_factory=dict)
 
@@ -114,7 +114,7 @@ class LabelStore:
         self.image_status[name] = "user"
 
     def mark_auto_labeled(self, name: str) -> None:
-        """Image was labelled by cloud projection (hylite transfer), unless the
+        """Image was labelled by cloud projection (label transfer), unless the
         user has already drawn on it. Overwrites 'ml': a newer cloud render
         supersedes an older U-Net prediction."""
         if self.image_status.get(name) != "user":

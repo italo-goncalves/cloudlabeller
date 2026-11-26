@@ -21,8 +21,8 @@
 """Point cloud and mesh I/O.
 
 Two roles:
-  * **import** external geometry (PLY/LAS/OBJ/STL …) via PyVista/laspy into the
-    plain :class:`PointCloud` / :class:`Mesh` containers;
+  * **import** external geometry (PLY/OBJ/STL/OFF … via trimesh, LAS/LAZ via
+    laspy) into the plain :class:`PointCloud` / :class:`Mesh` containers;
   * **persist** the project's own dense cloud / mesh as compact ``.npz`` files.
 """
 
@@ -34,45 +34,78 @@ import numpy as np
 
 from cloudlabeller.core.dataset import Mesh, PointCloud
 
+# Per-vertex colour property names, in the order they are tried.
+_RGB_NAMES = (("red", "green", "blue"), ("r", "g", "b"),
+              ("diffuse_red", "diffuse_green", "diffuse_blue"))
 
-# -- RGB / normal extraction from a PyVista dataset -----------------------
-def _extract_rgb(ds) -> np.ndarray | None:
-    """Point colours from a PyVista dataset as (N, 3) uint8, or None.
 
-    Checks the common conventions in turn: a packed RGB array under one of
-    the usual names, separate red/green/blue scalars, then a 3+-component
-    active-scalars array."""
-    pd = ds.point_data
-    for key in ("RGB", "rgb", "Colors", "colors", "diffuse_color"):
-        arr = pd.get(key)
-        if arr is not None and arr.ndim == 2 and arr.shape[1] >= 3:
-            return np.asarray(arr[:, :3], np.uint8)
-    if all(k in pd for k in ("red", "green", "blue")):
-        return np.column_stack([pd["red"], pd["green"], pd["blue"]]).astype(np.uint8)
-    scal = ds.active_scalars
-    if scal is not None and scal.ndim == 2 and scal.shape[1] >= 3:
-        return np.asarray(scal[:, :3], np.uint8)
+# -- RGB / normal extraction from a trimesh geometry ----------------------
+def _ply_vertex(geom) -> np.ndarray | None:
+    """The raw PLY vertex record array trimesh keeps, or None (not a PLY)."""
+    raw = (getattr(geom, "metadata", None) or {}).get("_ply_raw") or {}
+    vertex = raw.get("vertex") or {}
+    data = vertex.get("data")
+    return data if data is not None and data.dtype.names else None
+
+
+def _as_rgb(arr) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.dtype.kind == "f":          # float colours in [0, 1]
+        arr = np.clip(arr * 255.0 + 0.5, 0, 255)
+    return arr.astype(np.uint8)
+
+
+def _extract_rgb(geom, n: int) -> np.ndarray | None:
+    """Vertex colours as (n, 3) uint8, or None when the file has none."""
+    raw = _ply_vertex(geom)
+    if raw is not None:
+        names = set(raw.dtype.names)
+        for keys in _RGB_NAMES:
+            if set(keys) <= names:
+                return _as_rgb(np.column_stack([raw[k] for k in keys]))
+        return None
+    if hasattr(geom, "faces"):           # a Trimesh
+        visual = geom.visual
+        if getattr(visual, "kind", None) == "vertex":
+            return _as_rgb(visual.vertex_colors[:, :3])
+        return None
+    colors = getattr(geom, "colors", None)  # a PointCloud
+    if colors is not None and len(colors) == n and np.ndim(colors) == 2:
+        return _as_rgb(colors[:, :3])
     return None
 
 
-def _extract_normals(ds) -> np.ndarray | None:
-    arr = ds.point_data.get("Normals")
-    return np.asarray(arr, np.float32) if arr is not None else None
+def _extract_normals(geom) -> np.ndarray | None:
+    """Per-vertex normals stored in the file (never computed), or None."""
+    raw = _ply_vertex(geom)
+    if raw is not None and {"nx", "ny", "nz"} <= set(raw.dtype.names):
+        return np.column_stack([raw["nx"], raw["ny"], raw["nz"]]).astype(np.float32)
+    return None
+
+
+def _read_geometry(path: Path, force: str | None = None):
+    import trimesh
+
+    geom = trimesh.load(str(path), process=False, force=force)
+    if isinstance(geom, trimesh.Scene):
+        geom = geom.to_geometry() if hasattr(geom, "to_geometry") else geom.dump(concatenate=True)
+    return geom
 
 
 # -- import (external files) ----------------------------------------------
 def load_cloud(path: str | Path) -> PointCloud:
-    """Read a point cloud (.ply/.vtk/… via PyVista, .las/.laz via laspy)."""
+    """Read a point cloud (.ply/.obj/… via trimesh, .las/.laz via laspy).
+
+    For a mesh file the cloud is its vertices."""
     path = Path(path)
     if path.suffix.lower() in (".las", ".laz"):
         return _load_las(path)
-    import pyvista as pv
-
-    ds = pv.read(str(path))
+    geom = _read_geometry(path)
+    xyz = np.asarray(geom.vertices, np.float32)
     return PointCloud(
-        xyz=np.asarray(ds.points, np.float32),
-        rgb=_extract_rgb(ds),
-        normals=_extract_normals(ds),
+        xyz=xyz,
+        rgb=_extract_rgb(geom, len(xyz)),
+        normals=_extract_normals(geom),
     )
 
 
@@ -90,22 +123,22 @@ def _load_las(path: Path) -> PointCloud:
 
 
 def load_mesh(path: str | Path) -> Mesh:
-    """Read a triangle mesh (.ply/.obj/.stl/… via PyVista)."""
-    import pyvista as pv
-
-    ds = pv.read(str(path)).triangulate()
-    if ds.n_cells == 0:
+    """Read a triangle mesh (.ply/.obj/.stl/.off/… via trimesh)."""
+    geom = _read_geometry(Path(path), force="mesh")
+    faces = np.asarray(getattr(geom, "faces", np.empty((0, 3))), np.int32)
+    if len(faces) == 0:
         raise ValueError(f"{path} contains no faces (not a mesh)")
+    vertices = np.asarray(geom.vertices, np.float32)
     return Mesh(
-        vertices=np.asarray(ds.points, np.float32),
-        faces=np.asarray(ds.regular_faces, np.int32),
-        vertex_colors=_extract_rgb(ds),
+        vertices=vertices,
+        faces=faces.reshape(-1, 3),
+        vertex_colors=_extract_rgb(geom, len(vertices)),
     )
 
 
 def save_cloud_ply(cloud: PointCloud, path: str | Path) -> None:
     """Write a binary PLY (x,y,z[,nx,ny,nz][,rgb]) — COLMAP poisson_mesher input."""
-    from plyfile import PlyData, PlyElement
+    from cloudlabeller.io.ply import write_ply
 
     fields = [("x", "f4"), ("y", "f4"), ("z", "f4")]
     if cloud.normals is not None:
@@ -121,8 +154,7 @@ def save_cloud_ply(cloud: PointCloud, path: str | Path) -> None:
     if cloud.rgb is not None:
         for i, k in enumerate(("red", "green", "blue")):
             data[k] = cloud.rgb[:, i]
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    PlyData([PlyElement.describe(data, "vertex")]).write(str(path))
+    write_ply(path, data)
 
 
 # -- internal persistence (.npz) ------------------------------------------

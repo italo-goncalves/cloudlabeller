@@ -79,7 +79,7 @@ Qt / PySide6 / Shiboken6 (LGPLv3)
     https://code.qt.io/ and https://pypi.org/project/PySide6/ .
 
 FFmpeg (inside the OpenCV wheel, LGPL)
-    The opencv-python wheel bundles an LGPL build of FFmpeg as a separate,
+    The opencv-python(-headless) wheel bundles an LGPL build of FFmpeg as a separate,
     replaceable DLL. See the OpenCV entry's LICENSE-3RD-PARTY.txt below for
     the exact terms, and https://github.com/opencv/opencv-python for the
     corresponding sources.

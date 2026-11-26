@@ -18,8 +18,11 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""QThread wrappers that keep long jobs (SfM/MVS/train/infer) off the UI thread."""
+"""Job plumbing for the stage CLIs and the 0.2.x Qt app.
 
-from cloudlabeller.workers.job import Job, JobSignals
-
-__all__ = ["Job", "JobSignals"]
+``resources`` (thread and memory limits) is Qt-free and imported by every
+``*_cli`` subprocess. ``job`` and ``process_job`` wrap work in Qt for the Qt
+app; import them by their own module path. This package root must not import
+them: it would make every CLI, and the desktop app's Environment (which has no
+PySide6), depend on Qt.
+"""

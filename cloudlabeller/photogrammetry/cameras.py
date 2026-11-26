@@ -82,7 +82,7 @@ def extract_distortion(model_name: str, params) -> np.ndarray | None:
     """Distortion coefficients from COLMAP camera params, by model.
 
     Returned in the model's own coefficient order (interpreted by
-    ``transfer.hylite_bridge._apply_distortion``):
+    ``transfer.projection._apply_distortion``):
       SIMPLE_RADIAL -> [k]              RADIAL -> [k1, k2]
       OPENCV        -> [k1, k2, p1, p2] FULL_OPENCV -> [k1, k2, p1, p2, k3..k6]
     Pinhole models return None. Ignoring these was the source of large
@@ -99,11 +99,3 @@ def extract_distortion(model_name: str, params) -> np.ndarray | None:
         return None                          # pinhole or all-zero coefficients
     return coeffs.copy()
 
-
-def camera_to_hylite(camera: Camera):
-    """Convert an app :class:`Camera` to a ``hylite.project.Camera`` (PLACEHOLDER).
-
-    Centralised here so the projection convention is defined in one place. Pin to
-    the installed hylite API when wiring label transfer.
-    """
-    raise NotImplementedError("Camera → hylite.Camera conversion (see DESIGN.md §6).")

@@ -21,6 +21,7 @@
 """Tests for the U-Net model spec: aspect snapping and pow-2 training sizes."""
 
 import ast
+import importlib.util
 import sys
 from pathlib import Path
 from unittest import mock
@@ -102,7 +103,9 @@ class TestBuildTrainingSetResize:
         assert ts.samples[0].image.shape == (10, 20, 3)
 
 
-UNET_PY = Path(__file__).resolve().parents[1] / "cloudlabeller" / "ml" / "unet.py"
+# The imported package's copy (an installed wheel, or the working tree), read
+# as text so TensorFlow isn't imported.
+UNET_PY = Path(importlib.util.find_spec("cloudlabeller.ml.unet").origin)
 
 
 def _function_params(source: str, name: str) -> set[str]:

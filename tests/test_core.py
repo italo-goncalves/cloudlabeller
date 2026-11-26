@@ -510,7 +510,7 @@ def _vis_scene():
 
 def test_visibility_index_caches_and_matches(tmp_path, monkeypatch):
     import cloudlabeller.transfer.visibility as vismod
-    from cloudlabeller.transfer.hylite_bridge import visible_point_pixels
+    from cloudlabeller.transfer.projection import visible_point_pixels
     from cloudlabeller.transfer.visibility import VisibilityIndex
 
     cloud, cam = _vis_scene()
@@ -758,14 +758,14 @@ class TestExport:
         assert np.array_equal(np.asarray(las.red) // 257, cloud.rgb[:, 0])
 
     def test_ply_roundtrip(self, tmp_path):
-        from plyfile import PlyData
+        from cloudlabeller.io.ply import read_ply
 
         from cloudlabeller.io.export import export_cloud
 
         cloud, labels = self._cloud()
         p = tmp_path / "c.ply"
         export_cloud(cloud, labels, p)
-        v = PlyData.read(str(p))["vertex"]
+        v = read_ply(p)["vertex"]
         assert len(v) == 100
         assert np.allclose(v["x"], cloud.xyz[:, 0], atol=1e-5)
         assert np.array_equal(np.asarray(v["label"]), labels)

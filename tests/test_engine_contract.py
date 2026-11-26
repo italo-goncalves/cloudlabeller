@@ -683,3 +683,89 @@ def test_stopped_training_still_counts(pipe, tmp_path):
     assert done["ok"] is True and done["stopped"] is True
     assert done["result"] == {"name": "unet", "epochs_run": 2}
     assert not stop.exists()
+
+
+def _staged_engine(tmp_path, monkeypatch, *, binary, cuda):
+    """An in-process Engine on a Project with a dense cloud, with the COLMAP
+    executable and pycolmap's CUDA support faked as given."""
+    from cloudlabeller.engine import jobs
+    from cloudlabeller.io.geometry import save_cloud_npz
+
+    monkeypatch.setattr(jobs, "_colmap_binary", lambda: binary)
+    monkeypatch.setattr(jobs, "_pycolmap_has_cuda", lambda: cuda)
+    root = make_project(tmp_path / "p.clproj")
+    proj = Project.open(root)
+    save_cloud_npz(PointCloud(xyz=np.zeros((10, 3), np.float32)), proj.dense_cloud_path)
+    engine = Engine(lambda data: None)
+    engine.project = Project.open(root)
+    return engine
+
+
+def test_plans_name_the_dirs_to_stage(tmp_path, monkeypatch):
+    """sfm, mvs and mesh say which Project dirs they read and write; every
+    Project path in their args lies inside one, so the core can rewrite the
+    root prefix to a staged copy. The other kinds have no stage."""
+    import importlib
+
+    from cloudlabeller.engine.jobs import KINDS, Outstanding
+
+    engine = _staged_engine(tmp_path, monkeypatch, binary=None, cuda=True)
+    project = engine.project
+    root = Path(project.root)
+    expected = {"sfm": {"in": ["images", "reconstruction"], "out": ["reconstruction"]},
+                "mvs": {"in": ["images", "reconstruction"], "out": ["reconstruction"]},
+                "mesh": {"in": ["reconstruction"], "out": ["products"]}}
+    for name, stage in expected.items():
+        kind = KINDS[name]
+        plan = kind.prepare(engine, project, {})
+        described = Outstanding(1, kind, plan, project).describe()
+        assert described["stage"] == stage, name
+        dirs = [root / d for d in stage["in"] + stage["out"]]
+        for arg in plan.args:
+            if arg.startswith(str(root)):
+                assert any(Path(arg).is_relative_to(d) for d in dirs), (name, arg)
+        importlib.import_module(kind.module)._parse([kind.module, *plan.args])
+    for name, opts in {"georef": {}, "ingest": {"folder": str(tmp_path)}}.items():
+        plan = KINDS[name].prepare(engine, project, opts)
+        assert Outstanding(1, KINDS[name], plan, project).describe()["stage"] is None
+
+
+def test_plan_over_the_pipe_carries_stage(pipe, tmp_path):
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "sfm"})
+    assert plan["stage"] == {"in": ["images", "reconstruction"], "out": ["reconstruction"]}
+    pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 1})
+    _fake_model(root)
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
+    assert plan["stage"] is None
+
+
+def test_mvs_runs_on_a_cuda_pycolmap_without_colmap_exe(tmp_path, monkeypatch):
+    from cloudlabeller.engine.jobs import KINDS
+    from cloudlabeller.engine.protocol import Problem
+
+    engine = _staged_engine(tmp_path, monkeypatch, binary=None, cuda=True)
+    plan = KINDS["mvs"].prepare(engine, engine.project, {})
+    assert plan.gpu and "--colmap-binary" not in plan.args
+
+    engine = _staged_engine(tmp_path / "cpu", monkeypatch, binary=None, cuda=False)
+    with pytest.raises(Problem) as err:
+        KINDS["mvs"].prepare(engine, engine.project, {})
+    assert err.value.code == "job.mvs.no_colmap"
+
+
+def test_delaunay_mesh_needs_colmap_exe(tmp_path, monkeypatch):
+    from cloudlabeller.engine.jobs import KINDS
+    from cloudlabeller.engine.protocol import Problem
+
+    engine = _staged_engine(tmp_path, monkeypatch, binary=None, cuda=True)
+    with pytest.raises(Problem) as err:
+        KINDS["mesh"].prepare(engine, engine.project, {"method": "delaunay"})
+    assert err.value.code == "job.mesh.no_delaunay"
+    assert KINDS["mesh"].prepare(engine, engine.project, {}).args[2:4] == [
+        "--method", "poisson"]
+
+    engine = _staged_engine(tmp_path / "exe", monkeypatch, binary="colmap.exe", cuda=False)
+    plan = KINDS["mesh"].prepare(engine, engine.project, {"method": "delaunay"})
+    assert plan.args[-2:] == ["--colmap-binary", "colmap.exe"]
