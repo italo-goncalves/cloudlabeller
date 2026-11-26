@@ -85,3 +85,15 @@ def sparse_point_stats(reconstruction, xyz: np.ndarray
         views[i] = points[j].track.length()
         errors[i] = points[j].error
     return views, errors
+
+
+# The saved COLMAP model must account for this share of the cloud's points
+# before its statistics are trusted (else the cloud came from another solve).
+MIN_MODEL_MATCH = 0.9
+
+
+def confidence_keep(views: np.ndarray, errors: np.ndarray, min_images: int,
+                    max_error: float) -> np.ndarray:
+    """The points a confidence clean keeps: seen by at least ``min_images``
+    photos, with a mean reprojection error of at most ``max_error`` pixels."""
+    return (np.asarray(views) >= min_images) & (np.asarray(errors) <= max_error)

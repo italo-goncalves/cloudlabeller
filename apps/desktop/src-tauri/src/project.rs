@@ -53,6 +53,16 @@ impl Open {
     fn picked(&self, root: &Path) -> bool {
         self.picked.lock().expect("picked lock").contains(&key(root))
     }
+
+    /// Whether the user picked this folder (or opened it as a recent Project).
+    pub fn was_picked(&self, p: &Path) -> bool {
+        self.picked(p)
+    }
+
+    /// A folder the user chose before (a recent Project), openable as if picked now.
+    pub fn remember(&self, p: &Path) {
+        self.picked.lock().expect("picked lock").insert(key(p));
+    }
 }
 
 fn key(p: &Path) -> PathBuf {

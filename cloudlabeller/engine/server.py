@@ -111,6 +111,7 @@ class Engine:
 
         self.project = None          # cloudlabeller.core.project.Project | None
         self.dirty = False           # label arrays changed since the last full save
+        self.cache: dict = {}        # derived values of the open Project (loop thread)
         self.jobs = JobPlans(self)
 
     # -- output (any thread) ----------------------------------------------
@@ -222,6 +223,7 @@ class Engine:
             self.save_project()
         self.project = None
         self.dirty = False
+        self.cache.clear()
         arrays.clear(project.root)
 
     def require_project(self):

@@ -206,3 +206,53 @@ export async function installUpdate(on: (d: Downloading) => void): Promise<void>
   channel.onmessage = on;
   await invoke("update_install", { on: channel });
 }
+
+// -- files ----------------------------------------------------------------------
+
+/** A photo of the open Project, as its file's bytes (JPEG, PNG, TIFF…). */
+export function readPhoto(name: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("photo_read", { name });
+}
+
+export interface FileFilter {
+  name: string;
+  extensions: string[];
+}
+
+/** Ask the user for a file to read; only files picked here can be read. */
+export function pickFile(title: string, filters: FileFilter[]): Promise<string | null> {
+  return invoke("file_pick", { title, filters });
+}
+
+/** Ask the user where a file goes. */
+export function saveFile(
+  title: string,
+  name: string,
+  filters: FileFilter[],
+): Promise<string | null> {
+  return invoke("file_save", { title, name, filters });
+}
+
+/** A file the user picked, as its bytes. */
+export function readFile(path: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("file_read", { path });
+}
+
+/** A picked folder or file as the Engine sees it (`/mnt/c/…` in WSL). */
+export function enginePath(path: string): Promise<string> {
+  return invoke("engine_path", { path });
+}
+
+/** The recent Projects that still exist, newest first. */
+export function recentProjects(): Promise<string[]> {
+  return invoke("recent_list");
+}
+
+export function addRecentProject(root: string): Promise<void> {
+  return invoke("recent_add", { root });
+}
+
+/** Keep the computer from sleeping (during a pipeline), or let it again. */
+export function keepAwake(on: boolean): Promise<void> {
+  return invoke("keep_awake", { on });
+}

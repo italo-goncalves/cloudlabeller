@@ -42,3 +42,26 @@ A scratch copy of a Project's inputs on the Environment's own disk, where a
 Job does its heavy reading and writing before its products are copied back
 to the Project.
 _Avoid_: scratch, staging area, cache
+
+## Viewing and labelling
+
+**Lasso**:
+A loop drawn on the 3D view that takes every point of the cloud whose
+projection falls inside it, hidden or not, through the whole cloud rather
+than only the points on screen. What it took can be given the active class
+or, on the sparse cloud, deleted.
+_Avoid_: selection tool, brush (that paints a photo)
+
+**Frustum**:
+A solved photo's camera drawn in the 3D view: a wireframe pyramid from where
+it stood, coloured by the photo's status. Clicking one shows its photo;
+double-clicking one looks through it.
+_Avoid_: camera gizmo
+
+**Detail level**:
+How much of a thing is used. For reconstruction it is the photo size COLMAP
+works at (High, Medium, Low, or a pixel cap). For viewing it is how many of
+a cloud's points reach the screen (Low, Medium, High, Full); the rest of the
+cloud is still labelled and exported.
+_Avoid_: LOD, quality (MVS's own option)
+

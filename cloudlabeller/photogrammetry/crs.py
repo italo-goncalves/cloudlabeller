@@ -133,6 +133,24 @@ def projected_crs_catalogue() -> tuple[tuple[int, str], ...]:
                         key=lambda item: item[1].lower()))
 
 
+def search_projected_crs(query: str, limit: int = 50) -> list[tuple[int, str]]:
+    """Catalogue entries matching ``query``, case-insensitively, in name order.
+
+    Every whitespace-separated word of the query must occur somewhere in
+    ``"EPSG:<code> — <name>"`` (so "SIRGAS 22S" finds "SIRGAS 2000 / UTM
+    zone 22S", and "31983" finds its code). An empty query matches all.
+    """
+    words = query.lower().split()
+    out = []
+    for code, name in projected_crs_catalogue():
+        text = f"epsg:{code} — {name}".lower()
+        if all(w in text for w in words):
+            out.append((code, name))
+            if len(out) >= limit:
+                break
+    return out
+
+
 def crs_display(epsg: int, name: str | None = None) -> str:
     if name is None:
         import pyproj
@@ -303,6 +321,86 @@ def frame_labels(geo: dict | None) -> tuple[str, str]:
                  f"({off[0]:.0f}, {off[1]:.0f}, {off[2]:.0f}) to preserve "
                  f"precision; exports write the full coordinates.")
     return (short, full)
+
+
+def frame_offset(geo: dict | None) -> np.ndarray:
+    """The offset to add to stored coordinates for full CRS coordinates:
+    the reprojected frame's ``crs.offset``, else zero."""
+    crs_info = (geo or {}).get("crs") or {}
+    return np.asarray(crs_info.get("offset") or (0.0, 0.0, 0.0), np.float64)
+
+
+def heal_enu_origin(geo: dict, workspace: str | Path,
+                    images_dir: str | Path | None = None) -> tuple[EnuOrigin, bool]:
+    """:func:`resolve_enu_origin`, writing an exactly recovered origin back
+    into ``geo`` (legacy Projects stored the mean GPS). Returns the origin
+    and whether ``geo`` changed, so the caller saves the manifest."""
+    origin = resolve_enu_origin(geo, workspace, images_dir)
+    if origin.exact and geo.get("origin_convention") != ORIGIN_CONVENTION_FIRST_GPS:
+        geo["origin_lla"] = list(origin.lla)
+        geo["origin_convention"] = ORIGIN_CONVENTION_FIRST_GPS
+        return origin, True
+    return origin, False
+
+
+def export_spec(geo: dict | None, mode: str = "local", epsg: int | None = None,
+                orthometric: bool = False, origin_lla=None) -> dict:
+    """How an export writes coordinates, given the Project's frame.
+
+    - not georeferenced: ``{"kind": "local"}``, whatever was asked;
+    - reprojected: ``{"kind": "offset", epsg, orthometric, offset}``: stored
+      coordinates are already in the CRS, minus the offset;
+    - ENU: ``{"kind": "enu", epsg, orthometric, origin}`` for ``mode``
+      "projected" (``origin_lla`` is the resolved ENU origin), else local.
+    """
+    if not geo:
+        return {"kind": "local"}
+    crs_info = geo.get("crs")
+    if crs_info:
+        return {"kind": "offset", "epsg": crs_info["epsg"],
+                "orthometric": bool(crs_info.get("orthometric", False)),
+                "offset": list(crs_info.get("offset") or [0.0, 0.0, 0.0])}
+    if mode == "projected":
+        if epsg is None or origin_lla is None:
+            raise ValueError("a projected export needs an EPSG code and the ENU origin")
+        return {"kind": "enu", "epsg": int(epsg), "orthometric": bool(orthometric),
+                "origin": tuple(float(v) for v in origin_lla)}
+    return {"kind": "local"}
+
+
+def export_needs_geoid(spec: dict) -> bool:
+    """Whether an :func:`export_spec` needs the EGM96 grid and it is missing."""
+    if spec["kind"] != "enu" or not spec["orthometric"]:
+        return False
+    refresh_grid_cache()                  # another process may have fetched it
+    return not geoid_ready(spec["epsg"])
+
+
+def build_export_transform(spec: dict, progress=lambda f, m="": None):
+    """``(transform, crs)`` for :mod:`cloudlabeller.io.export`; ``(None,
+    None)`` for the local frame. May download the geoid grid once (the Qt
+    app does; the Engine asks for the ``geoid`` Job first)."""
+    if spec["kind"] == "local":
+        return None, None
+    import pyproj
+
+    epsg, orthometric = spec["epsg"], spec["orthometric"]
+    if spec["kind"] == "offset":
+        offset = np.asarray(spec["offset"], np.float64)
+        crs = _compound_crs(epsg) if orthometric else pyproj.CRS.from_epsg(int(epsg))
+
+        def transform(xyz):
+            return np.asarray(xyz, np.float64) + offset
+    else:
+        if orthometric:
+            refresh_grid_cache()
+            if not geoid_ready(epsg):
+                progress(0.01, "Downloading the EGM96 geoid grid (~3 MB, one-time)…")
+                download_geoid_grids(epsg)
+        transform, crs = enu_to_crs_transform(spec["origin"], epsg, orthometric)
+    progress(0.02, f"Coordinates: {crs_display(epsg)}"
+                   + (" + EGM96 heights" if orthometric else ""))
+    return transform, crs
 
 
 def choose_offset(coords: np.ndarray) -> np.ndarray:

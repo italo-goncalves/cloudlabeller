@@ -507,14 +507,18 @@ def test_job_arguments_match_the_clis(tmp_path):
     root = make_project(tmp_path / "p.clproj")
     engine = Engine(lambda data: None)
     engine.project = Project.open(root)
-    engine.project.settings["georeferenced"] = {"frame": "ENU"}
     options = {"ingest": {"folder": str(tmp_path)}, "sfm": {"gpu": True},
                "georef": {}, "reproject": {"epsg": 32723, "orthometric": True},
                # resume: the tiny test photos are too small for a fresh spec
-               "train": {"name": "m1", "epochs": 3, "include_auto": True, "resume": True}}
+               "train": {"name": "m1", "epochs": 3, "include_auto": True, "resume": True},
+               "geoid": {"epsg": 31982}}
+    if sys.platform == "win32":
+        options["colmap"] = {"variant": "cpu"}
     parsed = {}
     for name, opts in options.items():
         kind = KINDS[name]
+        if name == "reproject":                     # georef refuses a georeferenced one
+            engine.project.settings["georeferenced"] = {"frame": "ENU"}
         plan = kind.prepare(engine, engine.project, opts)
         cli = importlib.import_module(kind.module)
         parsed[name] = cli._parse([kind.module, *plan.args])   # exits on a bad flag
@@ -523,6 +527,10 @@ def test_job_arguments_match_the_clis(tmp_path):
     assert parsed["reproject"].epsg == 32723 and parsed["reproject"].orthometric
     assert parsed["train"].epochs == 3 and parsed["train"].include_auto
     assert parsed["train"].resume and parsed["train"].stop_file.endswith("train.stop")
+    assert parsed["geoid"].epsg == 31982
+    if "colmap" in parsed:
+        assert parsed["colmap"].variant == "nocuda"
+        assert parsed["colmap"].stop_file.endswith("colmap_download.stop")
     assert KINDS["sfm"].prepare(engine, engine.project, {"gpu": True}).gpu is True
     assert KINDS["sfm"].prepare(engine, engine.project, {}).gpu is False
     assert KINDS["train"].prepare(engine, engine.project, {"resume": True}).gpu is True

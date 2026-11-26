@@ -24,7 +24,11 @@ serde_json = "1"
 log = "0.4"
 # the Environment manager, processes and GPU Lease shared with GeoScape
 # (Apache-2.0, RockAnalytica) — ADR-0001
-geokit-env = { git = "https://github.com/rockanalytica/geokit", tag = "v0.2.0" }
+geokit-env = { git = "https://github.com/rockanalytica/geokit", tag = "v0.3.0" }
+
+[target.'cfg(windows)'.dependencies]
+# keeping the computer awake through a pipeline (MIT OR Apache-2.0)
+windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -342,6 +342,26 @@ class Project:
             return "none"
         return "outdated" if self.settings.get("reconstruction_outdated") else "current"
 
+    def filter_sparse_cloud(self, keep: np.ndarray) -> int:
+        """Keep only the sparse points where ``keep`` is True: rewrite
+        ``cloud.npz``, let the labels follow (which clears the undo history)
+        and return how many points went. The caller saves the Project."""
+        from cloudlabeller.core.dataset import PointCloud
+        from cloudlabeller.photogrammetry.pipeline import CLOUD_FILE
+
+        cloud = self.dataset.cloud
+        keep = np.asarray(keep, bool)
+        if cloud is None or len(keep) != cloud.n_points:
+            raise ValueError("keep must have one entry per sparse point")
+        new_cloud = PointCloud(xyz=cloud.xyz[keep],
+                               rgb=cloud.rgb[keep] if cloud.rgb is not None else None)
+        np.savez(self.reconstruction_dir / CLOUD_FILE, xyz=new_cloud.xyz,
+                 rgb=new_cloud.rgb if new_cloud.rgb is not None
+                 else np.empty((0, 3), np.uint8))
+        self.dataset.cloud = new_cloud
+        self.labels.filter_cloud(keep)
+        return cloud.n_points - new_cloud.n_points
+
     # -- lifecycle ---------------------------------------------------------
     @classmethod
     def create(cls, root: str | Path, schema: LabelSchema | None = None) -> "Project":

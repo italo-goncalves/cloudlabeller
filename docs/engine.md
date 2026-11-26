@@ -162,6 +162,11 @@ the whole mask, seeded from the overlay it showed. `mask` is an inbound
 `int32` Array file of the photo's size. Problems: `image.not_found`,
 `image.mask_shape`, `image.mask_values`.
 
+### `image.info`
+`{name}` → `{path, width, height}`. `path` is the photo's file, relative to
+the Project root with `/` separators. The size is the solved camera's, else
+the file's. Problem: `image.not_found`.
+
 ### `cloud.points`
 `{cloud?: "sparse"|"dense"}` → `{cloud, n_points, xyz, rgb}`. `xyz` is a
 `float32` Array file `[N, 3]`. `rgb` is a `uint8` one `[N, 3]`, or null.
@@ -176,12 +181,91 @@ class (`-1` erases), as one undoable edit. `indices` is an inbound `int32`
 or `uint32` Array file. Painting the dense cloud also updates the mesh's
 labels. Problems: `schema.no_class`, `cloud.bad_indices`.
 
+### `cloud.view`
+`{cloud?, max_points?: 0}` → `{cloud, n_points, shown, xyz, rgb, index}`. A
+display subsample: `max_points` points chosen uniformly at random with a
+fixed seed (the same ones every call), in the cloud's own order. `xyz` is
+`float32 [shown, 3]`, `rgb` is `uint8 [shown, 3]` or null, and `index` is
+an `int32 [shown]` Array file holding each shown point's index in the full
+cloud. When `max_points` is 0 or at least N, every point is shown and
+`index` is null. Problem: `cloud.none`.
+
+### `cloud.select`
+`{cloud?, view_projection, polygon, width, height}` → `{count, indices}`. A
+long request. Selects the full cloud's points whose screen projection lies
+inside the lasso, including points hidden behind others.
+
+- `view_projection` is 16 numbers, column-major as three.js's
+  `Matrix4.elements` gives them: `camera.projectionMatrix ×
+  camera.matrixWorldInverse`, which maps world coordinates to clip space.
+- `polygon` is `[[x, y], …]` in CSS pixels, origin top-left, y down, and
+  closes implicitly. The test is even-odd, so a region circled twice is
+  outside. A polygon of over 512 vertices is evenly thinned to 512.
+- `width` and `height` are the canvas size in CSS pixels.
+- Points behind the camera (clip w ≤ 0) are never selected.
+
+`indices` is a `uint32` Array file, ascending. Fewer than 3 vertices select
+nothing. Problem: `cloud.none`.
+
+### `cloud.delete`
+`{cloud?: "sparse", indices}` → `{removed, n_points}`. Deletes the chosen
+sparse points. The cloud file is rewritten, the labels follow the
+surviving points, the undo history is cleared, and the Project is saved.
+Only the sparse cloud can lose points. `indices` is an inbound `int32` or
+`uint32` Array file. Problem: `cloud.bad_indices`.
+
+### `cloud.stats`
+`{cloud?: "sparse"}` → `{n_points, matched, views, errors}`. A long
+request. The sparse points' SfM confidence, read from the saved COLMAP
+model. `views` is an `int32 [N]` Array file: how many photos saw each
+point, or 0 when the model lacks it. `errors` is a `float32 [N]` one: the
+mean reprojection error in pixels, infinite when unmatched. `matched` is
+the share of points the model holds. The statistics are cached until the
+cloud changes. Problems: `cloud.none`, `cloud.no_model` (no COLMAP model on
+disk), `cloud.model_mismatch` (`params.matched` is below 0.9: the model is
+from another solve), `cloud.changed` (the cloud changed while they were
+read).
+
+### `cloud.clean_preview`
+`{min_images, max_error}` → `{keep, total, removed}`. A long request. What
+a confidence clean would do. It keeps the points seen by at least
+`min_images` photos with an error of at most `max_error` pixels. `removed`
+is a `uint32` Array file of the points it would delete. Problems: as
+`cloud.stats`.
+
+### `cloud.clean`
+`{min_images, max_error}` → as `cloud.delete`. A long request. Applies the
+clean that `cloud.clean_preview` describes, as `cloud.delete` does.
+Problems: as `cloud.stats`.
+
+### `cameras.list`
+→ `{cameras: [{name, width, height, K, R, t, position, position_crs}], up}`.
+The solved cameras.
+
+- `K` and `R` are 3×3 lists of rows and `t` is 3 numbers. A world point
+  `X` projects as `K (R X + t)`.
+- `position` is the camera centre, `-Rᵀ t`, in the stored frame.
+  `position_crs` adds the reprojected frame's offset, so it is the full CRS
+  coordinate. It equals `position` when the Project isn't reprojected.
+- `up` is the scene's up for the home view: `[0, 0, 1]` when
+  georeferenced, otherwise the normalised mean of the cameras' `-R[1]`
+  (COLMAP's image y points down). It is null when there are no cameras
+  and no georeference.
+
 ### `mesh.geometry`
 → `{vertices, faces, colors}`: Array files `float32 [V, 3]`,
 `int32 [F, 3]` and `uint8 [V, 3]` (`colors` may be null). Problem: `mesh.none`.
 
 ### `mesh.labels`
 → `{labels}`: `int32 [V]`, nearest-point labels from the dense cloud.
+
+### `mesh.estimate`
+`{method?: "poisson"|"delaunay", depth?}` → `{minutes, ram_gb, vertices,
+suggested_depth, machine_ram_gb}`. A long request: the first one measures
+the dense cloud's point spacing. A very rough cost of meshing the dense
+cloud. `depth` null means `suggested_depth`, the Poisson depth whose cells
+match the point spacing. `machine_ram_gb` is this machine's RAM, or null.
+Problem: `job.mesh.no_dense`.
 
 ### `transfer.images_to_cloud`
 `{include_auto?: true}` → `{images, sparse, dense?}`. A long request.
@@ -214,8 +298,92 @@ at for this Project's photos, and why that size won't work (or null).
 ### `models.list`
 → `{models}`: the saved models' manifests, newest first.
 
+### `models.delete`
+`{name}` → `{models}`. Deletes a saved model, then lists the rest.
+Problems: `models.not_found`, `models.in_use` (a `train` or `predict` Job
+is outstanding).
+
+### `crs.search`
+`{query?: "", limit?: 50}` → `{results: [{epsg, name}]}`. Needs no Project.
+Searches the EPSG projected CRS catalogue, in name order. Every word of
+`query` must appear, case-insensitively, in `EPSG:<code> — <name>`, so
+"SIRGAS 22S" finds "SIRGAS 2000 / UTM zone 22S" and "31983" finds it by
+code.
+
+### `crs.suggest`
+→ `{epsg, name, origin_lla, exact}`. The UTM zone covering the site, in the
+national datum where there is one (SIRGAS 2000 in Brazil), else WGS 84.
+`origin_lla` is the ENU origin `[lat, lon, alt]`. An older Project that
+stored the mean GPS position gets its exact origin recovered and saved.
+`exact` is false when that wasn't possible because the photos are gone.
+Problem: `crs.not_georeferenced`.
+
+### `crs.frame`
+→ `{short, full}`. The Project's coordinate frame, described for the status
+bar (`short`, for example `EPSG:31983 (offset)`) and its tooltip (`full`).
+
+### `export.settings`
+→ `{frame, crs, export_mode, export_epsg, export_orthometric}`.
+
+- `frame` is `local` (not georeferenced), `enu` (georeferenced) or `crs`
+  (reprojected).
+- `crs` is the reprojected frame `{epsg, name, orthometric, offset}`, or
+  null. Stored coordinates are the CRS's minus `offset`.
+- `export_mode` (`local`, `projected` or null), `export_epsg` and
+  `export_orthometric` are an ENU Project's last export choice, kept in the
+  manifest.
+
+### `export.set_settings`
+`{export_mode?, export_epsg?, export_orthometric?}` → as `export.settings`.
+Params left out keep their values. `projected` needs `export_epsg`.
+Problem: `export.not_georeferenced`.
+
+### `export.cloud`
+`{path, format: "las"|"csv"|"ply", crs?, cloud?}` → `{path, cloud,
+n_points, crs}`. A long request. Writes a cloud and its labels.
+
+- `path` is absolute. `.<format>` is appended when it ends otherwise, and
+  the result's `path` is the file written.
+- `cloud` defaults to the dense cloud when there is one, else the sparse
+  cloud.
+- The coordinates follow the frame. `local` writes the stored ones and
+  `crs` the full CRS ones (stored plus offset); both ignore the `crs`
+  param. For `enu`, `crs` is `{mode: "local"}` or `{mode: "projected",
+  epsg, orthometric?}` and is kept as the export settings. Null reuses
+  them.
+- CSV and PLY get a `.prj` file beside them, and LAS carries the CRS
+  itself. The result's `crs` names it, or is null for the local frame.
+
+Problems: `cloud.none`, `export.no_folder`, `export.needs_geoid`
+(`params.epsg`: sea-level heights need the EGM96 grid, so run the `geoid`
+Job, then export again).
+
+### `export.mesh`
+`{path, format: "ply"|"obj"|"stl", crs?}` → `{path, vertices, faces, crs}`.
+A long request. Writes the mesh, with paths and coordinates as
+`export.cloud`. Problems: `mesh.none`, `export.no_folder`,
+`export.needs_geoid`.
+
+### `ingest.conflicts`
+`{folder}` → `{conflicts}`. The sorted names of the photos in `folder` that
+the image store already holds. The window asks whether to skip or
+overwrite them before it plans `ingest`. Problem: `job.ingest.no_folder`.
+
 ### `jobs.kinds`
 → `{kinds: [{kind, group, description}]}`
+
+### `jobs.facts`
+`{kind}` → what the kind's dialog shows before it is planned. A long
+request: it reads EXIF and measures the dense cloud.
+
+| `kind` | Result |
+|---|---|
+| `sfm` | `{gps_images, camera_models, matchers, gpu}`. `gps_images` counts the photos with GPS EXIF among the first 25, stopping at 3 (enough to offer georeferencing). `gpu`: a CUDA colmap.exe or a CUDA pycolmap is there. |
+| `mvs` | `{colmap}`: dense MVS can run (what `job.mvs.no_colmap` checks). |
+| `mesh` | `{delaunay, suggested_depth, ram_gb}`. `delaunay`: colmap.exe is there and the MVS workspace still has `fused.ply` and its visibility file. `suggested_depth` is null without a dense cloud. `ram_gb` is this machine's RAM, or null. |
+| `train` | `{user_images, auto_images, ml_images}`: the photos with a user mask that holds labels, the solved photos marked `auto`, and the photos marked `ml`. |
+
+Any other `kind` is invalid params.
 
 ### `jobs.plan`
 `{kind, options?}` → `{plan, kind, group, gpu, module, args, log, stop_file,
@@ -255,16 +423,33 @@ Until `jobs.finish`, a second plan of the same group is refused (Problem:
 |---|---|---|---|---|
 | `ingest` | reconstruction | no | `folder`, `on_conflict` (`skip` or `overwrite`) | `job.ingest.no_folder` |
 | `sfm` | reconstruction | when `gpu` | `matcher`, `gpu`, `single_camera`, `camera_model`, `max_image_size` | `job.sfm.no_images`, `job.sfm.no_cloud` † |
-| `georef` | reconstruction | no | `max_error` | `job.no_reconstruction` |
+| `georef` | reconstruction | no | `max_error` | `job.no_reconstruction`, `job.georef.already` |
 | `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced` |
 | `mvs` | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
 | `mesh` | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
-| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume` | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec` |
+| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume` | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch` |
 | `predict` | ml | yes | `model` | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing` |
+| `geoid` | download | no | `epsg` | |
+| `colmap` | download | no | `variant` (`cuda` or `cpu`) | `job.colmap.unsupported` |
 
 `job.mvs.no_colmap`: there is neither a CUDA colmap.exe nor a CUDA pycolmap
 (native Windows without COLMAP). `job.mesh.no_delaunay`: `delaunay` needs
 colmap.exe, so the WSL Environment offers Poisson only.
+`job.georef.already`: the Project is already georeferenced, and aligning it
+again would transform the model twice. `job.train.class_mismatch` (params
+`model`, `model_classes`, `project_classes`): `resume` names a saved model
+trained with a different number of classes.
+
+The `download` Jobs fetch into the user's own folders, not the Project:
+
+- `geoid` downloads the EGM96 grid (~3 MB) that sea-level heights in
+  `epsg` need. Its result is `{epsg}`.
+- `colmap` downloads the official COLMAP Windows release into
+  `~/.cloudlabeller/colmap`, where the Jobs look for colmap.exe. `cuda` is
+  ~307 MB and `cpu` ~114 MB. Its result is `{path, variant}`. It cancels
+  through its stop file and leaves no partial install.
+  `job.colmap.unsupported`: the Environment isn't native Windows (WSL uses
+  pycolmap).
 
 The Engine doesn't chain stages (SfM → georeferencing → MVS → mesh). The
 window does.

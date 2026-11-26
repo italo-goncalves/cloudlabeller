@@ -416,14 +416,10 @@ class Viewer3D(QWidget):
         image y-axis points DOWN in the image, so world up ≈ -mean(R[1]).
         (The + sign used before was tuned on an unreferenced solve whose
         frame turned out to be flipped — georeferencing exposed it.)"""
-        if self.project and self.project.settings.get("georeferenced"):
-            return np.array([0.0, 0.0, 1.0])
-        ups = [-e.camera.R[1] for e in self._frustums.values()]
-        if not ups:
-            return None
-        up = np.mean(ups, axis=0)
-        n = np.linalg.norm(up)
-        return up / n if n > 1e-9 else None
+        from cloudlabeller.photogrammetry.cameras import scene_up
+
+        return scene_up([e.camera.R for e in self._frustums.values()],
+                        bool(self.project and self.project.settings.get("georeferenced")))
 
     def _reset_view(self) -> None:
         """Home view: from the 'southeast' diagonal, elevated, looking down at

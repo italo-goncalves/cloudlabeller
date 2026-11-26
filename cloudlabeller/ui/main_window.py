@@ -613,11 +613,6 @@ class MainWindow(QMainWindow):
     def _apply_sparse_clean(self, keep) -> None:
         """Drop the sparse points where ``keep`` is False — persist the
         filtered cloud, let the labels follow, keep the camera in place."""
-        import numpy as np
-
-        from cloudlabeller.core.dataset import PointCloud
-        from cloudlabeller.photogrammetry.pipeline import CLOUD_FILE
-
         cloud = self.project.dataset.cloud if self.project else None
         if cloud is None or len(keep) != cloud.n_points:
             QMessageBox.warning(self, "Clean sparse cloud",
@@ -625,19 +620,11 @@ class MainWindow(QMainWindow):
                                 "nothing was removed. Reopen the dialog.")
             return
         n_before = cloud.n_points
-        new_cloud = PointCloud(
-            xyz=cloud.xyz[keep],
-            rgb=cloud.rgb[keep] if cloud.rgb is not None else None)
-        np.savez(self.project.reconstruction_dir / CLOUD_FILE,
-                 xyz=new_cloud.xyz,
-                 rgb=new_cloud.rgb if new_cloud.rgb is not None
-                 else np.empty((0, 3), np.uint8))
-        self.project.dataset.cloud = new_cloud
-        self.project.labels.filter_cloud(keep)     # labels follow; history cleared
+        removed = self.project.filter_sparse_cloud(keep)   # labels follow; history cleared
         self._save()
         self.viewer3d.preserve_view_once()         # in-place edit: keep the camera
         self.bus.cloud_changed.emit()
-        msg = (f"Sparse cloud cleaned: removed {n_before - new_cloud.n_points:,} "
+        msg = (f"Sparse cloud cleaned: removed {removed:,} "
                f"of {n_before:,} points")
         self.log_panel.append(msg)
         self.statusBar().showMessage(msg, 8000)
@@ -725,17 +712,12 @@ class MainWindow(QMainWindow):
     def _resolved_enu_origin(self):
         """The project's exact ENU origin (healing legacy projects that
         stored the mean GPS — persisted once recovered)."""
-        from cloudlabeller.photogrammetry.crs import (
-            ORIGIN_CONVENTION_FIRST_GPS,
-            resolve_enu_origin,
-        )
+        from cloudlabeller.photogrammetry.crs import heal_enu_origin
 
-        geo = self.project.settings["georeferenced"]
-        origin = resolve_enu_origin(geo, self.project.reconstruction_dir,
-                                    self.project.images_dir)
-        if origin.exact and geo.get("origin_convention") != ORIGIN_CONVENTION_FIRST_GPS:
-            geo["origin_lla"] = list(origin.lla)
-            geo["origin_convention"] = ORIGIN_CONVENTION_FIRST_GPS
+        origin, healed = heal_enu_origin(self.project.settings["georeferenced"],
+                                         self.project.reconstruction_dir,
+                                         self.project.images_dir)
+        if healed:
             self.project.save_manifest()
         return origin
 
@@ -1214,36 +1196,9 @@ class MainWindow(QMainWindow):
     def _build_export_transform(spec, progress):
         """(transform, crs) for an export work fn; (None, None) = local frame.
         Runs on the worker thread — may download the geoid grid once."""
-        if spec["kind"] == "local":
-            return None, None
-        import numpy as np
-        import pyproj
+        from cloudlabeller.photogrammetry.crs import build_export_transform
 
-        from cloudlabeller.photogrammetry.crs import (
-            _compound_crs,
-            crs_display,
-            download_geoid_grids,
-            enu_to_crs_transform,
-            geoid_ready,
-        )
-
-        epsg, orthometric = spec["epsg"], spec["orthometric"]
-        if spec["kind"] == "offset":
-            # Stored coordinates are already in the CRS, minus the offset.
-            offset = np.asarray(spec["offset"], np.float64)
-            crs = (_compound_crs(epsg) if orthometric
-                   else pyproj.CRS.from_epsg(int(epsg)))
-            transform = lambda xyz: np.asarray(xyz, np.float64) + offset  # noqa: E731
-        else:
-            if orthometric and not geoid_ready(epsg):
-                progress(0.01, "Downloading the EGM96 geoid grid "
-                               "(~3 MB, one-time)…")
-                download_geoid_grids(epsg)
-            transform, crs = enu_to_crs_transform(spec["origin"], epsg,
-                                                  orthometric)
-        progress(0.02, f"Coordinates: {crs_display(epsg)}"
-                       + (" + EGM96 heights" if orthometric else ""))
-        return transform, crs
+        return build_export_transform(spec, progress)
 
     def _export_cloud(self) -> None:
         """Export the dense cloud (or sparse, if no dense yet) with labels."""

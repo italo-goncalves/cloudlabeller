@@ -55,6 +55,11 @@ spike is done: all of COLMAP runs in WSL, see ADR-0003.)
    prediction, export. Along the way the kit gains camera frusta,
    single-point picking and lasso selection. Clouds reach the viewer as one
    flat buffer, thinned by the detail level.
+   *Under way (2026-11-26): geokit 0.3.0 has the frusta, the lasso, and
+   marks and class-colour blending on clouds. The window's screens are in
+   `apps/web/src` ([desktop.md](desktop.md#the-window)); the Engine methods
+   they need are in [engine.md](engine.md). Still to do: a run of the whole
+   workflow in the installed app.*
 5. **Release.** Qt and its tests are removed, the Windows installer is
    published, and Zenodo mints the new version's DOI.
 

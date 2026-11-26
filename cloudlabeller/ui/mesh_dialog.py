@@ -45,6 +45,7 @@ from cloudlabeller.photogrammetry.meshing import (
     delaunay_available,
     estimate_mesh_cost,
     suggest_poisson_depth,
+    total_ram_gb,
 )
 
 # (label template, depth). None = match the cloud density (auto).
@@ -55,30 +56,6 @@ DETAIL_CHOICES: list[tuple[str, int | None]] = [
     ("Standard (depth 11)", 11),
     ("Draft (depth 10)", 10),
 ]
-
-
-def total_ram_gb() -> float | None:
-    """This machine's physical RAM in GB (None if undeterminable)."""
-    try:
-        import ctypes
-
-        class _MemStatus(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong),
-                        ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_uint64),
-                        ("ullAvailPhys", ctypes.c_uint64),
-                        ("ullTotalPageFile", ctypes.c_uint64),
-                        ("ullAvailPageFile", ctypes.c_uint64),
-                        ("ullTotalVirtual", ctypes.c_uint64),
-                        ("ullAvailVirtual", ctypes.c_uint64),
-                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
-
-        stat = _MemStatus()
-        stat.dwLength = ctypes.sizeof(stat)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        return stat.ullTotalPhys / 2 ** 30
-    except Exception:
-        return None
 
 
 def format_estimate(est: dict, ram_gb: float | None) -> str:

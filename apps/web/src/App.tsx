@@ -3,14 +3,30 @@
 
 import { useCallback, useState } from "react";
 import { inDesktop, type Kept } from "./desktop/bridge";
-import { DeveloperPage } from "./developer/DeveloperPage";
 import { EnvironmentSetup } from "./environment/EnvironmentSetup";
+import { Window } from "./shell/Window";
+import { AppProvider, useApp } from "./state/app";
 import { Updates } from "./Updates";
 
 /** The window: the Environment first, then the Project. */
 export function App() {
+  return (
+    <AppProvider>
+      <Shell />
+    </AppProvider>
+  );
+}
+
+function Shell() {
+  const app = useApp();
   const [kept, setKept] = useState<Kept | null>(null);
-  const ready = useCallback((k: Kept) => setKept(k), []);
+  const ready = useCallback(
+    (k: Kept) => {
+      setKept(k);
+      app.dispatch({ type: "kept", kept: k });
+    },
+    [app.dispatch],
+  );
 
   if (!inDesktop()) {
     return (
@@ -26,7 +42,7 @@ export function App() {
     <main className="flex h-full flex-col bg-surface-0 text-fg">
       <Updates />
       <div className="min-h-0 flex-1">
-        {kept ? <DeveloperPage kept={kept} /> : <EnvironmentSetup onReady={ready} />}
+        {kept ? <Window /> : <EnvironmentSetup onReady={ready} />}
       </div>
     </main>
   );

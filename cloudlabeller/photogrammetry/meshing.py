@@ -121,6 +121,35 @@ def estimate_mesh_cost(n_points: int, depth: int, suggested_depth: int,
             "vertices": float(n_points) * min(1.0, 4.0 ** (depth - suggested_depth))}
 
 
+def total_ram_gb() -> float | None:
+    """This machine's physical RAM in GB (None if undeterminable)."""
+    import os
+    import sys
+
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_uint64),
+                            ("ullAvailPhys", ctypes.c_uint64),
+                            ("ullTotalPageFile", ctypes.c_uint64),
+                            ("ullAvailPageFile", ctypes.c_uint64),
+                            ("ullTotalVirtual", ctypes.c_uint64),
+                            ("ullAvailVirtual", ctypes.c_uint64),
+                            ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+            stat = _MemStatus()
+            stat.dwLength = ctypes.sizeof(stat)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return stat.ullTotalPhys / 2 ** 30
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30
+    except Exception:
+        return None
+
+
 def delaunay_available(workspace: str | Path | None) -> bool:
     """Whether the MVS workspace still has what ``delaunay_mesher`` needs:
     the fused cloud plus its per-point visibility (``fused.ply.vis``)."""

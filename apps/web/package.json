@@ -11,16 +11,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@geokit/ui": "github:rockanalytica/geokit#v0.2.0&path:packages/ui",
-    "@geokit/viewer": "github:rockanalytica/geokit#v0.2.0&path:packages/viewer",
+    "@geokit/ui": "github:rockanalytica/geokit#v0.3.0&path:packages/ui",
+    "@geokit/viewer": "github:rockanalytica/geokit#v0.3.0&path:packages/viewer",
     "@tauri-apps/api": "^2.12.5",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^5.0.0",
     "jsdom": "^26.0.0",
     "tailwindcss": "^4.1.0",

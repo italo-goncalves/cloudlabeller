@@ -41,7 +41,8 @@ have no stage and run on the Project in place.
 
 Two Jobs may be outstanding at once only if they are in different groups:
 ``reconstruction`` Jobs rewrite the Project's products, ``ml`` Jobs read
-labels and write models and predictions.
+labels and write models and predictions, ``download`` Jobs fetch the geoid
+grid or COLMAP into the user's own folders.
 """
 
 from __future__ import annotations
@@ -240,6 +241,10 @@ def _apply_sfm(engine, project, results, plan):
 def _prepare_georef(engine, project, options):
     if project.dataset.cloud is None:
         raise Problem("job.no_reconstruction", "Run SfM first.")
+    if project.settings.get("georeferenced"):
+        raise Problem("job.georef.already",
+                      "The Project is already georeferenced: aligning twice would "
+                      "transform the model twice.")
     max_error = _opt(options, "max_error", (int, float), 5.0)
     engine.save_project()                         # the child reads the Project from disk
     return Plan([str(project.root), "--max-error", str(float(max_error))],
@@ -370,7 +375,19 @@ def _prepare_train(engine, project, options):
         raise Problem("job.train.no_images", "Add images to the Project first.")
     name = _opt(options, "name", str, "unet")
     resume = _opt(options, "resume", bool, False)
-    if not resume:
+    if resume:
+        from cloudlabeller.ml.model_store import list_models
+
+        manifest = next((m for m in list_models(project.ml_dir) if m.get("name") == name),
+                        None)
+        n_classes = len(project.schema.classes)
+        if manifest is not None and manifest.get("n_classes") != n_classes:
+            raise Problem("job.train.class_mismatch",
+                          "The saved model has a different number of classes: "
+                          "it cannot be continued. Train a fresh one instead.",
+                          model=name, model_classes=manifest.get("n_classes"),
+                          project_classes=n_classes)
+    else:
         error = project.model_spec().validate_size(*source_res)
         if error:
             raise Problem("job.train.bad_spec", error)
@@ -429,6 +446,118 @@ def _apply_predict(engine, project, results, plan):
     project.save_manifest()
     engine.changed("status", images=names)
     return {"predicted": names}
+
+
+# -- downloads --------------------------------------------------------------------
+COLMAP_VARIANTS = {"cuda": "cuda", "cpu": "nocuda"}    # option -> release asset
+
+
+@kind("geoid", "cloudlabeller.photogrammetry.geoid_cli", "download",
+      "Download the EGM96 geoid grid for sea-level heights (~3 MB, once)")
+def _prepare_geoid(engine, project, options):
+    epsg = _opt(options, "epsg", int, None)
+    if epsg is None:
+        raise InvalidParams("option 'epsg' is required", option="epsg")
+    return Plan(["--epsg", str(epsg)], project.reconstruction_dir / "geoid.log")
+
+
+@applies("geoid")
+def _apply_geoid(engine, project, results, plan):
+    return parse_result(results)
+
+
+@kind("colmap", "cloudlabeller.photogrammetry.colmap_cli", "download",
+      "Download the official COLMAP release (Windows)")
+def _prepare_colmap(engine, project, options):
+    import sys
+
+    variant = _choice(options, "variant", tuple(COLMAP_VARIANTS), "cuda")
+    if sys.platform != "win32":
+        raise Problem("job.colmap.unsupported",
+                      "The COLMAP download is the Windows release; this Environment "
+                      "uses pycolmap instead.")
+    stop_file = project.reconstruction_dir / "colmap_download.stop"
+    stop_file.unlink(missing_ok=True)
+    return Plan(["--variant", COLMAP_VARIANTS[variant], "--stop-file", str(stop_file)],
+                project.reconstruction_dir / "colmap_download.log", stop_file=stop_file)
+
+
+@applies("colmap")
+def _apply_colmap(engine, project, results, plan):
+    out = parse_result(results)
+    variant = out.get("variant")
+    return {"path": out.get("path"),
+            "variant": next((k for k, v in COLMAP_VARIANTS.items() if v == variant),
+                            variant)}
+
+
+# -- facts -------------------------------------------------------------------------
+def _gpu_available() -> bool:
+    """Whether GPU SfM / MVS can run here: a CUDA colmap.exe or CUDA pycolmap."""
+    return _colmap_binary() is not None or _pycolmap_has_cuda()
+
+
+def facts(engine: "Engine", project: "Project", kind_name: str):
+    """What the window shows before planning a Job of ``kind_name``.
+
+    Returns ``(work, finish)`` for a Deferred: ``work`` reads files and
+    snapshots only, ``finish`` (loop thread) may cache.
+    """
+    if kind_name == "sfm":
+        from cloudlabeller.core.images import list_image_files
+        from cloudlabeller.photogrammetry.options import CAMERA_MODELS, MATCHERS
+
+        images_dir = project.images_dir
+
+        def work(progress):
+            from cloudlabeller.photogrammetry.georef import count_gps_images
+
+            return {"gps_images": count_gps_images(list_image_files(images_dir)),
+                    "camera_models": list(CAMERA_MODELS), "matchers": list(MATCHERS),
+                    "gpu": _gpu_available()}
+        return work, None
+    if kind_name == "mvs":
+        def work(progress):
+            return {"colmap": _gpu_available()}
+        return work, None
+    if kind_name == "mesh":
+        from cloudlabeller.photogrammetry.meshing import delaunay_available, total_ram_gb
+
+        dense = project.dataset.dense_cloud
+        cached = engine.cache.get("poisson_depth")
+        workspace = project.reconstruction_dir / "dense"
+
+        def work(progress):
+            depth = None
+            if dense is not None:
+                if cached is not None and cached[0] is dense:
+                    depth = cached[1]
+                else:
+                    from cloudlabeller.photogrammetry.meshing import suggest_poisson_depth
+
+                    depth = suggest_poisson_depth(dense)
+            return {"delaunay": _colmap_binary() is not None
+                    and delaunay_available(workspace),
+                    "suggested_depth": depth, "ram_gb": total_ram_gb()}
+
+        def finish(out):
+            if dense is not None and project.dataset.dense_cloud is dense:
+                engine.cache["poisson_depth"] = (dense, out["suggested_depth"])
+            return out
+        return work, finish
+    if kind_name == "train":
+        from cloudlabeller.core.label_schema import UNLABELLED_ID
+
+        labels = project.labels
+        user = sum(1 for n, m in labels.image_masks.items()
+                   if labels.status_of(n) == "user" and (m != UNLABELLED_ID).any())
+        auto = sum(1 for r in project.dataset.solved_images()
+                   if labels.status_of(r.name) == "auto")
+        ml = sum(1 for r in project.dataset.images if labels.status_of(r.name) == "ml")
+        out = {"user_images": user, "auto_images": auto, "ml_images": ml}
+        return (lambda progress: out), None
+    raise InvalidParams("jobs.facts covers sfm, mvs, mesh and train", kind=kind_name,
+                   kinds=["sfm", "mvs", "mesh", "train"])
 
 
 # -- plans ----------------------------------------------------------------------

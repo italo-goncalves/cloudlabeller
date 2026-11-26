@@ -29,6 +29,8 @@ imported, both are duplicated to private file descriptors for the protocol:
   every other call on that pipe, and native runtimes probe fd 0 when they
   load: SciPy's Fortran BLAS, loaded on a worker thread while the reader
   sat in ``readline``, hung the Engine forever.
+- Both copies are taken before either redirect, so neither reuses the
+  value of a startup handle that native runtimes probe as they load.
 
 Logs go to stderr.
 """
@@ -40,13 +42,19 @@ import sys
 
 
 def main() -> int:
+    # Both copies first, before a dup2 frees a startup handle: Windows reuses
+    # handle values, and a copy taken after ``dup2(2, 1)`` got the value of
+    # the startup stdout. Native runtimes probe the startup handles (from
+    # STARTUPINFO) when their DLL loads; probing the protocol pipe while the
+    # reader sat in a read blocked forever, holding the loader lock
+    # (pycolmap loaded on a worker thread, diagnosed 2026-11-26).
+    proto_in = os.dup(sys.stdin.fileno())
     proto_out = os.dup(sys.stdout.fileno())
     sys.stdout.flush()
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     sys.stdout = sys.stderr
     out = os.fdopen(proto_out, "wb", buffering=0)
 
-    proto_in = os.dup(sys.stdin.fileno())
     null = os.open(os.devnull, os.O_RDONLY)
     os.dup2(null, sys.stdin.fileno())
     os.close(null)

@@ -673,3 +673,46 @@ def jobs_finish(engine: Engine, params: dict) -> dict:
 def jobs_list(engine: Engine, params: dict) -> dict:
     """The plans not yet finished."""
     return {"jobs": engine.jobs.list()}
+
+
+@method("jobs.facts")
+def jobs_facts(engine: Engine, params: dict) -> Deferred:
+    """What a Job's dialog shows before planning it (GPS, GPU, depth, counts)."""
+    from cloudlabeller.engine.jobs import facts
+
+    work, finish = facts(engine, engine.project, require(params, "kind", str))
+    return Deferred(work, finish)
+
+
+# -- ingest -------------------------------------------------------------------------
+@method("ingest.conflicts")
+def ingest_conflicts(engine: Engine, params: dict) -> dict:
+    """The photos in a folder whose names are already in the image store."""
+    from cloudlabeller.core.images import find_conflicts
+
+    folder = require(params, "folder", str)
+    if not Path(folder).is_dir():
+        raise Problem("job.ingest.no_folder", "The folder does not exist.", folder=folder)
+    return {"conflicts": find_conflicts(folder, engine.project.images_dir)}
+
+
+# -- models -------------------------------------------------------------------------
+@method("models.delete")
+def models_delete(engine: Engine, params: dict) -> dict:
+    from cloudlabeller.ml.model_store import delete_model, list_models
+
+    name = require(params, "name", str)
+    ml_dir = engine.project.ml_dir
+    if not any(m.get("name") == name for m in list_models(ml_dir)):
+        raise Problem("models.not_found", "No saved model has that name.", name=name)
+    if any(o.kind.group == "ml" for o in engine.jobs.outstanding.values()):
+        raise Problem("models.in_use", "A training or prediction Job is running.")
+    delete_model(ml_dir, name)
+    engine.changed("settings")
+    return {"models": list_models(ml_dir)}
+
+
+# The scene (clouds, cameras, mesh) and the CRS/export methods live in their
+# own modules; importing them registers them.
+from cloudlabeller.engine import geo as _geo  # noqa: F401
+from cloudlabeller.engine import scene as _scene  # noqa: F401

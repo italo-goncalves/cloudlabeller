@@ -12,6 +12,7 @@
 
 pub mod engine;
 pub mod environment;
+pub mod files;
 pub mod jobs;
 pub mod project;
 pub mod updates;
@@ -25,6 +26,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Processes::default())
         .manage(project::Open::default())
+        .manage(files::Files::default())
         .manage(updates::Pending::default())
         .setup(|app| {
             environment::manage(app.handle())?;
@@ -42,6 +44,14 @@ pub fn run() {
             project::engine_cancel,
             project::array_read,
             project::array_write,
+            files::photo_read,
+            files::file_pick,
+            files::file_save,
+            files::file_read,
+            files::engine_path,
+            files::recent_list,
+            files::recent_add,
+            files::keep_awake,
             jobs::job_run,
             jobs::job_cancel,
             jobs::gpu_lease,

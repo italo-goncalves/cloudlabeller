@@ -99,3 +99,21 @@ def extract_distortion(model_name: str, params) -> np.ndarray | None:
         return None                          # pinhole or all-zero coefficients
     return coeffs.copy()
 
+
+
+def scene_up(rotations, georeferenced: bool) -> np.ndarray | None:
+    """The scene's up direction, for the home view.
+
+    Georeferenced Projects (ENU or a projected CRS) have +Z up by
+    construction. Otherwise COLMAP's world axes are arbitrary and up comes
+    from the cameras: COLMAP's image y-axis points down, so world up is
+    about ``-mean(R[1])``. None when there is nothing to go on.
+    """
+    if georeferenced:
+        return np.array([0.0, 0.0, 1.0])
+    ups = [-np.asarray(R, np.float64)[1] for R in rotations]
+    if not ups:
+        return None
+    up = np.mean(ups, axis=0)
+    n = np.linalg.norm(up)
+    return up / n if n > 1e-9 else None

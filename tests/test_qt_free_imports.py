@@ -42,13 +42,20 @@ CLI_MODULES = sorted(
 )
 ENGINE_MODULES = ["cloudlabeller.engine", "cloudlabeller.engine.server",
                   "cloudlabeller.engine.methods", "cloudlabeller.engine.jobs",
+                  "cloudlabeller.engine.scene", "cloudlabeller.engine.geo",
                   "cloudlabeller.engine.__main__"]
 # What the CLIs import inside main() (so a plain import of them misses it).
 RUNTIME_MODULES = ["cloudlabeller.workers.resources", "cloudlabeller.io.geometry",
                    "cloudlabeller.io.export", "cloudlabeller.photogrammetry.mvs",
                    "cloudlabeller.photogrammetry.meshing",
                    "cloudlabeller.photogrammetry.pipeline",
-                   "cloudlabeller.transfer"]
+                   "cloudlabeller.transfer",
+                   # what the Engine's methods import when called
+                   "cloudlabeller.core.selection", "cloudlabeller.core.images",
+                   "cloudlabeller.photogrammetry.crs", "cloudlabeller.photogrammetry.extract",
+                   "cloudlabeller.photogrammetry.cameras", "cloudlabeller.photogrammetry.georef",
+                   "cloudlabeller.photogrammetry.colmap_fetch",
+                   "cloudlabeller.photogrammetry.options", "cloudlabeller.ml.model_store"]
 
 _PROBE = """
 import importlib, sys
@@ -61,7 +68,7 @@ importlib.import_module({module!r})
 def test_every_stage_cli_is_found():
     names = {m.rsplit(".", 1)[1] for m in CLI_MODULES}
     assert {"run_cli", "mvs_cli", "mesh_cli", "georef_cli", "reproject_cli",
-            "train_cli", "predict_cli"} <= names
+            "train_cli", "predict_cli", "geoid_cli", "colmap_cli"} <= names
 
 
 @pytest.mark.parametrize("module", CLI_MODULES + ENGINE_MODULES + RUNTIME_MODULES)
