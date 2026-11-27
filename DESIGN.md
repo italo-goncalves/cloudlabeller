@@ -196,8 +196,8 @@ carrier.
 1. `dataset_builder.py` — training samples from the user's Masks **plus**
    masks synthesised by *cloud→image* projection (so labelling in 3D feeds
    2D training for free), from the chosen Surveys. `build_tile_set` cuts
-   each photo into Tiles; the train/validation split holds out whole
-   photos; `augment_data` mirrors, slides and gamma-shifts each Tile.
+   each photo into Tiles (uint8 images, int16 masks); the train/validation
+   split holds out whole photos.
 2. `model_spec.py` — the settings: Tile size in photo pixels, the shrink
    factor before the network, the overlap, the least-labelled fraction, and
    the architecture (`net_size = tile_size / shrink`, a multiple of
@@ -206,11 +206,15 @@ carrier.
    blending of overlapping Tiles at the network's resolution, and the
    Uncertainty (entropy over its maximum). Ported from `unet_tools`'
    `SlicedSegmentationProject` (same author, GPL-3.0).
-4. `unet.py` — the user's architecture (LOCKED) and `build_model`.
-5. `trainer.py` / `inference.py` — the training loop and predicting a photo
+4. `tile_dataset.py` — the input pipeline (`tf.data`): each epoch the Tiles
+   are fed in a new order, mirrored, slid and gamma-shifted (`unet_tools`'
+   augmentation) and batched inside the pipeline, so memory holds the Tiles
+   once plus a few batches, however many augmentation rolls.
+5. `unet.py` — the user's architecture (LOCKED) and `build_model`.
+6. `trainer.py` / `inference.py` — the training loop and predicting a photo
    Tile by Tile; predictions go to each Survey's `predictions/` as `.npz`
    (classes and Uncertainty at the photo's size over the shrink factor).
-6. Predicted masks can be **transferred back to the cloud** (§6), closing the
+7. Predicted masks can be **transferred back to the cloud** (§6), closing the
    loop: label a few → train → predict all → fuse into 3D.
 
 Long-running ML/SfM work runs as Jobs: separate processes the Tauri core
@@ -273,6 +277,7 @@ import existing cameras+cloud (Metashape/COLMAP export) → label & transfer.
 | `photogrammetry/triangulate.py`, `photogrammetry/align.py` | locating GCPs from photo Marks; fitting Surveys to GCPs and to each other |
 | `ml/dataset_builder.py` | Tile samples from labels + projections, split by photo |
 | `ml/model_spec.py`, `ml/tiles.py` | the Tile settings; cutting, blending, Uncertainty |
+| `ml/tile_dataset.py` | the `tf.data` training pipeline: augmentation and batches on the fly |
 | `ml/unet.py` | the user's U-Net (LOCKED) and `build_model` |
 | `ml/trainer.py` | the training loop |
 | `ml/inference.py` | predicting a photo Tile by Tile, predict-all |

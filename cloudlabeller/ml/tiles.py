@@ -114,21 +114,42 @@ def shrink_mask(tile: np.ndarray, shrink: int) -> np.ndarray:
     return resample_label_mask(tile, (n, n)).astype(np.int32)
 
 
+#: A training Tile's mask: class ids fit in 16 bits, half of int32's memory.
+MASK_DTYPE = np.int16
+
+
+def to_uint8(image: np.ndarray) -> np.ndarray:
+    """``image`` as uint8: floats in [0, 1] scaled to 0..255."""
+    if image.dtype == np.uint8:
+        return image
+    a = np.asarray(image, np.float32)
+    if a.size and float(a.max()) <= 1.0:
+        a = a * 255.0
+    return np.clip(np.rint(a), 0, 255).astype(np.uint8)
+
+
 def cut(image: np.ndarray, mask: np.ndarray, tile: int, overlap: float, shrink: int,
         min_labelled: float) -> list[tuple[tuple[int, int], np.ndarray, np.ndarray]]:
     """The training Tiles of one photo: ``((row, col), image, mask)``, each
     shrunk to the network's size, skipping Tiles less than ``min_labelled``
-    labelled. The padding is unlabelled."""
+    labelled. The padding is unlabelled.
+
+    Each Tile owns its memory (uint8 image, int16 mask): a view into the
+    padded photo would keep the whole photo alive for as long as one of its
+    Tiles is, which at full resolution is ~60 MB per photo."""
     grid = grid_for(image.shape[0], image.shape[1], tile, overlap)
-    img = pad(image, grid, 0)
+    img = pad(to_uint8(image), grid, 0)
     msk = pad(np.asarray(mask, np.int32), grid, UNLABELLED_ID)
     out = []
     for i, j, y, x in grid.origins():
         m = msk[y:y + tile, x:x + tile]
         if (m != UNLABELLED_ID).mean() < max(min_labelled, 1e-9):
             continue
-        out.append(((i, j), shrink_image(img[y:y + tile, x:x + tile], shrink),
-                    shrink_mask(m, shrink)))
+        timg = np.ascontiguousarray(shrink_image(img[y:y + tile, x:x + tile], shrink))
+        tmask = shrink_mask(m, shrink).astype(MASK_DTYPE)     # astype copies
+        if timg.base is not None:
+            timg = timg.copy()
+        out.append(((i, j), timg, tmask))
     return out
 
 

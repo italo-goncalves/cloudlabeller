@@ -133,6 +133,32 @@ class TestTileSet:
         assert {photo_of(s.name) for s in ts.samples} == set(photos)
         assert {s.weight for s in ts.samples if photo_of(s.name) == "s2/b"} == {0.5}
 
+    def test_tiles_are_compact_and_own_their_memory(self):
+        """Regression: training on 376 drone photos ran out of memory. Tiles
+        are uint8 images and int16 masks, and none is a view into its padded
+        photo (which would keep ~60 MB per photo alive)."""
+        rng = np.random.default_rng(0)
+        for shrink in (1, 2):
+            spec = ModelSpec(tile_size=32, shrink=shrink, overlap=0.25, min_labelled=0.0,
+                             blocks=1)
+            image = rng.random((40, 70, 3))                # floats in [0, 1]
+            ts = build_tile_set(["p"], lambda n: image,
+                                lambda n: np.zeros((40, 70), np.int32), spec)
+            assert ts.samples
+            for s in ts.samples:
+                assert s.image.dtype == np.uint8 and s.mask.dtype == np.int16
+                assert s.image.base is None and s.mask.base is None
+            if shrink == 1:                                # [0, 1] scaled to 0..255
+                assert abs(int(ts.samples[0].image[0, 0, 0]) - image[0, 0, 0] * 255) <= 0.5
+
+    def test_cutting_reports_each_photo(self):
+        spec = ModelSpec(tile_size=32, shrink=2, overlap=0.25, min_labelled=0.0, blocks=1)
+        seen = []
+        build_tile_set(["a", "b", "c"], lambda n: np.zeros((40, 40, 3), np.uint8),
+                       lambda n: None if n == "b" else np.zeros((40, 40), np.int32), spec,
+                       progress=lambda done, total: seen.append((done, total)))
+        assert seen == [(1, 3), (2, 3), (3, 3)]          # a photo without a mask too
+
     def test_validation_holds_out_whole_photos(self):
         samples = [Sample(f"p{p}#{i},0", np.zeros((2, 2, 3)), np.zeros((2, 2), np.int32))
                    for p in range(5) for i in range(4)]

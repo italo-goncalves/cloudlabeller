@@ -206,24 +206,6 @@ class TestMlStatus:
         assert targets == ["yellow", "red"]
 
 
-class TestToArrays:
-    def test_weights_have_broadcast_axes(self):
-        """Regression: Keras multiplies sample weights against the per-pixel
-        loss map (N,H,W); flat (N,) weights crash for batch size > 1."""
-        from cloudlabeller.ml.dataset_builder import Sample, TrainingSet
-        from cloudlabeller.ml.trainer import to_arrays
-
-        ts = TrainingSet([
-            Sample("a", np.zeros((8, 12, 3), np.uint8), np.zeros((8, 12), np.int32), 1.0),
-            Sample("b", np.zeros((8, 12, 3), np.uint8), np.zeros((8, 12), np.int32), 0.5),
-        ])
-        x, y, w = to_arrays(ts)
-        assert x.shape == (2, 8, 12, 3) and x.dtype == np.float32
-        assert y.shape == (2, 8, 12) and y.dtype == np.int32
-        assert w.shape == (2, 1, 1)                  # broadcasts over (N,H,W)
-        assert w[0, 0, 0] == 1.0 and w[1, 0, 0] == 0.5
-
-
 class TestMaskSource:
     def test_stored_masks_win_and_render_is_lazy(self):
         from cloudlabeller.transfer.project_to_cloud import MaskSource

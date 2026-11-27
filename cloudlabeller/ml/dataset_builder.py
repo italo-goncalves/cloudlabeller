@@ -30,9 +30,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import Callable
+
 import numpy as np
-import skimage.exposure as ske
-import cv2
 
 
 @dataclass
@@ -40,8 +40,8 @@ class Sample:
     """One training example: an image, its label mask, and a loss weight."""
 
     name: str
-    image: np.ndarray          # (H, W, C)
-    mask: np.ndarray           # (H, W) int32 class ids
+    image: np.ndarray          # (H, W, C), uint8 for Tiles
+    mask: np.ndarray           # (H, W) class ids (int16 for Tiles), -1 unlabelled
     weight: float = 1.0        # e.g. down-weight projection-derived masks
 
 
@@ -66,50 +66,11 @@ class TrainingSet:
         val = [s for s in self.samples if photo_of(s.name) in held]
         return TrainingSet(train), TrainingSet(val)
 
-    def augment_data(self, n_rolls=5):
-        """Augment by mirroring + sliding + gamma correction.
 
-        Each image is concatenated with its mirror to form a seamless
-        double-width panorama, then a full-width window is slid across it
-        (``2 * n_rolls`` positions); the image (only) gets a random gamma
-        tweak per window. Masks follow the same geometry untouched.
-        """
-        photos = [sample.image for sample in self.samples]
-        labels = [sample.mask for sample in self.samples]
-        names = [sample.name for sample in self.samples]
-        weights = [sample.weight for sample in self.samples]
-
-        resolution = photos[0].shape
-        width = resolution[1]
-
-        pixels_rolled = int(resolution[1] / n_rolls)
-        aug_x, aug_y, aug_names, aug_w = [], [], [], []
-        for tx, ty, name, w in zip(photos, labels, names, weights):
-            flipped_x = np.flip(tx, axis=1)
-            flipped_y = np.flip(ty, axis=1)
-
-            tx = np.concatenate([tx, flipped_x], axis=1)
-            ty = np.concatenate([ty, flipped_y], axis=1)
-
-            for r in range(n_rolls * 2):
-                tx = np.roll(tx, pixels_rolled, axis=1)
-                ty = np.roll(ty, pixels_rolled, axis=1)
-
-                tx_gamma = ske.adjust_gamma(tx[:, :width], np.exp(np.random.uniform(-0.4, 0.4)))
-
-                aug_x.append(tx_gamma)
-                aug_y.append(ty[:, :width])         # mask is (H, W): no channel axis
-                aug_names.append(f'{name}_aug_{r}')
-                aug_w.append(w)
-
-        augmented_dataset = [Sample(name, image, mask, weight)
-                             for name, image, mask, weight
-                             in zip(aug_names, aug_x, aug_y, aug_w)]
-        return TrainingSet(augmented_dataset)
+# The mirror/slide/gamma augmentation runs inside the input pipeline, one
+# batch at a time (``ml.tile_dataset``), never as copies of the whole set.
 
 
-#: A target pixel is kept labelled when labelled classes together cover at
-#: least this fraction of its area (below it, it becomes -1/unlabelled).
 def photo_of(sample_name: str) -> str:
     """The photo a sample came from (a Tile is named ``photo#row,col``)."""
     return sample_name.split("#", 1)[0]
@@ -191,15 +152,23 @@ def build_tile_set(
     spec,                               # ModelSpec: tile_size, overlap, shrink, min_labelled
     projected_weight: float = 0.5,
     projected_names: set[str] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> TrainingSet:
     """The Tiles of every labelled photo, at the network's size: one sample
-    per Tile with enough labels, named ``photo#row,col``."""
+    per Tile with enough labels, named ``photo#row,col``. ``progress(done,
+    total)`` is called after each photo: rendering a photo's mask from the
+    cloud can take seconds the first time.
+
+    Tiles are uint8 images and int16 masks; nothing is augmented here."""
     from cloudlabeller.ml.tiles import cut
 
     projected_names = projected_names or set()
     samples: list[Sample] = []
-    for name in labelled_image_names:
+    total = len(labelled_image_names)
+    for k, name in enumerate(labelled_image_names):
         image, mask = image_loader(name), mask_loader(name)
+        if progress is not None:
+            progress(k + 1, total)
         if mask is None:
             continue
         weight = projected_weight if name in projected_names else 1.0

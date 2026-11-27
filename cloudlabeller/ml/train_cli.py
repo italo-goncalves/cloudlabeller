@@ -53,6 +53,10 @@ from cloudlabeller.logging_setup import setup_logging
 log = logging.getLogger("cloudlabeller.ml")
 
 
+#: The share of the Job's progress bar the cutting takes.
+CUTTING = 0.09
+
+
 def _load_rgb(path) -> np.ndarray:
     from PIL import Image
 
@@ -178,9 +182,16 @@ def main(argv: list[str]) -> int:
     n = spec.net_size
     progress(0.01, f"Cutting {len(names)} photos into {spec.tile_size} px Tiles "
                    f"({n}×{n} px for the network)…")
+
+    def cutting(done: int, total: int) -> None:
+        # Rendering a photo's mask from the cloud takes seconds when its
+        # visibility isn't cached yet: show how far the cutting has got.
+        progress(0.01 + CUTTING * done / total,
+                 f"Cutting photos into Tiles: {done} of {total}")
+
     ts = build_tile_set(
         names, lambda k: _load_rgb(records[k][2]), mask_loader, spec,
-        projected_weight=0.5, projected_names=set(auto_names))
+        projected_weight=0.5, projected_names=set(auto_names), progress=cutting)
     if not ts.samples:
         log.error("no Tile is labelled enough to train on (at least %.0f%% of a Tile)",
                   100 * spec.min_labelled)
@@ -190,10 +201,10 @@ def main(argv: list[str]) -> int:
                           else (ts, None))
 
     if args.resume:
-        progress(0.03, f"Loading model '{args.name}' to continue training…")
+        progress(0.01 + CUTTING, f"Loading model '{args.name}' to continue training…")
         model, _ = model_store.load_model(proj.ml_dir, args.name)
     else:
-        progress(0.03, f"Building U-Net ({spec.channels} ch × {spec.blocks} "
+        progress(0.01 + CUTTING, f"Building U-Net ({spec.channels} ch × {spec.blocks} "
                        f"blocks, {n_classes} classes)…")
         model = build_model_from_spec(spec, n_classes)
 
@@ -201,7 +212,7 @@ def main(argv: list[str]) -> int:
         model, train_set, val_set,
         epochs=args.epochs, batch_size=args.batch_size,
         augment_rolls=args.augment_rolls,
-        progress=lambda f, m="": progress(0.03 + 0.94 * f, m),
+        progress=lambda f, m="": progress(0.01 + CUTTING + (0.97 - 0.01 - CUTTING) * f, m),
         should_stop=should_stop)
 
     progress(0.98, f"Saving model '{args.name}'…")

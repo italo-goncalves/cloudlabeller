@@ -29,28 +29,10 @@ from __future__ import annotations
 
 from typing import Callable
 
-import numpy as np
-
 from cloudlabeller.ml.dataset_builder import TrainingSet
 
 ProgressFn = Callable[[float, str], None]
 StopFn = Callable[[], bool]
-
-
-def to_arrays(ts: TrainingSet) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Stack a TrainingSet into model-ready arrays:
-    x (N,H,W,C) float32 in [0,1]; y (N,H,W) int32 (-1 = unlabelled, ignored by
-    the loss); w (N,1,1) float32 per-sample weights.
-
-    The weights carry two singleton axes because Keras multiplies them against
-    the per-PIXEL loss map (N,H,W): a flat (N,) vector fails to broadcast for
-    any batch size > 1 ("Dimensions must be equal, ... [5], [5,256,384]")."""
-    x = np.stack([s.image for s in ts.samples]).astype(np.float32)
-    if x.max() > 1.0:
-        x /= 255.0
-    y = np.stack([s.mask for s in ts.samples]).astype(np.int32)
-    w = np.asarray([s.weight for s in ts.samples], dtype=np.float32)
-    return x, y, w[:, None, None]
 
 
 def train(
@@ -67,24 +49,25 @@ def train(
 ) -> tuple[object, dict]:
     """Train ``model``; returns (model, history dict of per-epoch metrics).
 
-    ``augment_rolls`` > 0 expands the training set with the mirror/slide/gamma
-    augmentation (``TrainingSet.augment_data``); validation stays unaugmented.
+    The Tiles go through ``tile_dataset.make_dataset``: with ``augment_rolls``
+    > 0 each Tile gives ``2 * augment_rolls`` mirror/slide/gamma windows per
+    epoch, made batch by batch; validation stays unaugmented.
     """
     import tensorflow as tf
 
-    if augment_rolls > 0:
-        progress(0.0, f"Augmenting {len(train_set.samples)} samples "
-                      f"(x{2 * augment_rolls})…")
-        train_set = train_set.augment_data(n_rolls=augment_rolls)
+    from cloudlabeller.ml.tile_dataset import make_dataset, windows
 
-    x, y, w = to_arrays(train_set)
+    data = make_dataset(train_set, batch_size, augment_rolls, shuffle=True)
     validation = None
     if val_set is not None and val_set.samples:
-        vx, vy, vw = to_arrays(val_set)
-        validation = (vx, vy, vw)
+        validation = make_dataset(val_set, batch_size, 0, shuffle=False)
 
-    progress(0.0, f"Training on {len(x)} samples of {x.shape[2]}×{x.shape[1]} px"
-                  + (f" (validating on {len(validation[0])})" if validation else ""))
+    h, w = train_set.samples[0].image.shape[:2]
+    n = len(train_set.samples)
+    progress(0.0, f"Training on {n} Tiles of {w}×{h} px"
+                  + (f", {windows(augment_rolls)} augmented windows each per epoch"
+                     if augment_rolls > 0 else "")
+                  + (f" (validating on {len(val_set.samples)})" if validation else ""))
 
     class _Hooks(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
@@ -101,11 +84,9 @@ def train(
                 self.model.stop_training = True
 
     history = model.fit(
-        x, y,
-        sample_weight=w,
+        data,
         validation_data=validation,
         epochs=epochs,
-        batch_size=batch_size,
         callbacks=[_Hooks()],
         verbose=0,
     )

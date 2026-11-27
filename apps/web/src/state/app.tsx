@@ -25,6 +25,7 @@ import {
   type Problem,
 } from "../desktop/bridge";
 import * as api from "../engine/api";
+import { progressLog } from "../jobs/progress";
 import { type Action, type AppState, initialState, reduce } from "./store";
 
 export interface JobOutcome {
@@ -165,6 +166,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       new Promise<JobOutcome>((resolve, reject) => {
         dispatch({ type: "busy", busy: { label, fraction: null, message: "", waiting: null } });
         dispatch({ type: "log", text: `=== ${label} ===` });
+        const progressLines = progressLog();
         let settled = false;
         const end = (outcome: JobOutcome | null, problem?: Problem) => {
           if (settled) return;
@@ -197,9 +199,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
             case "started":
               dispatch({ type: "progress", fraction: null, message: "Started" });
               break;
-            case "progress":
+            case "progress": {
               dispatch({ type: "progress", fraction: said.fraction, message: said.message });
+              const text = progressLines.line(said.fraction, said.message);
+              if (text) dispatch({ type: "log", text });
               break;
+            }
             case "line":
               dispatch({ type: "log", text: said.line, err: said.err });
               break;
