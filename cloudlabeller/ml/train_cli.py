@@ -29,13 +29,17 @@ COLMAP's ``run_cli``.
 Usage::
 
     python -m cloudlabeller.ml.train_cli PROJECT_ROOT --name unet
-        [--epochs 100] [--batch-size 2] [--val-fraction 0.2]
-        [--augment-rolls 5] [--include-auto] [--stop-file PATH]
+        [--steps 50000 | --epochs N] [--patience 10] [--batch-size 2]
+        [--val-fraction 0.2] [--augment-rolls 5] [--include-auto]
+        [--stop-file PATH]
 
 Reads labels/statuses from the project on disk (the parent saves first).
-Emits ``PROGRESS <frac> <msg>`` lines; graceful cancel: the parent creates
-``--stop-file`` and the trainer halts after the current epoch, still saving
-the model. Prints ``RESULT <json>`` on success.
+Trains for ``--steps`` batches (as many epochs as that takes, rounded up),
+stops early after ``--patience`` epochs without a better validation loss,
+and saves the best epoch's weights. Emits ``PROGRESS <frac> <msg>`` lines;
+graceful cancel: the parent creates ``--stop-file`` and the trainer halts
+after the current epoch, still saving the model (its best epoch). Prints
+``RESULT <json>`` on success.
 """
 
 from __future__ import annotations
@@ -46,22 +50,14 @@ import logging
 import sys
 from pathlib import Path
 
-import numpy as np
-
 from cloudlabeller.logging_setup import setup_logging
+from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.ml")
 
 
 #: The share of the Job's progress bar the cutting takes.
 CUTTING = 0.09
-
-
-def _load_rgb(path) -> np.ndarray:
-    from PIL import Image
-
-    with Image.open(path) as im:
-        return np.asarray(im.convert("RGB"))
 
 
 def _history(manifest: dict | None, metrics: dict) -> dict:
@@ -75,7 +71,14 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="train_cli")
     p.add_argument("project_root")
     p.add_argument("--name", default="unet")
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--steps", type=int, default=50000,
+                   help="batches to train for; the epochs are as many as that takes, "
+                        "rounded up")
+    p.add_argument("--epochs", type=int, default=None,
+                   help="train for this many epochs instead of --steps")
+    p.add_argument("--patience", type=int, default=10,
+                   help="stop after this many epochs without a better validation "
+                        "loss (0: never stop early)")
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--augment-rolls", type=int, default=5)
@@ -169,9 +172,23 @@ def main(argv: list[str]) -> int:
             # Cloud-projected supplements only; never train on U-Net output ('ml').
             auto_names += [f"{sid}/{r.name}" for r in survey.dataset.solved_images()
                            if labels.status_of(r.name) == "auto"]
+    if spec.normals:
+        # Experimental: only photos the dense cloud's normals reach.
+        from cloudlabeller.ml.inputs import can_have_normals
+
+        def reached(key):
+            survey, name, _ = records[key]
+            return can_have_normals(survey, name)
+        left_out = [k for k in user_names + auto_names if not reached(k)]
+        if left_out:
+            log.warning("%d labelled photos have no normals (no camera or no dense "
+                        "cloud) and are left out: %s", len(left_out), ", ".join(left_out[:10]))
+        user_names = [k for k in user_names if reached(k)]
+        auto_names = [k for k in auto_names if reached(k)]
     names = user_names + auto_names
     if not names:
-        log.error("no labelled images to train on")
+        log.error("no labelled images to train on"
+                  + (" that the dense cloud's normals reach" if spec.normals else ""))
         return 2
 
     def mask_loader(key):
@@ -189,8 +206,14 @@ def main(argv: list[str]) -> int:
         progress(0.01 + CUTTING * done / total,
                  f"Cutting photos into Tiles: {done} of {total}")
 
+    from cloudlabeller.ml.inputs import load_input
+
+    def image_loader(key):
+        survey, name, path = records[key]
+        return load_input(survey, name, path, spec.normals)
+
     ts = build_tile_set(
-        names, lambda k: _load_rgb(records[k][2]), mask_loader, spec,
+        names, image_loader, mask_loader, spec,
         projected_weight=0.5, projected_names=set(auto_names), progress=cutting)
     if not ts.samples:
         log.error("no Tile is labelled enough to train on (at least %.0f%% of a Tile)",
@@ -206,30 +229,40 @@ def main(argv: list[str]) -> int:
     else:
         progress(0.01 + CUTTING, f"Building U-Net ({spec.channels} ch × {spec.blocks} "
                        f"blocks, {n_classes} classes)…")
-        model = build_model_from_spec(spec, n_classes)
+        model = build_model_from_spec(spec, n_classes, in_channels=spec.in_channels)
 
-    model, metrics = trainer.train(
+    model, metrics, outcome = trainer.train(
         model, train_set, val_set,
-        epochs=args.epochs, batch_size=args.batch_size,
-        augment_rolls=args.augment_rolls,
+        steps=None if args.epochs else args.steps, epochs=args.epochs,
+        batch_size=args.batch_size, augment_rolls=args.augment_rolls,
+        patience=args.patience,
         progress=lambda f, m="": progress(0.01 + CUTTING + (0.97 - 0.01 - CUTTING) * f, m),
         should_stop=should_stop)
 
-    progress(0.98, f"Saving model '{args.name}'…")
-    last = {k: v[-1] for k, v in metrics.items()}
+    best = outcome["best_epoch"]
+    progress(0.98, f"Saving model '{args.name}' as of epoch {best + 1} "
+                   f"(the lowest {outcome['monitor']})…")
+    kept = {k: v[best] for k, v in metrics.items() if len(v) > best}
+    history = _history(manifest, metrics)
+    before = len(history.get("loss", [])) - len(metrics.get("loss", []))
     model_store.save_model(
         model, proj.ml_dir, args.name, spec=spec, n_classes=n_classes,
-        input_size=(n, n),
-        class_names=[c.name for c in proj.schema.classes], metrics=last,
-        history=_history(manifest, metrics), surveys=wanted)
-    print("RESULT " + json.dumps({
+        input_size=(n, n), in_channels=spec.in_channels,
+        class_names=[c.name for c in proj.schema.classes], metrics=kept,
+        history=history, surveys=wanted, best_epoch=before + best,
+        monitor=outcome["monitor"])
+    print_result({
         "name": model_store.sanitize_name(args.name),
-        "epochs_run": len(metrics.get("loss", [])),
+        "steps_per_epoch": outcome["steps_per_epoch"],
+        "epochs": outcome["epochs"],
+        "epochs_run": outcome["epochs_run"],
+        "best_epoch": best + 1,
+        "stopped_early": outcome["stopped_early"],
         "n_train": len(train_set.samples),
         "n_val": len(val_set.samples) if val_set else 0,
         "resumed": bool(args.resume),
-        "metrics": last,
-    }), flush=True)
+        "metrics": kept,
+    })
     progress(1.0, "Training complete")
     return 0
 

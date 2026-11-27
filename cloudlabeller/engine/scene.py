@@ -44,6 +44,14 @@ from cloudlabeller.engine.protocol import InvalidParams, Problem
 from cloudlabeller.engine.server import Deferred, Engine, method, optional, require
 
 
+#: What ``cloud.view`` colours the points by: the photos, or the normals as a
+#: false-colour RGB (``transfer.normal_map.encode_normals``, Project frame).
+COLOURS = ("photo", "normals")
+
+#: A photo's normal map is sent at most this many pixels on its longer side.
+NORMALS_SIDE = 2048
+
+
 def _number(value, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidParams(f"param {name!r} must be a number", param=name)
@@ -62,17 +70,44 @@ def cloud_view(engine: Engine, params: dict) -> dict:
     max_points = optional(params, "max_points", int, 0)
     if max_points < 0:
         raise InvalidParams("max_points must be 0 or more", param="max_points")
+    colour = optional(params, "colour", str, "photo")
+    if colour not in COLOURS:
+        raise InvalidParams(f"colour must be one of {', '.join(COLOURS)}", param="colour")
     root, base = engine.project.root, f"view/{survey.id}/{which}"
     index = even_subsample(cloud.n_points, max_points)
     xyz = cloud.xyz if index is None else cloud.xyz[index]
     xyz = survey.active.frame_points(xyz)
-    rgb = cloud.rgb if (index is None or cloud.rgb is None) else cloud.rgb[index]
+    if colour == "normals":
+        if cloud.normals is None:
+            raise Problem("cloud.no_normals", "This cloud has no normals: only a dense "
+                          "cloud does.", cloud=which)
+        from cloudlabeller.transfer.normal_map import encode_normals, unit
+
+        normals = cloud.normals if index is None else cloud.normals[index]
+        rgb = encode_normals(unit(survey.active.frame_normals(normals)))
+    else:
+        rgb = cloud.rgb if (index is None or cloud.rgb is None) else cloud.rgb[index]
     return {"cloud": which, "n_points": cloud.n_points, "shown": len(xyz),
             "xyz": arrays.write(root, f"{base}/xyz", xyz.astype(np.float32)),
             "rgb": (arrays.write(root, f"{base}/rgb", rgb.astype(np.uint8))
                     if rgb is not None else None),
             "index": (arrays.write(root, f"{base}/index", index.astype(np.int32))
                       if index is not None else None)}
+
+
+@method("image.normals")
+def image_normals(engine: Engine, params: dict) -> dict:
+    """A photo coloured by the dense cloud's normals, as the cloud is."""
+    survey = _survey(engine, params)
+    record = _image(survey, params)
+    nmap = survey.normal_map(record.name, "world")
+    if nmap is None:
+        return {"normals": None, "step": None}
+    step = max(1, -(-max(nmap.shape[:2]) // NORMALS_SIDE))
+    small = np.ascontiguousarray(nmap[::step, ::step])
+    return {"normals": arrays.write(engine.project.root,
+                                    f"normals/{survey.id}/{record.name}", small),
+            "step": step}
 
 
 @method("cloud.select")

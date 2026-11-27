@@ -83,6 +83,14 @@ it reaches the network; photos of any size or shape yield Tiles of the same
 size. Predictions of overlapping Tiles are blended into one per Photo.
 _Avoid_: patch, crop, chip, window
 
+**Normal map**:
+The dense cloud's surface normals drawn into a Photo: each pixel holds the
+normal of the point it sees, shown in false colour (red east, green north,
+blue up). Only a Photo with a camera in a Survey with a dense cloud has one.
+It can also be given to the network beside the Photo's colours, an
+experimental option.
+_Avoid_: normal image, slope map
+
 **Uncertainty**:
 How unsure a prediction is at each pixel of a Photo (the entropy of its
 Class probabilities), kept with the Photo's prediction.

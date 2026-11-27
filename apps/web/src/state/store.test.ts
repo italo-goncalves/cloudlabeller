@@ -21,6 +21,7 @@ const project = (over: Partial<ProjectState> = {}): ProjectState => ({
   sparse: 100,
   dense: null,
   mesh: null,
+  normals: false,
   georeferenced: false,
   source_resolution: [4000, 3000],
   can_undo: false,

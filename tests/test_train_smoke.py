@@ -39,6 +39,7 @@ def test_train_save_load_predict(tmp_path):
     from cloudlabeller.ml import inference, model_store, trainer
     from cloudlabeller.ml.dataset_builder import build_tile_set
     from cloudlabeller.ml.model_spec import ModelSpec
+    from cloudlabeller.ml.tile_dataset import make_dataset, n_batches
     from cloudlabeller.ml.unet import build_model_from_spec
 
     rng = np.random.default_rng(0)
@@ -66,12 +67,19 @@ def test_train_save_load_predict(tmp_path):
     model = build_model_from_spec(spec, n_classes=2)
 
     msgs = []
-    model, metrics = trainer.train(
-        model, train_set, val_set, epochs=2, batch_size=2, augment_rolls=1,
+    per_epoch = n_batches(len(train_set.samples), 1, 2)
+    model, metrics, outcome = trainer.train(
+        model, train_set, val_set, steps=per_epoch + 1, batch_size=2, augment_rolls=1,
         progress=lambda f, m="": msgs.append((f, m)))
-    assert len(metrics["loss"]) == 2
-    assert "val_loss" in metrics
+    assert len(metrics["loss"]) == 2                   # one step past an epoch: 2 epochs
+    assert outcome["epochs"] == outcome["epochs_run"] == 2
+    assert outcome["monitor"] == "val_loss" and "val_loss" in metrics
+    assert outcome["best_epoch"] == int(np.argmin(metrics["val_loss"]))
     assert any("epoch 2/2" in m for _, m in msgs)
+    # The weights kept are the best epoch's: evaluated again, they score its val_loss.
+    again = model.evaluate(make_dataset(val_set, 2, 0, shuffle=False), verbose=0,
+                           return_dict=True)
+    assert again["loss"] == pytest.approx(metrics["val_loss"][outcome["best_epoch"]], rel=1e-3)
 
     model_store.save_model(model, tmp_path, "smoke", spec=spec, n_classes=2,
                            input_size=(n, n), history=metrics)
@@ -132,10 +140,12 @@ def test_train_and_predict_cli_subprocess(tmp_path):
         return json.loads(result[-1][7:])
 
     out = run("cloudlabeller.ml.train_cli", "--name", "cli smoke",
-              "--epochs", "2", "--batch-size", "1", "--augment-rolls", "1",
+              "--steps", "3", "--batch-size", "1", "--augment-rolls", "1",
               "--val-fraction", "0.34")
     assert out["name"] == "cli smoke"
-    assert out["epochs_run"] == 2
+    assert out["epochs"] == out["epochs_run"] == -(-3 // out["steps_per_epoch"])
+    first = out["epochs_run"]
+    assert 1 <= out["best_epoch"] <= first
     assert (proj.ml_dir / "models" / "cli smoke" / "model.weights.h5").exists()
 
     # Resume: load the saved model and train it for more epochs. Architecture
@@ -153,7 +163,9 @@ def test_train_and_predict_cli_subprocess(tmp_path):
                            "manifest.json").read_text())
     assert manifest["spec"]["channels"] == 4            # saved arch, not current
     assert manifest["input_size"] == [32, 32] and manifest["surveys"] == ["s1"]
-    assert len(manifest["history"]["loss"]) == 3        # 2 epochs, then 1 more
+    assert len(manifest["history"]["loss"]) == first + 1   # then 1 more
+    assert manifest["monitor"] == "loss"                   # nothing held out
+    assert manifest["best_epoch"] == first                 # the resumed run's only epoch
 
     out = run("cloudlabeller.ml.predict_cli", "--model", "cli smoke", "--surveys", "s1")
     assert [(p["survey"], p["name"]) for p in out["predicted"]] == [("s1", "c.jpg")]

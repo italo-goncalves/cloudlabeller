@@ -251,6 +251,9 @@ export function Viewer3D() {
   // -- geometry ---------------------------------------------------------------
 
   const detailKey = rep === "mesh" ? "-" : view.detail;
+  // the normals as colours: the dense cloud's only
+  const colour: api.CloudColour =
+    view.colourBy === "normals" && rep === "dense" && project?.normals ? "normals" : "photo";
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new Project, cloud, detail or geometry reloads; the rest is read as it is
   useEffect(() => {
     const rig = rigRef.current;
@@ -270,7 +273,7 @@ export function Viewer3D() {
           if (!dead) rig.setMesh(geo, labels, geometryVersion, lv);
         } else {
           const [cloud, labels] = await Promise.all([
-            api.cloudView(rep, nodeLimit(VIEW_DETAIL[view.detail])),
+            api.cloudView(rep, nodeLimit(VIEW_DETAIL[view.detail]), colour),
             api.cloudLabels(rep),
           ]);
           if (!dead) rig.setCloud(rep, cloud, labels, geometryVersion, lv);
@@ -285,7 +288,7 @@ export function Viewer3D() {
     return () => {
       dead = true;
     };
-  }, [root, present, rep, detailKey, geometryVersion]);
+  }, [root, present, rep, detailKey, geometryVersion, colour]);
 
   // new labels: re-read them and recolour in place
   // biome-ignore lint/correctness/useExhaustiveDependencies: `dataRev` says what is loaded now

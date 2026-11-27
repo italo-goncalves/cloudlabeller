@@ -46,6 +46,7 @@ export function ViewPane() {
   const className = project?.schema.find((c) => c.id === activeClass)?.name;
   const canPaint = selection !== null && (project?.schema.length ?? 0) > 0;
   const canDelete = selection !== null && selection.cloud === "sparse";
+  const canNormals = view.representation === "dense" && Boolean(project?.normals);
 
   const apply = async () => {
     if (!selection) return;
@@ -149,6 +150,24 @@ export function ViewPane() {
         </Section>
 
         <Section title="Colour">
+          <Radios<api.CloudColour>
+            name="colour-by"
+            value={view.colourBy === "normals" && canNormals ? "normals" : "photo"}
+            onChange={(colourBy) => set({ colourBy })}
+            options={[
+              { value: "photo", label: "Photo colours" },
+              {
+                value: "normals",
+                label: "Normals (false colour)",
+                disabled: !canNormals,
+              },
+            ]}
+          />
+          <p className="mb-2 text-fg-faint">
+            {canNormals
+              ? "Normals: red east, green north, blue up."
+              : "Normals: the dense cloud only."}
+          </p>
           <Slider
             label="Blend from photo colours to labels"
             value={view.blend}
@@ -158,7 +177,7 @@ export function ViewPane() {
             onChange={(blend) => set({ blend })}
           />
           <div className="flex justify-between text-fg-faint">
-            <span>RGB</span>
+            <span>{view.colourBy === "normals" && canNormals ? "Normals" : "RGB"}</span>
             <span>Labels</span>
           </div>
         </Section>

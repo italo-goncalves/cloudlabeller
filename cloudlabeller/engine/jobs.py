@@ -157,12 +157,24 @@ def _stage(project: "Project", reads: list[Path], writes: list[Path]) -> dict:
 
 
 def parse_result(results: dict, key: str = "RESULT") -> dict:
-    """The JSON payload of a ``RESULT <json>`` line, or ``{}``."""
-    text = results.get(key, "")
-    try:
-        value = json.loads(text) if text else {}
-    except json.JSONDecodeError:
+    """The JSON payload of a ``RESULT <json>`` line, or ``{}`` when there is
+    none. A long payload comes in numbered pieces, ``RESULT.0``,
+    ``RESULT.1``, … (``workers.result.print_result``), joined here.
+
+    A payload that is there but isn't JSON is a Problem, never ``{}``: in
+    0.4.0 a 65 KB prediction result arrived cut in two (the core tells longer
+    lines in pieces), parsed as nothing, and no predicted photo was marked."""
+    pieces = sorted((int(k[len(key) + 1:]), v) for k, v in results.items()
+                    if k.startswith(key + ".") and k[len(key) + 1:].isdigit())
+    text = "".join(v for _, v in pieces) if pieces else results.get(key, "")
+    if not text:
         return {}
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise Problem("job.bad_result", "The Job's result could not be read: "
+                      f"{exc.msg} at character {exc.pos} of {len(text)}.",
+                      key=key, length=len(text)) from exc
     return value if isinstance(value, dict) else {}
 
 
@@ -479,6 +491,16 @@ def _apply_mesh(engine, project, results, plan):
 
 
 # -- ml ---------------------------------------------------------------------------
+def _need_normals(project, surveys: list[str], code: str) -> None:
+    """A model on the cloud's normals (experimental) needs each Survey's
+    active Reconstruction to have a dense cloud with normals."""
+    lacking = [s for s in surveys if not project.surveys[s].has_normals()]
+    if lacking:
+        raise Problem(code, "The model uses the cloud's normals (experimental), and "
+                      f"{', '.join(lacking)} has no dense cloud: run MVS there first, or "
+                      "leave it out.", surveys=lacking)
+
+
 def _surveys_option(project, options) -> list[str]:
     """The Surveys an ml Job covers (option ``surveys``; default: all)."""
     given = options.get("surveys")
@@ -509,6 +531,8 @@ def _prepare_train(engine, project, options):
 
         manifest = next((m for m in list_models(project.ml_dir) if m.get("name") == name),
                         None)
+        if manifest is not None and (manifest.get("spec") or {}).get("normals"):
+            _need_normals(project, surveys, "job.train.no_normals")
         if manifest is not None and not is_tiled(manifest):
             raise Problem("job.train.legacy_model",
                           "That model was trained on whole photos, before Tiles: train a "
@@ -521,15 +545,19 @@ def _prepare_train(engine, project, options):
                           model=name, model_classes=manifest.get("n_classes"),
                           project_classes=n_classes)
     else:
-        error = project.model_spec().validate()
+        spec = project.model_spec()
+        error = spec.validate()
         if error:
             raise Problem("job.train.bad_spec", error)
+        if spec.normals:
+            _need_normals(project, surveys, "job.train.no_normals")
     # TensorFlow runs in the child; it reads the Project from disk.
     engine.save_project()
     stop_file = project.ml_dir / "train.stop"
     stop_file.unlink(missing_ok=True)
     args = [str(project.root), "--name", name,
-            "--epochs", str(_opt(options, "epochs", int, 100)),
+            "--steps", str(max(1, _opt(options, "steps", int, 50000))),
+            "--patience", str(max(0, _opt(options, "patience", int, 10))),
             "--batch-size", str(_opt(options, "batch_size", int, 2)),
             "--val-fraction", str(float(_opt(options, "val_fraction", (int, float), 0.2))),
             "--augment-rolls", str(_opt(options, "augment_rolls", int, 5)),
@@ -567,6 +595,8 @@ def _prepare_predict(engine, project, options):
                       "That model was trained on whole photos, before Tiles: retrain it.",
                       model=model)
     surveys = _surveys_option(project, options)
+    if (manifest.get("spec") or {}).get("normals"):
+        _need_normals(project, surveys, "job.predict.no_normals")
     n_classes = len(project.schema.classes)
     if manifest.get("n_classes") != n_classes:
         raise Problem("job.predict.class_mismatch",

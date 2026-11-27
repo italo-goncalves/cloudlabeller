@@ -511,7 +511,8 @@ def test_job_arguments_match_the_clis(tmp_path):
     options = {"ingest": {"survey": "s1", "folder": str(tmp_path)},
                "sfm": {"survey": "s1", "gpu": True},
                "georef": {"survey": "s1"}, "reproject": {"epsg": 32723, "orthometric": True},
-               "train": {"name": "m1", "epochs": 3, "include_auto": True, "resume": True,
+               "train": {"name": "m1", "steps": 300, "patience": 4, "include_auto": True,
+                         "resume": True,
                          "surveys": ["s1"]},
                "geoid": {"epsg": 31982}}
     if sys.platform == "win32":
@@ -531,7 +532,8 @@ def test_job_arguments_match_the_clis(tmp_path):
     assert parsed["ingest"].ingest_only and parsed["ingest"].on_conflict == "skip"
     assert parsed["sfm"].gpu and parsed["sfm"].matcher == "spatial"
     assert parsed["reproject"].epsg == 32723 and parsed["reproject"].orthometric
-    assert parsed["train"].epochs == 3 and parsed["train"].include_auto
+    assert parsed["train"].steps == 300 and parsed["train"].patience == 4
+    assert parsed["train"].epochs is None and parsed["train"].include_auto
     assert parsed["train"].resume and parsed["train"].stop_file.endswith("train.stop")
     assert parsed["geoid"].epsg == 31982
     if "colmap" in parsed:
@@ -653,6 +655,52 @@ def test_plan_says_how_to_run_and_finish_applies(pipe, tmp_path):
     assert any(n["params"].get("images") == ["b.png"] for n in pipe.drained("project.changed"))
     assert Project.open(root).survey("s1").labels.status_of("b.png") == "ml"   # persisted
     assert pipe.call("jobs.list") == {"jobs": []}
+
+
+def _core_results(text: str) -> dict:
+    """``RESULT…`` lines as the core hands them to ``jobs.finish``."""
+    out = {}
+    for line in text.splitlines():
+        if line.startswith("RESULT"):
+            key, _, rest = line.partition(" ")
+            out[key] = rest.strip()
+    return out
+
+
+def test_a_long_result_arrives_in_pieces_and_is_applied(pipe, tmp_path):
+    """Regression: predicting 1,399 photos printed a 65 KB RESULT line, the
+    core told it in two pieces (lines are capped at 64 KiB), the JSON failed
+    to parse as nothing, and no photo was marked predicted."""
+    import io
+
+    from cloudlabeller.workers.result import print_result
+
+    root = make_project(tmp_path / "p.clproj")
+    _fake_model(root)
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
+    predicted = [{"survey": "s1", "name": "b.png", "uncertainty": 0.25}] + [
+        {"survey": "s9", "name": f"photo {k:04d}.JPG", "uncertainty": k / 7} for k in range(400)]
+    out = io.StringIO()
+    print_result({"predicted": predicted}, file=out, size=1000)
+    results = _core_results(out.getvalue())
+    assert len(results) > 10 and "RESULT" not in results
+    done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0, "results": results})
+    assert done["ok"] is True and done["result"] == {"predicted": predicted}
+    statuses = {i["name"]: i["status"] for i in pipe.call("project.state")["surveys"][0]["images"]}
+    assert statuses["b.png"] == "ml"
+
+
+def test_a_result_that_is_not_json_fails_the_job(pipe, tmp_path):
+    root = make_project(tmp_path / "p.clproj")
+    _fake_model(root)
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
+    cut = json.dumps({"predicted": [{"survey": "s1", "name": "b.png"}]})[:30]
+    done = pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0,
+                                     "results": {"RESULT": cut}})
+    assert done["ok"] is False and done["error"]["code"] == "job.bad_result"
+    assert pipe.call("project.state")["surveys"][0]["images"][1]["status"] == "none"
 
 
 def test_outstanding_plans_guard_the_project(pipe, tmp_path):
@@ -799,3 +847,84 @@ def test_delaunay_mesh_needs_colmap_exe(tmp_path, monkeypatch):
     engine = _staged_engine(tmp_path / "exe", monkeypatch, binary="colmap.exe", cuda=False)
     plan = KINDS["mesh"].prepare(engine, engine.project, {"survey": "s1", "method": "delaunay"})
     assert plan.args[-2:] == ["--colmap-binary", "colmap.exe"]
+
+
+# -- normals (experimental) ------------------------------------------------------------
+def _add_dense(root: Path) -> None:
+    """A dense cloud facing the cameras: every normal points back at them (-z)."""
+    from cloudlabeller.io.geometry import save_cloud_npz
+
+    proj = Project.open(root)
+    rng = np.random.default_rng(1)
+    xyz = np.column_stack([rng.uniform(-1.5, 1.5, 4000), rng.uniform(-1, 1, 4000),
+                           np.full(4000, 5.0)]).astype(np.float32)
+    normals = np.tile(np.array([0, 0, -1], np.float32), (4000, 1))
+    save_cloud_npz(PointCloud(xyz=xyz, rgb=np.full((4000, 3), 90, np.uint8), normals=normals),
+                   product_dir(proj, "mvs") / "dense.npz")
+
+
+def _settle(pipe) -> None:
+    """End the plans an earlier test on this module's Engine left outstanding."""
+    for job in pipe.call("jobs.list")["jobs"]:
+        pipe.call("jobs.finish", {"plan": job["plan"], "exit": None})
+
+
+def test_the_cloud_and_photos_can_be_coloured_by_normals(pipe, tmp_path):
+    _settle(pipe)
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    assert pipe.call("project.state")["surveys"][0]["normals"] is False
+    with pytest.raises(RpcError) as err:
+        pipe.call("cloud.view", {"survey": "s1", "cloud": "sparse", "colour": "normals"})
+    assert err.value.data["code"] == "cloud.no_normals"
+    assert pipe.call("image.normals", {"survey": "s1", "name": "a.png"}) == {
+        "normals": None, "step": None}
+    pipe.call("project.close")
+
+    _add_dense(root)
+    pipe.call("project.open", {"root": str(root)})
+    assert pipe.call("project.state")["surveys"][0]["normals"] is True
+    shown = pipe.call("cloud.view", {"survey": "s1", "cloud": "dense", "colour": "normals",
+                                     "max_points": 500})
+    rgb = get_array(root, shown["rgb"])
+    assert rgb.shape == (500, 3) and (rgb == [128, 128, 0]).all()      # -z: no blue
+    photo = get_array(root, pipe.call("cloud.view", {"survey": "s1", "cloud": "dense"})["rgb"])
+    assert (photo == 90).all()                                            # the default
+    with pytest.raises(RpcError):
+        pipe.call("cloud.view", {"survey": "s1", "cloud": "dense", "colour": "rainbow"})
+
+    out = pipe.call("image.normals", {"survey": "s1", "name": "a.png"})
+    assert out["step"] == 1
+    nmap = get_array(root, out["normals"])
+    assert nmap.shape == (H, W, 3) and nmap.dtype == np.uint8
+    seen = (nmap != 128).any(axis=2)
+    assert seen.mean() > 0.5 and (nmap[seen] == [128, 128, 0]).all()
+
+
+def test_a_model_on_normals_needs_a_dense_cloud(pipe, tmp_path):
+    from cloudlabeller.ml.model_spec import ModelSpec
+
+    _settle(pipe)
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    spec = ModelSpec(tile_size=32, shrink=2, blocks=1, normals=True).to_dict()
+    pipe.call("model.set_spec", {"spec": spec})
+    assert pipe.call("model.spec")["spec"]["normals"] is True
+    with pytest.raises(RpcError) as err:
+        pipe.call("jobs.plan", {"kind": "train", "options": {}})
+    assert err.value.data["code"] == "job.train.no_normals"
+    assert err.value.data["params"]["surveys"] == ["s1"]
+    pipe.call("project.close")
+
+    _add_dense(root)
+    pipe.call("project.open", {"root": str(root)})
+    plan = pipe.call("jobs.plan", {"kind": "train", "options": {}})
+    pipe.call("jobs.finish", {"plan": plan["plan"], "exit": None})
+
+    d = root / "ml" / "models" / "nm"
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps(
+        {"name": "nm", "n_classes": 2, "spec": spec, "in_channels": 6}), encoding="utf-8")
+    (d / "model.weights.h5").write_bytes(b"")
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "nm"}})
+    pipe.call("jobs.finish", {"plan": plan["plan"], "exit": None})

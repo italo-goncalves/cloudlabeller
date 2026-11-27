@@ -29,6 +29,12 @@ so one model trains on Surveys taken with different cameras.
 The U-Net halves the resolution at every max-pooling block and doubles it
 back up, so the network's input, ``tile_size / shrink``, must be divisible
 by ``2**blocks``.
+
+``normals`` (experimental) adds the dense cloud's normals, drawn into each
+photo in the camera's frame (``transfer.normal_map``), as three channels
+beside RGB: on FIDA it halved the errors on hand-painted photos
+(``docs/research/normals-as-features.md``). Such a model trains and
+predicts only photos of Surveys with a dense Reconstruction.
 """
 
 from __future__ import annotations
@@ -50,11 +56,17 @@ class ModelSpec:
     blocks: int = 4             # number of max-pooling layers (U-Net depth)
     dropout: float = 0.1        # dropout fraction
     filter_size: int = 5        # convolution kernel size
+    normals: bool = False       # experimental: the dense cloud's normals as 3 more channels
 
     @property
     def net_size(self) -> int:
         """The side of what the network sees: the Tile shrunk."""
         return int(self.tile_size) // max(1, int(self.shrink))
+
+    @property
+    def in_channels(self) -> int:
+        """What the network takes per pixel: RGB, plus the normals when asked."""
+        return 6 if self.normals else 3
 
     @property
     def buffer(self) -> int:
@@ -95,6 +107,17 @@ class ModelSpec:
         data = data or {}
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def default_tile_size(width: int, height: int) -> int:
+    """The Tile size for photos of this size: the first power of two greater
+    than a quarter of their longer side (2048 px for 5472 × 3648 drone
+    photos), and at least 32."""
+    quarter = max(int(width), int(height)) / 4
+    size = 32
+    while size <= quarter:
+        size *= 2
+    return size
 
 
 def is_tiled(manifest: dict) -> bool:

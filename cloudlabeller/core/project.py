@@ -38,9 +38,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 from cloudlabeller.core.label_schema import UNLABELLED_ID, LabelSchema
+from cloudlabeller.core.labels import load_label_array, save_label_array
 from cloudlabeller.core.survey import Survey, next_id
 
 MANIFEST = "project.json"
@@ -105,18 +104,33 @@ class Project:
                 if rec is survey.active or not rec.labels_dir.exists():
                     continue
                 for f in rec.labels_dir.glob("*.npy"):
-                    arr = np.load(f)
+                    arr = load_label_array(f)
                     arr[arr == class_id] = UNLABELLED_ID
                     arr[arr > class_id] -= 1
-                    np.save(f, arr)
+                    save_label_array(f, arr)
         self.schema.remove(class_id)
 
     # -- model settings ----------------------------------------------------------------
     def model_spec(self):
-        """The persisted U-Net :class:`ModelSpec` (defaults if never set)."""
+        """The persisted U-Net :class:`ModelSpec`; never set, the defaults
+        with the Tile size the photos call for (:meth:`default_tile_size`)."""
         from cloudlabeller.ml.model_spec import ModelSpec
 
-        return ModelSpec.from_dict(self.settings.get("model_spec"))
+        saved = self.settings.get("model_spec")
+        if saved:
+            return ModelSpec.from_dict(saved)
+        tile = self.default_tile_size()
+        return ModelSpec(tile_size=tile) if tile else ModelSpec()
+
+    def default_tile_size(self) -> int | None:
+        """:func:`~cloudlabeller.ml.model_spec.default_tile_size` of the
+        largest photos in any Survey, or None while no photo's size is known."""
+        from cloudlabeller.ml.model_spec import default_tile_size
+
+        sizes = [wh for s in self.surveys.values() if (wh := s.peek_resolution())]
+        if not sizes:
+            return None
+        return default_tile_size(*max(sizes, key=lambda wh: max(wh)))
 
     def set_model_spec(self, spec) -> None:
         self.settings["model_spec"] = spec.to_dict()

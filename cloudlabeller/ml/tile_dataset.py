@@ -61,17 +61,28 @@ def augment(image, mask, window, rolls: int, log_gamma):
 
     ``image`` (H, W, C) float32 in [0, 1], ``mask`` (H, W); TF tensors or
     arrays. The window is shifted by ``(window + 1) * (W // rolls)`` pixels
-    and the image raised to ``exp(log_gamma)``."""
+    and the RGB raised to ``exp(log_gamma)``.
+
+    Channels past RGB are the camera-frame normals (``ModelSpec.normals``),
+    encoded so 0.5 is 0: the gamma leaves them alone, and mirroring the Tile
+    left to right turns their x component around (``x -> 1 - x``)."""
     import tensorflow as tf
 
     width = tf.shape(image)[1]
     shift = (tf.cast(window, tf.int32) + 1) * (width // rolls)
-    strip_x = tf.concat([image, tf.reverse(image, axis=[1])], axis=1)
+    mirrored = tf.reverse(image, axis=[1])
+    extra = image.shape[-1] is not None and image.shape[-1] > 3
+    if extra:
+        mirrored = tf.concat([mirrored[..., :3], 1.0 - mirrored[..., 3:4], mirrored[..., 4:]],
+                             axis=-1)
+    strip_x = tf.concat([image, mirrored], axis=1)
     strip_y = tf.concat([mask, tf.reverse(mask, axis=[1])], axis=1)
     x = tf.roll(strip_x, shift, axis=1)[:, :width]
     y = tf.roll(strip_y, shift, axis=1)[:, :width]
-    x = tf.pow(x, tf.exp(tf.cast(log_gamma, x.dtype)))
-    return x, y
+    gamma = tf.exp(tf.cast(log_gamma, x.dtype))
+    if extra:
+        return tf.concat([tf.pow(x[..., :3], gamma), x[..., 3:]], axis=-1), y
+    return tf.pow(x, gamma), y
 
 
 def make_dataset(ts: TrainingSet, batch_size: int, augment_rolls: int = 0, *,

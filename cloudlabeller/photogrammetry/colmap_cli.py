@@ -37,12 +37,12 @@ variant}``) on success.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
 
 from cloudlabeller.logging_setup import setup_logging
+from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.colmap_fetch")
 
@@ -71,7 +71,7 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         log.error("%s", exc)
         return 3 if stop is not None and stop.exists() else 2
-    print("RESULT " + json.dumps({"path": exe, "variant": args.variant}), flush=True)
+    print_result({"path": exe, "variant": args.variant})
     return 0
 
 

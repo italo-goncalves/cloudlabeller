@@ -169,7 +169,7 @@ def build_tile_set(
         image, mask = image_loader(name), mask_loader(name)
         if progress is not None:
             progress(k + 1, total)
-        if mask is None:
+        if mask is None or image is None:          # no image: no normals for it
             continue
         weight = projected_weight if name in projected_names else 1.0
         for (i, j), timg, tmask in cut(image, mask, int(spec.tile_size), float(spec.overlap),

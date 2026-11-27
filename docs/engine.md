@@ -139,8 +139,8 @@ Project frame (`{frame, origin_lla, origin_convention, crs?}`), or null.
 Each Survey in `surveys`, in the Project's order, is `{id, name, timestamp,
 operator, camera, notes, images: [{name, status, solved, user_mask,
 uncertainty}],
-reconstruction, active, reconstructions, aligned, sparse, dense, mesh, source_resolution,
-can_undo, can_redo}`.
+reconstruction, active, reconstructions, aligned, sparse, dense, mesh, normals,
+source_resolution, can_undo, can_redo}`.
 
 - `active` is the active Reconstruction's id, null before SfM, and
   `reconstructions` how many the Survey has. `aligned`: the active one has
@@ -149,7 +149,9 @@ can_undo, can_redo}`.
   photo's mean Uncertainty (0..1), else null.
 - `reconstruction` is `none`, `outdated` or `current`.
 - `sparse` and `dense` are point counts, or null. `mesh` is
-  `{vertices, faces}`, or null.
+  `{vertices, faces}`, or null. `normals`: the dense cloud has normals
+  (what `cloud.view`'s `colour: "normals"`, `image.normals` and a model
+  on normals need).
 
 ### `project.summary`
 → `{rows: [[label, value], …]}`: the Project Info rows, as plain text,
@@ -220,7 +222,9 @@ Survey has its own history.
 - `source` is `user` (the user's own mask), `ml` (the U-Net's prediction,
   at the photo's size) or `auto` (projected from the labelled cloud), or
   null when there is nothing to show.
-- `mask` is an `int32` Array file of shape `[H, W]`, or null.
+- `mask` is an Array file of shape `[H, W]`, or null, in the narrowest of
+  `int8`, `int16` and `int32` that holds its ids (`int8` for up to 127
+  classes: a 20-megapixel mask is then 20 MB, not 80).
 
 Problem: `image.not_found`.
 
@@ -228,13 +232,22 @@ Problem: `image.not_found`.
 `{survey, name, mask}` → `{changed_pixels, status}`. Stores the mask the user
 painted, as one undoable edit, and marks the photo `user`. The window sends
 the whole mask, seeded from the overlay it showed. `mask` is an inbound
-`int32` Array file of the photo's size. Problems: `image.not_found`,
+`int8`, `int16` or `int32` Array file of the photo's size (the window sends
+the narrowest). Problems: `image.not_found`,
 `image.mask_shape`, `image.mask_values`.
 
 ### `image.info`
 `{survey, name}` → `{path, width, height}`. `path` is the photo's file, relative to
 the Project root with `/` separators. The size is the solved camera's, else
 the file's. Problem: `image.not_found`.
+
+### `image.normals`
+`{survey, name}` → `{normals, step}`: the photo coloured by the dense
+cloud's normals as `cloud.view` colours the cloud, each pixel the normal
+of the point it sees (128, 128, 128 where it sees none). `normals` is a
+`uint8 [h, w, 3]` Array file at the photo's size divided by `step` (its
+longer side at most 2048 px). Both are null when the photo has no camera
+or the Survey no dense cloud with normals.
 
 ### `image.uncertainty`
 `{survey, name}` → `{uncertainty, mean}`: how unsure the U-Net's
@@ -250,7 +263,8 @@ is a `float32` Array file `[N, 3]`, in the Project frame. `rgb` is a `uint8` one
 Problem: `cloud.none`.
 
 ### `cloud.labels`
-`{survey, cloud?}` → `{cloud, labels}`. `labels` is an `int32` Array file `[N]`.
+`{survey, cloud?}` → `{cloud, labels}`. `labels` is an Array file `[N]`, narrowed
+as `image.mask`'s is.
 
 ### `cloud.paint`
 `{survey, cloud?, indices, class_id}` → `{painted}`. Gives the chosen points one
@@ -259,13 +273,16 @@ or `uint32` Array file. Painting the dense cloud also updates the mesh's
 labels. Problems: `schema.no_class`, `cloud.bad_indices`.
 
 ### `cloud.view`
-`{survey, cloud?, max_points?: 0}` → `{cloud, n_points, shown, xyz, rgb, index}`. A
+`{survey, cloud?, max_points?: 0, colour?: "photo"}` → `{cloud, n_points, shown, xyz, rgb, index}`. A
 display subsample: `max_points` points chosen uniformly at random with a
 fixed seed (the same ones every call), in the cloud's own order. `xyz` is
 `float32 [shown, 3]`, `rgb` is `uint8 [shown, 3]` or null, and `index` is
 an `int32 [shown]` Array file holding each shown point's index in the full
 cloud. When `max_points` is 0 or at least N, every point is shown and
-`index` is null. Problem: `cloud.none`.
+`index` is null. With `colour: "normals"`, `rgb` is the points' normals in
+the Project frame as a false colour, `round(127.5 (n + 1))` per component
+(red east/+x, green north/+y, blue up/+z). Problems: `cloud.none`,
+`cloud.no_normals` (only a dense cloud has normals).
 
 ### `cloud.select`
 `{survey, cloud?, view_projection, polygon, width, height}` → `{count, indices}`. A
@@ -337,7 +354,7 @@ the Project frame),
 `int32 [F, 3]` and `uint8 [V, 3]` (`colors` may be null). Problem: `mesh.none`.
 
 ### `mesh.labels`
-`{survey}` → `{labels}`: `int32 [V]`, nearest-point labels from the dense cloud.
+`{survey}` → `{labels}`: `[V]`, narrowed as `image.mask`'s is, nearest-point labels from the dense cloud.
 
 ### `mesh.estimate`
 `{survey, method?: "poisson"|"delaunay", depth?}` → `{minutes, ram_gb, vertices,
@@ -458,13 +475,20 @@ The Alignment is stored with `source: "gcp"`. Problems: `align.no_gcps`,
 `project.jobs_running`.
 
 ### `model.spec`
-→ `{spec, training_size, problem}`: the U-Net settings, what the network
-sees of each Tile (`[n, n]`, the Tile size over the shrink factor), and why
-the settings can't build a network (or null). `spec` is `{tile_size,
-shrink, overlap, min_labelled, channels, blocks, dropout, filter_size}`:
-Tiles of `tile_size` photo pixels on a grid whose neighbours share
-`overlap` of a Tile, shrunk by `shrink` (1, 2, 4 or 8); training skips
-Tiles less than `min_labelled` labelled.
+→ `{spec, training_size, problem, default_tile_size}`: the U-Net settings,
+what the network sees of each Tile (`[n, n]`, the Tile size over the shrink
+factor), why the settings can't build a network (or null), and the Tile
+size the photos call for: the first power of two greater than a quarter of
+the longest photo side in any Survey (null while no size is known). Until
+the settings are first saved, `spec.tile_size` is that size. `spec` is `{tile_size,
+shrink, overlap, min_labelled, channels, blocks, dropout, filter_size,
+normals}`: Tiles of `tile_size` photo pixels on a grid whose neighbours
+share `overlap` of a Tile, shrunk by `shrink` (1, 2, 4 or 8); training
+skips Tiles less than `min_labelled` labelled. `normals` (experimental,
+default false) gives the network the dense cloud's normals in each photo,
+in the camera's frame, as three channels beside RGB: such a model trains
+and predicts only photos with a camera in a Survey whose dense cloud has
+normals.
 
 ### `model.set_spec`
 `{spec}` → as `model.spec`.
@@ -472,8 +496,13 @@ Tiles less than `min_labelled` labelled.
 ### `models.list`
 → `{models}`: the saved models' manifests, newest first: `{name, created,
 spec, n_classes, input_size, class_names, metrics, history, surveys,
-tiled}`. `history` has each metric per epoch (`accuracy` counts labelled pixels only, since 0.4.0); `surveys` the Surveys it was
-trained on. `tiled` is false for a model trained on whole photos (before
+best_epoch, monitor, tiled}`. `history` has each metric per epoch
+(`accuracy` counts labelled pixels only, since 0.4.0); `surveys` the
+Surveys it was trained on. The weights saved are those of epoch
+`best_epoch` (0-based, in `history`), the one with the lowest `monitor`
+(`val_loss`, or `loss` when nothing was held out), and `metrics` are that
+epoch's; models saved before 0.4.0's release have neither field and kept
+their last epoch. `tiled` is false for a model trained on whole photos (before
 0.4.0): it can't predict or be continued.
 
 ### `models.delete`
@@ -615,8 +644,8 @@ kinds marked ‡ work on one Survey and need the option `survey`:
 | `reproject` | reconstruction | no | `epsg`, `orthometric` | `job.no_reconstruction`, `job.reproject.not_georeferenced`, `job.reproject.no_fit` † |
 | `mvs` ‡ | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
 | `mesh` ‡ | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
-| `train` | ml | yes | `name`, `epochs`, `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume`, `surveys` (default: every Survey; their photos are pooled, cut into Tiles, and validated on whole photos held out) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch`, `job.train.legacy_model`, `survey.not_found` |
-| `predict` | ml | yes | `model`, `surveys` (default: every Survey; the photos not user-labelled; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `survey.not_found` |
+| `train` | ml | yes | `name`, `steps` (batches, default 50000: the epochs are as many as that takes, rounded up), `patience` (stop after this many epochs without a better validation loss, default 10; 0 never stops early), `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume`, `surveys` (default: every Survey; their photos are pooled, cut into Tiles, and validated on whole photos held out) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch`, `job.train.legacy_model`, `job.train.no_normals` (`params.surveys`: those without a dense cloud), `survey.not_found` |
+| `predict` | ml | yes | `model`, `surveys` (default: every Survey; the photos not user-labelled; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `job.predict.no_normals`, `survey.not_found` |
 | `geoid` | download | no | `epsg` | |
 | `colmap` | download | no | `variant` (`cuda` or `cpu`) | `job.colmap.unsupported` |
 
@@ -655,7 +684,11 @@ error?}`. The core reports that a planned Job has ended:
 
 - `exit` is its exit code, or null if it never ran or was lost.
 - `results` maps each `RESULT…` line's first word to the rest of the line,
-  for example `{"RESULT": "{\"n_gps\": 12}"}`.
+  for example `{"RESULT": "{\"n_gps\": 12}"}`. The core reads at most
+  64 KiB of a line at a time, so a Job prints a long JSON outcome in
+  numbered pieces, `RESULT.0`, `RESULT.1`, … (each under 16 KiB, none
+  starting or ending with a space), which the Engine joins in order. An
+  outcome that isn't JSON fails the Job with `job.bad_result`.
 - `cancelled` says the core cancelled it.
 
 When the Job ended well, the Engine updates the open Project, sends

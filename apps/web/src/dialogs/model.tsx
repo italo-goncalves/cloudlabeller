@@ -19,12 +19,14 @@ export function ModelSpecDialog() {
   const [preview, setPreview] = useState<{ size: [number, number] | null; problem: string | null }>(
     { size: null, problem: null },
   );
+  const [defaultTile, setDefaultTile] = useState<number | null>(null);
   useEffect(() => {
     api
       .modelSpec()
       .then((r) => {
         setSpec(r.spec);
         setPreview({ size: r.training_size, problem: r.problem });
+        setDefaultTile(r.default_tile_size);
       })
       .catch((e) => app.fail(e, "Couldn't read the model's settings"));
   }, [app.fail]);
@@ -59,7 +61,15 @@ export function ModelSpecDialog() {
             overlapping grid and shrunk before it sees them. Photos of any size give Tiles of the
             same size, so one model covers Surveys taken with different cameras.
           </p>
-          <Field label="Tile size (photo pixels)" inline>
+          <Field
+            label="Tile size (photo pixels)"
+            inline
+            hint={
+              defaultTile
+                ? `For these photos: ${defaultTile} px, the first power of two above a quarter of the longest side.`
+                : undefined
+            }
+          >
             {(id) => (
               <NumberInput
                 id={id}
@@ -161,6 +171,17 @@ export function ModelSpecDialog() {
               />
             )}
           </Field>
+          <Check checked={Boolean(spec.normals)} onChange={(normals) => set({ normals })}>
+            Also learn from the cloud's normals{" "}
+            <span className="rounded bg-surface-2 px-1 text-fg-muted">experimental</span>
+          </Check>
+          {spec.normals && (
+            <p className="mb-2 text-fg-muted">
+              Needs a dense cloud: the model trains on and predicts only photos with a solved camera
+              in a Survey that has a dense Reconstruction, and Train and Predict refuse Surveys
+              without one. On one site it halved the errors.
+            </p>
+          )}
           {preview.problem ? (
             <p className="text-danger">{preview.problem}</p>
           ) : (
@@ -215,7 +236,8 @@ export function TrainDialog() {
   const [manifests, setManifests] = useState<api.ModelManifest[]>([]);
   const [name, setName] = useState("unet");
   const [resume, setResume] = useState(false);
-  const [epochs, setEpochs] = useState(100);
+  const [steps, setSteps] = useState(50000);
+  const [patience, setPatience] = useState(10);
   const [batch, setBatch] = useState(2);
   const [val, setVal] = useState(0.2);
   const [rolls, setRolls] = useState(5);
@@ -250,7 +272,8 @@ export function TrainDialog() {
       "train",
       {
         name: name.trim(),
-        epochs,
+        steps,
+        patience,
         batch_size: batch,
         val_fraction: val,
         augment_rolls: rolls,
@@ -262,7 +285,12 @@ export function TrainDialog() {
     ).then((o) => {
       if (!o.ok) return;
       const r = (o.result ?? {}) as Record<string, unknown>;
-      const metrics = Object.entries(r)
+      const kept =
+        typeof r.best_epoch === "number"
+          ? `Kept epoch ${r.best_epoch} of ${r.epochs_run}${r.stopped_early ? " (stopped early)" : ""}.
+`
+          : "";
+      const metrics = Object.entries((r.metrics ?? {}) as Record<string, unknown>)
         .filter(([, v]) => typeof v === "number")
         .map(
           ([k, v]) =>
@@ -273,7 +301,7 @@ export function TrainDialog() {
         .join("\n");
       app.tell(
         o.stopped ? "Training stopped; the model is saved" : "Training done",
-        metrics || "The model is saved.",
+        kept + (metrics || "The model is saved."),
       );
     });
   };
@@ -323,8 +351,28 @@ export function TrainDialog() {
           />
         </div>
       )}
-      <Field label={saved && resume ? "Epochs (more)" : "Epochs"} inline>
-        {(id) => <NumberInput id={id} min={1} max={10000} value={epochs} onChange={setEpochs} />}
+      <Field
+        label={saved && resume ? "Steps (more)" : "Steps"}
+        inline
+        hint="Batches to train for. The epochs (every Tile's windows once) are as many as that takes, rounded up, worked out once the photos are cut."
+      >
+        {(id) => (
+          <NumberInput
+            id={id}
+            min={1}
+            max={10000000}
+            step={1000}
+            value={steps}
+            onChange={setSteps}
+          />
+        )}
+      </Field>
+      <Field
+        label="Stop early after"
+        inline
+        hint="Epochs without a better validation loss (0: never stop early)."
+      >
+        {(id) => <NumberInput id={id} min={0} max={1000} value={patience} onChange={setPatience} />}
       </Field>
       <Field label="Batch size" inline>
         {(id) => <NumberInput id={id} min={1} max={64} value={batch} onChange={setBatch} />}
@@ -342,7 +390,8 @@ export function TrainDialog() {
       </Check>
       {problem && <p className="text-danger">{problem}</p>}
       <p className="text-fg-faint">
-        Stop ends training after the current epoch and still saves the model.
+        The model saved is the epoch with the lowest validation loss (training loss when nothing is
+        held out). Stop ends training after the current epoch and still saves it.
       </p>
     </Dialog>
   );
@@ -353,6 +402,7 @@ const COLUMNS: [string, string, (m: api.ModelManifest) => unknown][] = [
   ["name", "Name", (m) => m.name],
   ["created", "Created", (m) => m.created],
   ["tile", "Tile", (m) => (m.tiled ? `${m.spec?.tile_size} px ÷${m.spec?.shrink}` : "whole photo")],
+  ["inputs", "Inputs", (m) => (m.spec?.normals ? "RGB + normals" : "RGB")],
   ["n_classes", "Classes", (m) => m.n_classes],
   ["channels", "Channels", (m) => m.spec?.channels],
   ["blocks", "Blocks", (m) => m.spec?.blocks],

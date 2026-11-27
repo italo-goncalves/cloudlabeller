@@ -168,11 +168,38 @@ def save_cloud_npz(cloud: PointCloud, path: str | Path) -> None:
     )
 
 
+class NpzCloud(PointCloud):
+    """A cloud read from its ``.npz`` whose normals are read on first use.
+
+    The normals are as large as the points (a 114-million-point dense cloud
+    holds 1.4 GB of each), and showing or painting the cloud doesn't need
+    them; only projecting it into the photos does. A Survey's products are
+    never edited, so the file still holds them when they are asked for."""
+
+    def __init__(self, xyz, rgb, path: Path):
+        super().__init__(xyz=xyz, rgb=rgb, normals=None)
+        self._path = Path(path)
+        self._unread = True
+
+    @property
+    def normals(self):
+        if getattr(self, "_unread", False):
+            with np.load(self._path) as d:
+                nrm = d["normals"]
+            self._normals, self._unread = (nrm if len(nrm) else None), False
+        return getattr(self, "_normals", None)
+
+    @normals.setter
+    def normals(self, value) -> None:
+        self._normals, self._unread = value, False
+
+
 def load_cloud_npz(path: str | Path) -> PointCloud:
-    d = np.load(path)
-    rgb, nrm = d["rgb"], d["normals"]
-    return PointCloud(xyz=d["xyz"], rgb=rgb if len(rgb) else None,
-                      normals=nrm if len(nrm) else None)
+    """A cloud saved by :func:`save_cloud_npz`; its normals are read when
+    first used (:class:`NpzCloud`)."""
+    with np.load(path) as d:
+        xyz, rgb = d["xyz"], d["rgb"]
+    return NpzCloud(xyz=xyz, rgb=rgb if len(rgb) else None, path=Path(path))
 
 
 def save_mesh_npz(mesh: Mesh, path: str | Path) -> None:

@@ -44,11 +44,15 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.core.label_schema import UNLABELLED_ID
+from cloudlabeller.core.labels import narrow
 from cloudlabeller.engine import arrays
 from cloudlabeller.engine.protocol import InvalidParams, Problem
 from cloudlabeller.engine.server import Deferred, Engine, method, optional, require
 
 CLOUDS = ("sparse", "dense")
+#: What an inbound mask may be; outbound masks and labels come narrowed
+#: (``core.labels.narrow``: int8 for up to 127 classes).
+MASK_DTYPES = ("int8", "int16", "int32")
 
 
 # -- engine -------------------------------------------------------------------
@@ -117,6 +121,7 @@ def survey_state(survey) -> dict:
         "reconstructions": len(survey.reconstructions),
         "aligned": survey.aligned,
         **counts,
+        "normals": survey.has_normals(),
         "source_resolution": survey.peek_resolution(),
         "can_undo": lb.can_undo(),
         "can_redo": lb.can_redo(),
@@ -317,7 +322,7 @@ def image_mask(engine: Engine, params: dict) -> dict:
         return {"source": None, "mask": None}
     return {"source": source,
             "mask": arrays.write(engine.project.root, f"mask/{survey.id}/{name}",
-                                 mask.astype(np.int32))}
+                                 narrow(mask))}
 
 
 @method("image.save_mask")
@@ -331,7 +336,11 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     record = _image(survey, params)
     project, name = engine.project, record.name
     h, w = _image_size(record)
-    new = arrays.read(project.root, require(params, "mask", dict), dtype="int32", ndim=2)
+    ref = require(params, "mask", dict)
+    if ref.get("dtype") not in MASK_DTYPES:
+        raise InvalidParams(f"a mask is {', '.join(MASK_DTYPES)}, not {ref.get('dtype')!r}",
+                            dtype=ref.get("dtype"))
+    new = arrays.read(project.root, ref, ndim=2).astype(np.int32, copy=False)
     if new.shape != (h, w):
         raise Problem("image.mask_shape", "The mask is not the photo's size.",
                       expected=[h, w], got=list(new.shape))
@@ -430,7 +439,7 @@ def cloud_labels(engine: Engine, params: dict) -> dict:
     labels = _cloud_labels(survey, which, cloud.n_points)
     return {"cloud": which,
             "labels": arrays.write(engine.project.root, f"cloud/{survey.id}/{which}/labels",
-                                   labels.astype(np.int32))}
+                                   narrow(labels))}
 
 
 @method("cloud.paint")
@@ -491,7 +500,7 @@ def mesh_labels(engine: Engine, params: dict) -> dict:
     if labels is None or len(labels) != len(mesh.vertices):
         labels = np.full(len(mesh.vertices), UNLABELLED_ID, np.int32)
     return {"labels": arrays.write(engine.project.root, f"mesh/{survey.id}/labels",
-                                   labels.astype(np.int32))}
+                                   narrow(labels))}
 
 
 def sync_mesh_labels(engine: Engine, survey) -> None:
@@ -707,7 +716,8 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
 def model_spec(engine: Engine, params: dict) -> dict:
     spec = engine.project.model_spec()
     n = spec.net_size
-    return {"spec": spec.to_dict(), "training_size": [n, n], "problem": spec.validate()}
+    return {"spec": spec.to_dict(), "training_size": [n, n], "problem": spec.validate(),
+            "default_tile_size": engine.project.default_tile_size()}
 
 
 @method("model.set_spec")

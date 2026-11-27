@@ -510,6 +510,64 @@ def test_geometry_npz_roundtrip(tmp_path):
     assert bm.vertex_colors is None
 
 
+def test_a_dense_cloud_reads_its_normals_only_when_asked(tmp_path, monkeypatch):
+    """Loading speed: normals are as large as the points (1.4 GB each for
+    FIDA's dense cloud) and only projecting into photos needs them."""
+    from cloudlabeller.core.dataset import PointCloud
+    from cloudlabeller.io import geometry
+
+    rng = np.random.default_rng(0)
+    cloud = PointCloud(xyz=rng.random((6, 3), np.float32),
+                       rgb=rng.integers(0, 255, (6, 3), dtype=np.uint8),
+                       normals=rng.random((6, 3), np.float32))
+    path = tmp_path / "dense.npz"
+    geometry.save_cloud_npz(cloud, path)
+    read = []
+    real = np.lib.npyio.NpzFile.__getitem__
+    monkeypatch.setattr(np.lib.npyio.NpzFile, "__getitem__",
+                        lambda self, key: read.append(key) or real(self, key))
+    back = geometry.load_cloud_npz(path)
+    assert back.n_points == 6 and np.array_equal(back.rgb, cloud.rgb)
+    assert "normals" not in read
+    assert np.array_equal(back.normals, cloud.normals) and read.count("normals") == 1
+    assert back.normals is back.normals and read.count("normals") == 1      # once
+    back.normals = None
+    assert back.normals is None
+    geometry.save_cloud_npz(PointCloud(xyz=cloud.xyz), path)
+    assert geometry.load_cloud_npz(path).normals is None
+
+
+def test_label_arrays_are_stored_narrow_and_read_back_as_int32(tmp_path):
+    from cloudlabeller.core.labels import load_label_array, narrow, save_label_array
+
+    mask = np.full((30, 40), -1, np.int32)
+    mask[5:9] = 3
+    save_label_array(tmp_path / "m.npy", mask)
+    assert np.load(tmp_path / "m.npy").dtype == np.int8           # 4x smaller than int32
+    back = load_label_array(tmp_path / "m.npy")
+    assert back.dtype == np.int32 and np.array_equal(back, mask)
+    np.save(tmp_path / "old.npy", mask)                            # a 0.4.0 int32 file
+    assert np.array_equal(load_label_array(tmp_path / "old.npy"), mask)
+    assert narrow(np.array([-1, 200])).dtype == np.int16
+    assert narrow(np.array([-1, 70000])).dtype == np.int32
+    assert narrow(np.zeros(0, np.int32)).dtype == np.int8
+
+
+def test_listing_photos_walks_subfolders_without_stat_calls(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from cloudlabeller.core import images
+
+    (tmp_path / "sub").mkdir()
+    for name in ("b.JPG", "a.png", "notes.txt", "sub/c.tif"):
+        (tmp_path / name).write_bytes(b"x")
+    calls = []
+    real = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, *a, **k: calls.append(self) or real(self, *a, **k))
+    assert images.list_image_files(tmp_path) == ["a.png", "b.JPG", "sub/c.tif"]
+    assert len(calls) <= 1                                       # the root's is_dir
+
+
 def test_project_loads_dense_and_mesh(tmp_path):
     from cloudlabeller.core.dataset import Mesh, PointCloud
     from cloudlabeller.io.geometry import save_cloud_npz, save_mesh_npz

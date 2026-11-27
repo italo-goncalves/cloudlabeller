@@ -28,11 +28,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
 from cloudlabeller.core.label_schema import UNLABELLED_ID
+
+
+# -- label arrays on disk and on the wire --------------------------------------------
+def narrow(labels: np.ndarray) -> np.ndarray:
+    """``labels`` in the smallest signed integer type that holds them (int8
+    for up to 127 classes): a photo's Mask is 20 MB as int8, 80 MB as int32,
+    and the Engine reads the Project through WSL's slow ``/mnt/c``."""
+    labels = np.asarray(labels)
+    if labels.size == 0:
+        return labels.astype(np.int8)
+    lo, hi = int(labels.min()), int(labels.max())
+    for dtype in (np.int8, np.int16):
+        info = np.iinfo(dtype)
+        if info.min <= lo and hi <= info.max:
+            return labels.astype(dtype, copy=False)
+    return labels.astype(np.int32, copy=False)
+
+
+def save_label_array(path: Path, labels: np.ndarray) -> None:
+    """A Mask or a cloud's labels as ``.npy``, narrowed (any older int32
+    file reads back the same)."""
+    np.save(path, narrow(labels))
+
+
+def load_label_array(path: Path) -> np.ndarray:
+    """A label array saved by :func:`save_label_array`, as int32 (what the
+    LabelStore holds)."""
+    return np.load(path).astype(np.int32, copy=False)
 
 
 class Modality(str, Enum):

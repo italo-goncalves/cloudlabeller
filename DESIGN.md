@@ -103,7 +103,7 @@ my_project.clproj/
 │   ├── survey.json         # name, timestamp, operator, camera, notes, settings,
 │   │                       #   image status, active Reconstruction
 │   ├── images/             # the photos
-│   ├── masks/<name>.npy    # the user's Masks (int32, -1 = unlabelled)
+│   ├── masks/<name>.npy    # the user's Masks (int8 for ≤127 classes, -1 = unlabelled)
 │   ├── predictions/        # U-Net predictions, at model resolution
 │   ├── products/
 │   │   ├── sfm-<n>/        # COLMAP db, sparse/, cloud.npz, cameras.json, adjacency.json
@@ -198,10 +198,15 @@ carrier.
    2D training for free), from the chosen Surveys. `build_tile_set` cuts
    each photo into Tiles (uint8 images, int16 masks); the train/validation
    split holds out whole photos.
-2. `model_spec.py` — the settings: Tile size in photo pixels, the shrink
-   factor before the network, the overlap, the least-labelled fraction, and
-   the architecture (`net_size = tile_size / shrink`, a multiple of
-   `2**blocks`).
+2. `model_spec.py` — the settings: Tile size in photo pixels (by default
+   the first power of two greater than a quarter of the longest photo
+   side), the shrink factor before the network, the overlap, the
+   least-labelled fraction, and the architecture (`net_size = tile_size /
+   shrink`, a multiple of `2**blocks`). An experimental `normals` option
+   adds each photo's Normal map in the camera frame (`transfer/normal_map.py`,
+   `ml/inputs.py`) as three channels beside RGB; such a model trains and
+   predicts only photos a dense cloud reaches
+   (`docs/research/normals-as-features.md`).
 3. `tiles.py` — the grid, padding (unlabelled for training), feathered
    blending of overlapping Tiles at the network's resolution, and the
    Uncertainty (entropy over its maximum). Ported from `unet_tools`'
@@ -212,7 +217,10 @@ carrier.
    once plus a few batches, however many augmentation rolls.
 5. `unet.py` — the user's architecture (LOCKED) and `build_model`.
 6. `trainer.py` / `inference.py` — the training loop and predicting a photo
-   Tile by Tile; predictions go to each Survey's `predictions/` as `.npz`
+   Tile by Tile. Training is asked for in steps (batches), run as whole
+   epochs rounded up; it keeps the weights of the epoch with the lowest
+   validation loss and stops early after a patience of epochs without a
+   better one. Predictions go to each Survey's `predictions/` as `.npz`
    (classes and Uncertainty at the photo's size over the shrink factor).
 7. Predicted masks can be **transferred back to the cloud** (§6), closing the
    loop: label a few → train → predict all → fuse into 3D.

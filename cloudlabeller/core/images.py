@@ -28,6 +28,7 @@ real byte copy, so the project is fully self-contained and portable.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,15 +42,25 @@ ProgressFn = Callable[[float, str], None]
 
 
 def list_image_files(image_dir: str | Path) -> list[str]:
-    """Image filenames under ``image_dir`` (recursive), relative & posix-style."""
+    """Image filenames under ``image_dir`` (recursive), relative & posix-style.
+
+    Walks with ``os.scandir``, whose entries know whether they are files
+    without a ``stat`` each: through WSL's ``/mnt/c`` stat-ing 1,400 photos
+    one by one took 3 s, the scan takes 0.01 s."""
     root = Path(image_dir)
     if not root.is_dir():
         return []
-    return [
-        p.relative_to(root).as_posix()
-        for p in sorted(root.rglob("*"))
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    ]
+    found: list[str] = []
+
+    def walk(folder: str, prefix: str) -> None:
+        with os.scandir(folder) as entries:
+            for e in entries:
+                if e.is_dir():
+                    walk(e.path, f"{prefix}{e.name}/")
+                elif e.is_file() and os.path.splitext(e.name)[1].lower() in IMAGE_EXTENSIONS:
+                    found.append(prefix + e.name)
+    walk(str(root), "")
+    return sorted(found)
 
 
 @dataclass

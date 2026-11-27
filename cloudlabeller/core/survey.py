@@ -49,7 +49,7 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.core.dataset import Dataset
-from cloudlabeller.core.labels import LabelStore
+from cloudlabeller.core.labels import LabelStore, load_label_array, save_label_array
 from cloudlabeller.core.reconstruction import SLOTS, Reconstruction, now_iso
 
 SURVEY_FILE = "survey.json"
@@ -217,7 +217,7 @@ class Survey:
                             ("dense_cloud_labels", "dense.npy"),
                             ("mesh_labels", "mesh.npy")):
             if (rec.labels_dir / fname).exists():
-                setattr(lb, attr, np.load(rec.labels_dir / fname))
+                setattr(lb, attr, load_label_array(rec.labels_dir / fname))
         self.load_products()
         self.save_manifest()
 
@@ -407,6 +407,53 @@ class Survey:
         return cloud_to_image(source[0], source[1], record.camera,
                               name=name, visibility=self.visibility_index())
 
+    def normal_map(self, name: str, frame: str = "camera"):
+        """``name``'s normal map from the dense cloud (``transfer.normal_map``):
+        (H, W, 3) uint8 in the ``camera`` frame (what the U-Net takes) or the
+        ``world`` one (the Project frame, for showing), or None when the photo
+        has no camera or the Survey no dense cloud with normals."""
+        ds = self.dataset
+        record = ds.image_by_name(name)
+        cloud = ds.dense_cloud
+        if record is None or record.camera is None or cloud is None or cloud.normals is None:
+            return None
+        from cloudlabeller.transfer.normal_map import normal_map
+
+        idx, pix = self.visibility_index().get(name, cloud, record.camera)
+        normals = cloud.normals[idx]
+        if frame == "world":
+            normals, rotation = self.active.frame_normals(normals), None
+        elif frame == "camera":
+            rotation = record.camera.R
+        else:
+            raise ValueError(f"frame must be 'camera' or 'world', not {frame!r}")
+        return normal_map(normals, pix, record.camera.width, record.camera.height, rotation)
+
+    def has_normals(self) -> bool:
+        """Whether the active Reconstruction's dense cloud has normals (read
+        from the file's header when the cloud isn't loaded yet)."""
+        cloud = self.dataset.dense_cloud if self.loaded else None
+        if cloud is not None and not getattr(cloud, "_unread", False):
+            return cloud.normals is not None          # read already: no cost
+        path = self.dense_cloud_path
+        if not path or not path.exists():
+            return False
+        known = getattr(self, "_normals_known", None)
+        if known is not None and known[0] == str(path):
+            return known[1]
+        import zipfile
+
+        from numpy.lib import format as npy
+
+        try:
+            with zipfile.ZipFile(path) as z, z.open("normals.npy") as f:
+                shape, _, _ = npy._read_array_header(f, npy.read_magic(f))
+            has = bool(shape and shape[0] > 0)
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+            has = False
+        self._normals_known = (str(path), has)       # products are never edited
+        return has
+
     def prediction_mask(self, name: str):
         """``name``'s U-Net prediction upscaled to the photo's resolution:
         (H, W) int32 or None. The upscale is a per-class one-hot resample
@@ -554,13 +601,13 @@ class Survey:
                                 ("dense_cloud_labels", "dense.npy"),
                                 ("mesh_labels", "mesh.npy")):
                 if (d / fname).exists():
-                    setattr(lb, attr, np.load(d / fname))
+                    setattr(lb, attr, load_label_array(d / fname))
         if self.masks_dir.exists():
             for f in self.masks_dir.glob("*.npy"):
                 if lb.status_of(f.stem) == "auto":
                     f.unlink(missing_ok=True)
                     continue
-                lb.image_masks[f.stem] = np.load(f)
+                lb.image_masks[f.stem] = load_label_array(f)
 
     def ensure_loaded(self) -> "Survey":
         if not self.loaded:
@@ -589,7 +636,7 @@ class Survey:
         mask = self.labels.image_masks.get(name)
         if mask is not None:
             self.masks_dir.mkdir(parents=True, exist_ok=True)
-            np.save(self.masks_dir / f"{name}.npy", mask)
+            save_label_array(self.masks_dir / f"{name}.npy", mask)
 
     def save(self) -> None:
         """Manifest plus every label array (the heavy part)."""
@@ -609,7 +656,7 @@ class Survey:
                                 ("mesh_labels", "mesh.npy")):
                 arr = getattr(lb, attr)
                 if arr is not None:
-                    np.save(rec.labels_dir / fname, arr)
+                    save_label_array(rec.labels_dir / fname, arr)
         for name in lb.image_masks:
             self.save_mask(name)
 

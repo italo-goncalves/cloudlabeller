@@ -28,8 +28,8 @@ apps need is written in geokit first.
 | `state/` | One reducer (`store.ts`, tested) and its context (`app.tsx`): running a Job or a long Engine request with the status bar following it, saying a Problem, asking a question. |
 | `engine/api.ts` | Every Engine method the window calls, typed after [engine.md](engine.md), with Array files read into typed arrays. |
 | `jobs/` | `flows.ts`: what a menu item sets going (georeferencing after SfM, a mesh after MVS, the questions around them). `pipeline.ts`: the full pipeline as a chain of Jobs, tested. |
-| `viewer/` | The 3D view (`Viewer3D`, `rig.ts`) on geokit's `LayerHost`: the cloud as one node thinned by the detail level, the mesh, the camera frusta, the lasso, and the View pane. Pure helpers in `adapt.ts`, tested. |
-| `image/` | The photo with its mask: polygon, brush and eraser, Import Mask, Propagate, the GCP tool (Marks and hints) and the Uncertainty overlay. Rasterising in `raster.ts`, tested. |
+| `viewer/` | The 3D view (`Viewer3D`, `rig.ts`) on geokit's `LayerHost`: the cloud as one node thinned by the detail level, the mesh, the camera frusta, the lasso, and the View pane (photo colours, or the dense cloud's normals in false colour, blended with the labels). Pure helpers in `adapt.ts`, tested. |
+| `image/` | The photo with its mask: polygon, brush and eraser, Import Mask, Propagate, the GCP tool (Marks and hints), and the Normals (Normal map) and Uncertainty overlays. Rasterising in `raster.ts`, tested. |
 | `panes/` | Labels, Dataset (the Survey line, the photos, the GCPs tab in `GcpPanel.tsx`) and Log (each Job's output and every new progress message, `jobs/progress.ts`). |
 | `dialogs/` | One per menu item that asks something: SfM, MVS, mesh, pipeline, COLMAP, cleaning, reprojecting, export, the model's settings, training, prediction (both with a Survey picker), a Survey's details, Reconstructions, a GCP, importing GCPs, Project Info, About. |
 | `ui/controls.tsx` | The controls every screen builds from, on the kit's tokens. |

@@ -26,6 +26,7 @@ const survey = (id: string, over: Partial<SurveyState> = {}): SurveyState => ({
   sparse: 10,
   dense: null,
   mesh: null,
+  normals: false,
   source_resolution: [40, 30],
   can_undo: false,
   can_redo: false,

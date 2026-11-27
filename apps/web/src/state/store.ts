@@ -6,7 +6,7 @@
 // Job or long request, the log, and which dialog is open. Pure, so tested.
 
 import type { Kept } from "../desktop/bridge";
-import type { CloudName, ProjectState } from "../engine/api";
+import type { CloudColour, CloudName, ProjectState } from "../engine/api";
 
 export type Representation = "sparse" | "dense" | "mesh";
 /** How thinned the cloud is on screen (see `detail.ts`'s `VIEW_DETAIL`). */
@@ -17,6 +17,8 @@ export interface ViewSettings {
   representation: Representation;
   /** RGB → class colour, 0–1. */
   blend: number;
+  /** What "RGB" is: the photos' colours, or the dense cloud's normals as a false colour. */
+  colourBy: CloudColour;
   pointSize: number;
   detail: ViewDetail;
   showCameras: boolean;
@@ -123,6 +125,7 @@ export const MAX_LOG = 5000;
 export const initialView: ViewSettings = {
   representation: "sparse",
   blend: 0.6,
+  colourBy: "photo",
   pointSize: 2,
   detail: "high",
   showCameras: true,

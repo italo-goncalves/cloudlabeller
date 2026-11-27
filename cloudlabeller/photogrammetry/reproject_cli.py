@@ -55,6 +55,7 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.logging_setup import setup_logging
+from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.reproject")
 
@@ -128,7 +129,7 @@ def main(argv: list[str]) -> int:
                     "served by a different CRS", rms)
 
     name = pyproj.CRS.from_epsg(args.epsg).name
-    print("RESULT " + json.dumps({
+    print_result({
         "s": float(s), "R": np.asarray(R).tolist(), "t": np.asarray(t).tolist(),
         "epsg": args.epsg,
         "name": name,
@@ -136,7 +137,7 @@ def main(argv: list[str]) -> int:
         "offset": [float(v) for v in offset],
         "fit_rms_m": rms,
         "scale": s,
-    }), flush=True)
+    })
     progress(1.0, "Reprojection complete")
     return 0
 

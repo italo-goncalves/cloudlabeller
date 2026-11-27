@@ -34,11 +34,11 @@ the grid is usable.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 
 from cloudlabeller.logging_setup import setup_logging
+from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.geoid")
 
@@ -63,7 +63,7 @@ def main(argv: list[str]) -> int:
         except Exception as exc:
             log.error("%s", exc)
             return 2
-    print("RESULT " + json.dumps({"epsg": args.epsg}), flush=True)
+    print_result({"epsg": args.epsg})
     print("PROGRESS 1.000 Geoid grid ready", flush=True)
     return 0
 

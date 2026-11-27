@@ -42,7 +42,6 @@ Emits ``PROGRESS <frac> <msg>``; prints ``RESULT <json>`` on success with
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -50,6 +49,7 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.logging_setup import setup_logging
+from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.georef")
 
@@ -136,7 +136,7 @@ def main(argv: list[str]) -> int:
                     n_inliers, len(centers))
 
     from cloudlabeller.photogrammetry.crs import ORIGIN_CONVENTION_FIRST_GPS
-    print("RESULT " + json.dumps({
+    print_result({
         "s": float(s), "R": np.asarray(R).tolist(), "t": np.asarray(t).tolist(),
         "scale_m_per_unit": s,
         "origin_lla": [float(v) for v in origin],
@@ -144,7 +144,7 @@ def main(argv: list[str]) -> int:
         "n_gps": len(gps),
         "n_inliers": n_inliers,
         "fit_rms_m": rms,
-    }), flush=True)
+    })
     progress(1.0, "Georeferencing complete")
     return 0
 

@@ -64,7 +64,11 @@ def predict_all(
     written: dict[str, float] = {}
     total = len(image_names)
     for i, name in enumerate(image_names, 1):
-        labels, uncertainty = predict(model, image_loader(name), spec, n_classes)
+        image = image_loader(name)
+        if image is None:                          # a normals model, no normals here
+            progress(i / total, f"Skipped {name}: no normals ({i}/{total})")
+            continue
+        labels, uncertainty = predict(model, image, spec, n_classes)
         np.savez_compressed(out_dir / f"{name}.npz", labels=labels.astype(np.int16),
                             uncertainty=uncertainty, model=np.array(model_name))
         (out_dir / f"{name}.npy").unlink(missing_ok=True)      # a 0.3.0 prediction

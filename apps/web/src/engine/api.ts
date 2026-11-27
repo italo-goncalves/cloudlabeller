@@ -5,6 +5,7 @@
 // Every screen goes through these, not through `engineCall` with a string.
 
 import { type ArrayRef, engineCall, readArray, writeArray } from "../desktop/bridge";
+import { narrow, widen } from "./labels";
 
 export type Status = "user" | "auto" | "ml" | "none";
 export type Reconstruction = "none" | "outdated" | "current";
@@ -46,6 +47,8 @@ export interface SurveyState {
   sparse: number | null;
   dense: number | null;
   mesh: { vertices: number; faces: number } | null;
+  /** The dense cloud has normals (to colour by them, or train on them). */
+  normals: boolean;
   source_resolution: [number, number] | null;
   can_undo: boolean;
   can_redo: boolean;
@@ -74,6 +77,8 @@ export interface ProjectState {
   sparse: number | null;
   dense: number | null;
   mesh: { vertices: number; faces: number } | null;
+  /** The current Survey's dense cloud has normals. */
+  normals: boolean;
   /** The Project has a frame and the current Survey is aligned into it. */
   georeferenced: boolean;
   source_resolution: [number, number] | null;
@@ -111,6 +116,7 @@ export function view(raw: RawProjectState, survey?: string): ProjectState {
     sparse: s.sparse,
     dense: s.dense,
     mesh: s.mesh,
+    normals: Boolean(s.normals),
     georeferenced: Boolean(raw.georeferenced) && s.aligned,
     source_resolution: s.source_resolution,
     can_undo: s.can_undo,
@@ -365,7 +371,7 @@ export async function imageMask(name: string): Promise<Mask> {
   });
   if (!r.mask) return { source: r.source, mask: null, width: 0, height: 0 };
   const [h, w] = r.mask.shape as [number, number];
-  return { source: r.source, mask: (await load(r.mask)) as Int32Array, width: w, height: h };
+  return { source: r.source, mask: widen(await load(r.mask)), width: w, height: h };
 }
 
 /** Store a photo's mask; `survey` is the one it was painted in (default:
@@ -377,7 +383,8 @@ export async function saveMask(
   height: number,
   survey: string = currentSurvey(),
 ) {
-  const ref = await writeArray(fresh("mask"), mask, "int32", [height, width]);
+  const { data, dtype } = narrow(mask);
+  const ref = await writeArray(fresh("mask"), data, dtype, [height, width]);
   return engineCall<{ changed_pixels: number; status: Status }>("image.save_mask", {
     survey,
     name,
@@ -386,6 +393,20 @@ export async function saveMask(
 }
 
 /** How unsure the prediction is per pixel (0..1), at the prediction's size; null: none. */
+/** The photo coloured by the dense cloud's normals (false colour, Project
+ * frame), at its size over `step`; null when it has none. */
+export async function imageNormals(
+  name: string,
+): Promise<{ rgb: Uint8Array; width: number; height: number } | null> {
+  const r = await engineCall<{ normals: ArrayRef | null; step: number | null }>("image.normals", {
+    ...sv(),
+    name,
+  });
+  if (!r.normals) return null;
+  const [h, w] = r.normals.shape as [number, number, number];
+  return { rgb: (await load(r.normals)) as Uint8Array, width: w, height: h };
+}
+
 export async function imageUncertainty(
   name: string,
 ): Promise<{ values: Float32Array; width: number; height: number; mean: number } | null> {
@@ -416,14 +437,21 @@ export interface CloudView {
 }
 
 /** The cloud thinned to at most `maxPoints` (0: all of it). */
-export async function cloudView(cloud: CloudName, maxPoints: number): Promise<CloudView> {
+/** What the points are coloured by: the photos, or the normals as a false colour. */
+export type CloudColour = "photo" | "normals";
+
+export async function cloudView(
+  cloud: CloudName,
+  maxPoints: number,
+  colour: CloudColour = "photo",
+): Promise<CloudView> {
   const r = await engineCall<{
     cloud: CloudName;
     n_points: number;
     xyz: ArrayRef;
     rgb: ArrayRef | null;
     index: ArrayRef | null;
-  }>("cloud.view", { ...sv(), cloud, max_points: maxPoints });
+  }>("cloud.view", { ...sv(), cloud, max_points: maxPoints, colour });
   return {
     cloud: r.cloud,
     n_points: r.n_points,
@@ -436,7 +464,7 @@ export async function cloudView(cloud: CloudName, maxPoints: number): Promise<Cl
 /** Every point's class (−1 unlabelled), the whole cloud. */
 export async function cloudLabels(cloud: CloudName): Promise<Int32Array> {
   const r = await engineCall<{ labels: ArrayRef }>("cloud.labels", { ...sv(), cloud });
-  return (await load(r.labels)) as Int32Array;
+  return widen(await load(r.labels));
 }
 
 export async function cloudPaint(cloud: CloudName, indices: Uint32Array, classId: number) {
@@ -523,7 +551,7 @@ export async function meshGeometry(): Promise<MeshData> {
 
 export async function meshLabels(): Promise<Int32Array> {
   const r = await engineCall<{ labels: ArrayRef }>("mesh.labels", sv());
-  return (await load(r.labels)) as Int32Array;
+  return widen(await load(r.labels));
 }
 
 // -- cameras ------------------------------------------------------------------
@@ -579,13 +607,18 @@ export interface ModelSpec {
   blocks: number;
   dropout: number;
   filter_size: number;
+  /** Experimental: the dense cloud's normals as three channels beside RGB. */
+  normals?: boolean;
   [k: string]: unknown;
 }
 
 export const modelSpec = () =>
-  engineCall<{ spec: ModelSpec; training_size: [number, number] | null; problem: string | null }>(
-    "model.spec",
-  );
+  engineCall<{
+    spec: ModelSpec;
+    training_size: [number, number] | null;
+    problem: string | null;
+    default_tile_size: number | null;
+  }>("model.spec");
 export const setModelSpec = (spec: ModelSpec) =>
   engineCall<{ spec: ModelSpec; training_size: [number, number] | null; problem: string | null }>(
     "model.set_spec",

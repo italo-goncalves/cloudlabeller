@@ -80,8 +80,12 @@ def save_model(model, ml_dir: str | Path, name: str, *, spec: ModelSpec,
                n_classes: int, input_size: tuple[int, int],
                class_names: list[str] | None = None,
                in_channels: int = 3, metrics: dict | None = None,
-               history: dict | None = None, surveys: list[str] | None = None) -> Path:
-    """Save weights + manifest; overwrites a model of the same name."""
+               history: dict | None = None, surveys: list[str] | None = None,
+               best_epoch: int | None = None, monitor: str | None = None) -> Path:
+    """Save weights + manifest; overwrites a model of the same name.
+
+    ``metrics`` are those of the weights saved: the epoch ``best_epoch``
+    (0-based, in ``history``), the one with the lowest ``monitor``."""
     d = model_dir(ml_dir, name)
     d.mkdir(parents=True, exist_ok=True)
     model.save_weights(d / WEIGHTS)
@@ -97,6 +101,9 @@ def save_model(model, ml_dir: str | Path, name: str, *, spec: ModelSpec,
         "history": {k: [float(v) for v in vals] for k, vals in (history or {}).items()},
         "surveys": list(surveys or []),
     }
+    if best_epoch is not None:
+        manifest["best_epoch"] = int(best_epoch)
+        manifest["monitor"] = monitor or "loss"
     (d / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return d
 

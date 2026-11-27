@@ -9,6 +9,7 @@
 import { cn } from "@geokit/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  imageNormals,
   imageUncertainty,
   markDelete,
   markPhoto,
@@ -93,6 +94,39 @@ export function ImageView() {
       live = false;
     };
   }, [name, showUnsure, predicted, state.masks.version, project?.survey]);
+  // the photo coloured by the dense cloud's normals, over it (the photo shows where none)
+  const [showNormals, setShowNormals] = useState(false);
+  const normalsCanvas = useRef<HTMLCanvasElement>(null);
+  const canNormals = Boolean(project?.normals) && Boolean(row?.solved);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: redrawn per photo and geometry
+  useEffect(() => {
+    const canvas = normalsCanvas.current;
+    if (!canvas || !showNormals || !canNormals || !name) return;
+    let live = true;
+    imageNormals(name)
+      .then((n) => {
+        if (!live || !n) return;
+        canvas.width = n.width;
+        canvas.height = n.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        const img = ctx.createImageData(n.width, n.height);
+        for (let i = 0, k = 0; i < n.width * n.height; i++, k += 3) {
+          const r = n.rgb[k] ?? 128;
+          const g = n.rgb[k + 1] ?? 128;
+          const b = n.rgb[k + 2] ?? 128;
+          img.data[i * 4] = r;
+          img.data[i * 4 + 1] = g;
+          img.data[i * 4 + 2] = b;
+          img.data[i * 4 + 3] = r === 128 && g === 128 && b === 128 ? 0 : 255;
+        }
+        ctx.putImageData(img, 0, 0);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [name, showNormals, canNormals, state.geometryVersion, project?.survey]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the Marks change with their version
   useEffect(() => {
     if (!name) {
@@ -345,6 +379,19 @@ export function ImageView() {
         </span>
         <span className="ml-auto flex items-center gap-1">
           <Button
+            kind={showNormals && canNormals ? "primary" : "plain"}
+            aria-pressed={showNormals && canNormals}
+            disabled={!canNormals}
+            title={
+              canNormals
+                ? "Colour the photo by the dense cloud's normals: red east, green north, blue up"
+                : "Normals need a dense cloud and a solved photo"
+            }
+            onClick={() => setShowNormals((v) => !v)}
+          >
+            Normals
+          </Button>
+          <Button
             kind={showUnsure && predicted ? "primary" : "plain"}
             aria-pressed={showUnsure && predicted}
             disabled={!predicted}
@@ -406,6 +453,13 @@ export function ImageView() {
                 draggable={false}
                 className="block h-full w-full"
                 style={{ imageOrientation: "none" }}
+              />
+            )}
+            {showNormals && canNormals && (
+              <canvas
+                ref={normalsCanvas}
+                className="pointer-events-none absolute inset-0 h-full w-full"
+                style={{ imageRendering: "auto" }}
               />
             )}
             {showUnsure && predicted && (

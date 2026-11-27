@@ -33,6 +33,7 @@ import shutil
 import numpy as np
 
 from cloudlabeller.core.label_schema import UNLABELLED_ID
+from cloudlabeller.core.labels import load_label_array
 from cloudlabeller.engine.methods import _survey, survey_state
 from cloudlabeller.engine.protocol import InvalidParams, Problem
 from cloudlabeller.engine.server import Deferred, Engine, method, optional, require
@@ -186,7 +187,7 @@ def _geometry(survey, rec):
         f = rec.labels_dir / name
         if n is None or not f.exists():
             return None
-        arr = np.load(f)
+        arr = load_label_array(f)
         return arr if len(arr) == n else None
     return {"sparse": (sparse, labels("sparse.npy", None if sparse is None else len(sparse))),
             "dense": (dense, labels("dense.npy", None if dense is None else len(dense)))}

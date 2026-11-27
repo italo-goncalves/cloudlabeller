@@ -37,21 +37,13 @@ names on success.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 
 from cloudlabeller.logging_setup import setup_logging
+from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.ml")
-
-
-def _load_rgb(path):
-    import numpy as np
-    from PIL import Image
-
-    with Image.open(path) as im:
-        return np.asarray(im.convert("RGB"))
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -74,6 +66,7 @@ def main(argv: list[str]) -> int:
 
     from cloudlabeller.core.project import Project
     from cloudlabeller.ml import inference, model_store
+    from cloudlabeller.ml.inputs import load_input
 
     progress(0.0, "Opening project…")
     proj = Project.open(args.project_root)
@@ -105,11 +98,21 @@ def main(argv: list[str]) -> int:
         survey = proj.survey(sid)
         names = [r.name for r in survey.dataset.images
                  if survey.labels.status_of(r.name) != "user"]   # red + yellow only
+        if spec.normals:
+            # Experimental: a model trained on normals predicts only the photos
+            # the dense cloud's normals reach.
+            from cloudlabeller.ml.inputs import can_have_normals
+
+            reached = [n for n in names if can_have_normals(survey, n)]
+            if len(reached) < len(names):
+                log.warning("Survey %s: %d photos have no normals (no camera or no dense "
+                            "cloud) and are not predicted", sid, len(names) - len(reached))
+            names = reached
         if names:
             jobs.append((survey, names))
     total = sum(len(n) for _, n in jobs)
     if not total:
-        print("RESULT " + json.dumps({"predicted": []}), flush=True)
+        print_result({"predicted": []})
         return 0
 
     progress(0.01, f"Loading model '{manifest['name']}'…")
@@ -120,14 +123,15 @@ def main(argv: list[str]) -> int:
         records = {r.name: r.path for r in survey.dataset.images}
         start, share = done, len(names) / total
         written = inference.predict_all(
-            model, names, lambda n, rec=records: _load_rgb(rec[n]),
+            model, names,
+            lambda n, rec=records, sv=survey: load_input(sv, n, rec[n], spec.normals),
             survey.predictions_dir, spec, n_classes, manifest["name"],
             progress=lambda f, m="", s0=start, sh=share:
                 progress(0.05 + 0.95 * (s0 / total + sh * f), m))
         predicted += [{"survey": survey.id, "name": n, "uncertainty": written[n]}
                       for n in sorted(written)]
         done += len(names)
-    print("RESULT " + json.dumps({"predicted": predicted}), flush=True)
+    print_result({"predicted": predicted})
     return 0
 
 
