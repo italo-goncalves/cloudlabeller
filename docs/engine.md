@@ -472,7 +472,7 @@ Tiles less than `min_labelled` labelled.
 ### `models.list`
 → `{models}`: the saved models' manifests, newest first: `{name, created,
 spec, n_classes, input_size, class_names, metrics, history, surveys,
-tiled}`. `history` has each metric per epoch; `surveys` the Surveys it was
+tiled}`. `history` has each metric per epoch (`accuracy` counts labelled pixels only, since 0.4.0); `surveys` the Surveys it was
 trained on. `tiled` is false for a model trained on whole photos (before
 0.4.0): it can't predict or be continued.
 

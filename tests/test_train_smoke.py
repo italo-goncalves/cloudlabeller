@@ -160,3 +160,33 @@ def test_train_and_predict_cli_subprocess(tmp_path):
     with np.load(proj.survey("s1").predictions_dir / "c.jpg.npz") as pred:
         assert pred["labels"].shape == (32, 48)         # the photo / shrink
         assert set(np.unique(pred["labels"])) <= {0, 1}
+
+
+def test_accuracy_skips_unlabelled_pixels():
+    """Regression: Keras' "accuracy" counted every unlabelled pixel as a miss,
+    so a FIDA run levelled off at 0.64 (its labelled share) while the loss,
+    which skips them, fell to 0.007."""
+    import cloudlabeller  # noqa: F401  (MSVC-runtime preload before TF)
+    import tensorflow as tf
+
+    from cloudlabeller.ml.unet import LabelledAccuracy
+
+    y_true = np.array([[[0, 1, -1, -1]], [[1, 1, 0, -1]]], np.int32)       # (2, 1, 4)
+    right = tf.one_hot(np.maximum(y_true, 0), 2)                          # right where labelled
+    m = LabelledAccuracy()
+    m.update_state(y_true, right)
+    assert m.name == "accuracy" and float(m.result()) == 1.0
+    plain = tf.keras.metrics.SparseCategoricalAccuracy()
+    plain.update_state(y_true, right)
+    assert float(plain.result()) < 1.0                     # what it reported before
+
+    # one miss in the second sample; its weight (B, 1, 1) halves it
+    pred = right.numpy()
+    pred[1, 0, 0] = [1.0, 0.0]
+    m.reset_state()
+    m.update_state(y_true, pred, sample_weight=np.array([1.0, 0.5], np.float32)[:, None, None])
+    assert abs(float(m.result()) - (2 + 0.5 * 2) / (2 + 0.5 * 3)) < 1e-6
+
+    m.reset_state()
+    m.update_state(np.full((1, 1, 2), -1, np.int32), right[:1, :, :2])
+    assert float(m.result()) == 0.0                        # nothing labelled: no NaN

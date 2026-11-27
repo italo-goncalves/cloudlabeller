@@ -28,6 +28,8 @@ compiled ``tf.keras.Model``; the hyper-parameters come from
 from __future__ import annotations
 import tensorflow as tf
 
+from cloudlabeller.core.label_schema import UNLABELLED_ID
+
 # === LOCKED: Ítalo ===
 def encoder_block(input_layer, out_channels, filter_size=3,
                   depth=2, residual=False,
@@ -150,6 +152,43 @@ def u_net(input_layer, output_size, channels=16, blocks=4,
 # === END LOCKED ===
 
 
+class LabelledAccuracy(tf.keras.metrics.Metric):
+    """Accuracy over the labelled pixels only.
+
+    The loss skips unlabelled pixels (-1); Keras' ``"accuracy"`` doesn't, and
+    counts every one of them as a miss, so it levels off at the labelled
+    share of the Tiles instead of measuring the classes. Pixels count by
+    their sample's weight, as in the loss. Named ``accuracy`` so the log and
+    the saved manifests keep their keys."""
+
+    def __init__(self, name: str = "accuracy", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.hits = self.add_weight(name="hits", shape=(), initializer="zeros")
+        self.total = self.add_weight(name="total", shape=(), initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(tf.reshape(y_true, tf.shape(y_pred)[:-1]), tf.int32)
+        weight = tf.cast(tf.not_equal(y_true, UNLABELLED_ID), tf.float32)
+        if sample_weight is not None:
+            sample_weight = tf.cast(sample_weight, tf.float32)
+            sample_weight = tf.reshape(
+                sample_weight,
+                tf.concat([tf.shape(sample_weight),
+                           tf.ones(tf.rank(weight) - tf.rank(sample_weight), tf.int32)], 0))
+            weight = weight * sample_weight
+        hit = tf.cast(tf.equal(tf.argmax(y_pred, axis=-1, output_type=tf.int32), y_true),
+                      tf.float32)
+        self.hits.assign_add(tf.reduce_sum(hit * weight))
+        self.total.assign_add(tf.reduce_sum(weight))
+
+    def result(self):
+        return tf.math.divide_no_nan(self.hits, self.total)
+
+    def reset_state(self):
+        self.hits.assign(0.0)
+        self.total.assign(0.0)
+
+
 def build_model(n_classes: int, image_width: int, image_height: int,
                 in_channels: int = 3, **kwargs):
     """Build and compile the U-Net. Extra ``kwargs`` (channels, blocks,
@@ -164,7 +203,7 @@ def build_model(n_classes: int, image_width: int, image_height: int,
             # SparseCategoricalCrossentropy(ignore_class=-1) skips unlabelled
             # pixels (label -1), matching the project's UNLABELLED_ID convention.
             loss=tf.keras.losses.SparseCategoricalCrossentropy(ignore_class=-1),
-            metrics=['accuracy']
+            metrics=[LabelledAccuracy()]
     )
     return model
 
