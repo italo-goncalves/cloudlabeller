@@ -251,9 +251,15 @@ export function Viewer3D() {
   // -- geometry ---------------------------------------------------------------
 
   const detailKey = rep === "mesh" ? "-" : view.detail;
-  // the normals as colours: the dense cloud's only
+  // the normals as colours: the dense cloud's only; the Uncertainty: either cloud's
   const colour: api.CloudColour =
-    view.colourBy === "normals" && rep === "dense" && project?.normals ? "normals" : "photo";
+    view.colourBy === "normals" && rep === "dense" && project?.normals
+      ? "normals"
+      : view.colourBy === "uncertainty" && rep !== "mesh"
+        ? "uncertainty"
+        : "photo";
+  // the Uncertainty changes with the labels, so it reloads with them
+  const colourKey = colour === "uncertainty" ? `u${labelsVersion}` : colour;
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new Project, cloud, detail or geometry reloads; the rest is read as it is
   useEffect(() => {
     const rig = rigRef.current;
@@ -288,7 +294,7 @@ export function Viewer3D() {
     return () => {
       dead = true;
     };
-  }, [root, present, rep, detailKey, geometryVersion, colour]);
+  }, [root, present, rep, detailKey, geometryVersion, colourKey]);
 
   // new labels: re-read them and recolour in place
   // biome-ignore lint/correctness/useExhaustiveDependencies: `dataRev` says what is loaded now

@@ -67,10 +67,11 @@ export function ImageView() {
   const { activeGcp, gcpVersion } = state;
   const gcpNames = new Map((useGcps()?.gcps ?? []).map((g) => [g.id, g.name]));
   const [gcpMarks, setGcpMarks] = useState<PhotoMarks>({ marks: [], hints: [] });
-  // the U-Net's Uncertainty over the photo, drawn on its own canvas
+  // how unsure each pixel's label is, drawn on its own canvas: the cloud's
+  // points' Uncertainty, the model's, 0 where hand-drawn
   const [showUnsure, setShowUnsure] = useState(false);
   const unsureCanvas = useRef<HTMLCanvasElement>(null);
-  const predicted = row?.status === "ml";
+  const predicted = Boolean(row && row.status !== "none");
   // biome-ignore lint/correctness/useExhaustiveDependencies: redrawn per photo and prediction
   useEffect(() => {
     const canvas = unsureCanvas.current;
@@ -85,7 +86,8 @@ export function ImageView() {
         if (!ctx) return;
         const img = ctx.createImageData(u.width, u.height);
         for (let i = 0; i < u.values.length; i++) {
-          const v = u.values[i] ?? 0;
+          const v = u.values[i] ?? Number.NaN;
+          if (!Number.isFinite(v)) continue; // unlabelled or unknown: transparent
           img.data[i * 4] = 255;
           img.data[i * 4 + 1] = Math.round(64 * (1 - v));
           img.data[i * 4 + 2] = 255;
@@ -424,7 +426,7 @@ export function ImageView() {
             kind={showUnsure && predicted ? "primary" : "plain"}
             aria-pressed={showUnsure && predicted}
             disabled={!predicted}
-            title="Show how unsure the model's prediction is: the brighter, the less sure"
+            title="Show how unsure each label is: the brighter, the less sure. From the cloud, it comes from the photos' votes; predicted, from the model; hand-drawn labels are sure."
             onClick={() => setShowUnsure((v) => !v)}
           >
             Uncertainty

@@ -453,8 +453,9 @@ export interface CloudView {
 }
 
 /** The cloud thinned to at most `maxPoints` (0: all of it). */
-/** What the points are coloured by: the photos, or the normals as a false colour. */
-export type CloudColour = "photo" | "normals";
+/** What the points are coloured by: the photos, the normals as a false colour,
+ * or how unsure each point's label is (blue sure, red unsure, grey unknown). */
+export type CloudColour = "photo" | "normals" | "uncertainty";
 
 export async function cloudView(
   cloud: CloudName,

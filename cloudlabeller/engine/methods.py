@@ -101,14 +101,16 @@ def survey_state(survey) -> dict:
                   for r in ds.images]
         unsure = survey.settings.get("uncertainty") or {}
         for row in images:
-            row["uncertainty"] = unsure.get(row["name"]) if row["status"] == "ml" else None
+            row["uncertainty"] = (unsure.get(row["name"]) if row["status"] in ("ml", "auto")
+                                  else None)
     else:
         masks = ({f.stem for f in survey.masks_dir.glob("*.npy")}
                  if survey.masks_dir.exists() else set())
         unsure = survey.settings.get("uncertainty") or {}
         images = [{"name": name, "status": lb.status_of(name), "solved": solved,
                    "user_mask": name in masks and lb.status_of(name) == "user",
-                   "uncertainty": unsure.get(name) if lb.status_of(name) == "ml" else None}
+                   "uncertainty": (unsure.get(name) if lb.status_of(name) in ("ml", "auto")
+                                   else None)}
                   for name, solved in survey.peek_images()]
     counts = survey.peek_counts()
     outdated = survey.settings.get("reconstruction_outdated")
@@ -429,18 +431,35 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     return {"changed_pixels": int(changed.size), "status": labels.status_of(name)}
 
 
+#: The longest side of the Uncertainty sent for a photo (it is shown, not edited).
+UNCERTAINTY_SIDE = 2048
+
+
 @method("image.uncertainty")
 def image_uncertainty(engine: Engine, params: dict) -> dict:
-    """How unsure the U-Net's prediction of a photo is, per pixel (0 sure, 1
-    unsure), at the prediction's size; null when it has none."""
+    """How unsure each pixel's label is (0 sure, 1 unsure) as the overlay
+    composes them (ADR-0006): 0 where hand-drawn, the points' Uncertainty
+    where from the cloud, the prediction's where predicted, NaN where
+    unlabelled or unknown. At the photo's size over ``step``."""
     survey = _survey(engine, params)
     record = _image(survey, params)
-    u = survey.prediction_uncertainty(record.name)
-    if u is None:
-        return {"uncertainty": None, "mean": None}
+    name = record.name
+    below, _, unc = _below(engine, survey, name)
+    user = survey.labels.image_masks.get(name)
+    if unc is None:
+        if user is None or not (user != UNLABELLED_ID).any():
+            return {"uncertainty": None, "mean": None, "step": None}
+        unc = np.full(user.shape, np.nan, np.float16)
+    unc = unc.astype(np.float32)
+    if user is not None and user.shape == unc.shape:
+        unc[user != UNLABELLED_ID] = 0.0
+    step = max(1, -(-max(unc.shape) // UNCERTAINTY_SIDE))
+    small = np.ascontiguousarray(unc[::step, ::step])
+    known = np.isfinite(small)
     return {"uncertainty": arrays.write(engine.project.root,
-                                        f"uncertainty/{survey.id}/{record.name}", u),
-            "mean": float(u.mean(dtype=np.float64))}
+                                        f"uncertainty/{survey.id}/{name}", small),
+            "mean": float(small[known].mean(dtype=np.float64)) if known.any() else None,
+            "step": step}
 
 
 # -- clouds and mesh -----------------------------------------------------------------
@@ -722,9 +741,9 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
 @method("transfer.cloud_to_images")
 def transfer_cloud_to_images(engine: Engine, params: dict) -> Deferred:
     """Mark every solved photo the user hasn't drawn on as auto-labelled
-    wherever the labelled cloud reaches it. No masks are stored: overlays
-    are rendered from the cloud on request (``image.mask``)."""
-    from cloudlabeller.transfer import cloud_to_image
+    wherever the labelled cloud reaches it, with the mean Uncertainty of
+    its projected labels. No masks are stored: overlays are rendered from
+    the cloud on request (``image.mask``)."""
 
     survey = _survey(engine, params)
     if survey.dataset.cloud is None:
@@ -737,16 +756,30 @@ def transfer_cloud_to_images(engine: Engine, params: dict) -> Deferred:
                if survey.labels.status_of(r.name) != "user"]
     vis = survey.visibility_index()
 
-    def work(progress):
-        counts = {}
-        for i, (name, cam) in enumerate(targets, 1):
-            mask = cloud_to_image(cloud, cloud_labels_, cam, name=name, visibility=vis)
-            counts[name] = int((mask != UNLABELLED_ID).sum())
-            progress(i / max(len(targets), 1), f"{name}: {counts[name]:,} px")
-        return counts
+    from cloudlabeller.transfer.project_to_image import cloud_layers_to_image
 
-    def finish(counts):
+    point_source, point_unc = survey.labels.provenance(dense=kind == "dense")
+    point_source, point_unc = point_source.copy(), point_unc.copy()
+
+    def work(progress):
+        counts, doubt = {}, {}
+        for i, (name, cam) in enumerate(targets, 1):
+            mask, _, unc = cloud_layers_to_image(cloud, cloud_labels_, point_source, point_unc,
+                                                 cam, name=name, visibility=vis)
+            counts[name] = int((mask != UNLABELLED_ID).sum())
+            known = np.isfinite(unc)
+            doubt[name] = float(unc[known].astype(np.float32).mean()) if known.any() else None
+            progress(i / max(len(targets), 1), f"{name}: {counts[name]:,} px")
+        return counts, doubt
+
+    def finish(out):
+        counts, doubt = out
         marked = _mark_auto(survey, counts, 1)
+        unsure = survey.settings.setdefault("uncertainty", {})
+        for name in marked:
+            if doubt.get(name) is not None:
+                unsure[name] = doubt[name]
+        survey.save_manifest()
         engine.changed("status", survey=survey.id, images=counts)
         return {"cloud": kind, "auto_labelled": marked}
 

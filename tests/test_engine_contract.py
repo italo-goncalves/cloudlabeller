@@ -544,6 +544,39 @@ def test_cloud_sources_say_where_labels_came_from(pipe, tmp_path):
     pipe.drained("request.progress")
 
 
+def test_uncertainty_shows_in_photos_and_on_the_cloud(pipe, tmp_path):
+    """ADR-0006: a cloud-made photo shows its points' Uncertainty, a
+    hand-drawn pixel is sure, and the cloud can be coloured by it."""
+    from cloudlabeller.engine.scene import UNKNOWN_GREY, uncertainty_colours
+
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    overlay = _cloud_labels_b(pipe, root)
+    rows = {i["name"]: i for i in pipe.call("project.state")["surveys"][0]["images"]}
+    assert 0 < rows["b.png"]["uncertainty"] <= 1                      # cloud-made: a mean
+    assert rows["a.png"]["uncertainty"] is None                       # hand-drawn
+
+    out = pipe.call("image.uncertainty", {"survey": "s1", "name": "b.png"})
+    u = get_array(root, out["uncertainty"])
+    assert out["step"] == 1 and u.shape == overlay.shape and u.dtype == np.float32
+    assert np.isnan(u[overlay == -1]).all()
+    assert ((u[overlay != -1] > 0) & (u[overlay != -1] <= 1)).all()
+    assert out["mean"] == pytest.approx(float(u[overlay != -1].mean()), rel=1e-4)
+    a = pipe.call("image.uncertainty", {"survey": "s1", "name": "a.png"})
+    ua = get_array(root, a["uncertainty"])
+    assert (ua == 0).all() and a["mean"] == 0.0                       # all hand-drawn
+
+    view = pipe.call("cloud.view", {"survey": "s1", "colour": "uncertainty"})
+    rgb = get_array(root, view["rgb"])
+    labels = get_array(root, pipe.call("cloud.labels", {"survey": "s1"})["labels"])
+    unc = get_array(root, pipe.call("cloud.sources", {"survey": "s1"})["uncertainty"])
+    assert np.array_equal(rgb, uncertainty_colours(unc))
+    assert (rgb[labels == -1] == UNKNOWN_GREY).all()
+    ramp = uncertainty_colours(np.array([0.0, 0.5, 1.0, np.nan]))
+    assert ramp[0].tolist() == [40, 110, 210] and ramp[2].tolist() == [215, 45, 40]
+    assert ramp[3].tolist() == list(UNKNOWN_GREY)
+
+
 def test_predict_leaves_cloud_labelled_photos_alone(pipe, tmp_path):
     """ADR-0006: predicting a photo labelled from the cloud hid its projection."""
     root = make_project(tmp_path / "p.clproj")

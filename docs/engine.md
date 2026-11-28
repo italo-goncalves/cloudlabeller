@@ -145,8 +145,8 @@ source_resolution, can_undo, can_redo}`.
 - `active` is the active Reconstruction's id, null before SfM, and
   `reconstructions` how many the Survey has. `aligned`: the active one has
   an Alignment into the Project frame.
-- `status` is `user`, `auto`, `ml` or `none`. `uncertainty` is an `ml`
-  photo's mean Uncertainty (0..1), else null.
+- `status` is `user`, `auto`, `ml` or `none`. `uncertainty` is an `ml` or `auto`
+  photo's mean Uncertainty (0..1): its prediction's, or its projected labels', else null.
 - `reconstruction` is `none`, `outdated` or `current`.
 - `sparse` and `dense` are point counts, or null. `mesh` is
   `{vertices, faces}`, or null. `normals`: the dense cloud has normals
@@ -262,12 +262,14 @@ longer side at most 2048 px). Both are null when the photo has no camera
 or the Survey no dense cloud with normals.
 
 ### `image.uncertainty`
-`{survey, name}` → `{uncertainty, mean}`: how unsure the U-Net's
-prediction of the photo is at each pixel, 0 (sure) to 1 (as unsure as
-can be: the entropy of its class probabilities over the most it can be),
-as a `float32` Array file `[h, w]` at the prediction's size (the photo's
-divided by the model's shrink factor), and its mean. Both are null when
-the photo has no prediction (or one from before 0.4.0).
+`{survey, name}` → `{uncertainty, mean, step}`: how unsure each pixel's
+label is, 0 (sure) to 1, as `image.mask` composes them (ADR-0006): 0 where
+hand-drawn; where from the cloud, the Uncertainty of the point it came from
+(`cloud.sources`); where predicted, the U-Net's (the entropy of its class
+probabilities over the most it can be); NaN where unlabelled or unknown. A
+`float32` Array file `[h, w]`, the photo's size taken every `step` pixels
+(its longest side at most 2048), and the mean of its known pixels. All are
+null when the photo has no labels.
 
 ### `cloud.points`
 `{survey, cloud?: "sparse"|"dense"}` → `{cloud, n_points, xyz, rgb}`. `xyz`
@@ -303,8 +305,10 @@ an `int32 [shown]` Array file holding each shown point's index in the full
 cloud. When `max_points` is 0 or at least N, every point is shown and
 `index` is null. With `colour: "normals"`, `rgb` is the points' normals in
 the Project frame as a false colour, `round(127.5 (n + 1))` per component
-(red east/+x, green north/+y, blue up/+z). Problems: `cloud.none`,
-`cloud.no_normals` (only a dense cloud has normals).
+(red east/+x, green north/+y, blue up/+z). With `colour: "uncertainty"`,
+`rgb` is each point's Uncertainty (`cloud.sources`) on a ramp from blue
+(sure) through yellow to red (unsure), grey where unlabelled or unknown.
+Problems: `cloud.none`, `cloud.no_normals` (only a dense cloud has normals).
 
 ### `cloud.select`
 `{survey, cloud?, view_projection, polygon, width, height}` → `{count, indices}`. A
@@ -404,8 +408,9 @@ keep theirs. Returns the number of points updated. Problems:
 
 ### `transfer.cloud_to_images`
 `{survey}` → `{cloud, auto_labelled}`. A long request. Marks `auto` every solved photo
-the user hasn't drawn on that the labelled cloud reaches. Their overlays
-come from `image.mask`. Problems: `transfer.no_cloud`,
+the user hasn't drawn on that the labelled cloud reaches, and records the
+mean Uncertainty of its projected labels (the photo rows' `uncertainty`).
+Their overlays come from `image.mask`. Problems: `transfer.no_cloud`,
 `transfer.cloud_unlabelled`.
 
 ### `transfer.propagate`

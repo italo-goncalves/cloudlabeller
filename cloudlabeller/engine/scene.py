@@ -46,7 +46,7 @@ from cloudlabeller.engine.server import Deferred, Engine, method, optional, requ
 
 #: What ``cloud.view`` colours the points by: the photos, or the normals as a
 #: false-colour RGB (``transfer.normal_map.encode_normals``, Project frame).
-COLOURS = ("photo", "normals")
+COLOURS = ("photo", "normals", "uncertainty")
 
 #: A photo's normal map is sent at most this many pixels on its longer side.
 NORMALS_SIDE = 2048
@@ -59,6 +59,30 @@ def _number(value, name: str) -> float:
 
 
 # -- clouds ----------------------------------------------------------------------
+#: The Uncertainty colour ramp: sure blue, halfway yellow, unsure red.
+_RAMP = np.array([[40, 110, 210], [240, 205, 60], [215, 45, 40]], np.float32)
+#: Points with no label, or whose Uncertainty is unknown.
+UNKNOWN_GREY = (110, 110, 110)
+
+
+def uncertainty_colours(unc: np.ndarray) -> np.ndarray:
+    """``uint8 [N, 3]`` colours of Uncertainties in 0..1 (grey where NaN)."""
+    u = np.asarray(unc, np.float32)
+    known = np.isfinite(u)
+    t = np.clip(np.where(known, u, 0.0), 0.0, 1.0) * 2.0
+    lo = np.minimum(t.astype(np.int32), 1)
+    f = (t - lo)[:, None]
+    rgb = _RAMP[lo] * (1 - f) + _RAMP[lo + 1] * f
+    rgb[~known] = UNKNOWN_GREY
+    return np.round(rgb).astype(np.uint8)
+
+
+def _has_labels(survey, which: str, n: int) -> bool:
+    lb = survey.labels
+    labels = lb.dense_cloud_labels if which == "dense" else lb.cloud_labels
+    return labels is not None and len(labels) == n
+
+
 @method("cloud.view")
 def cloud_view(engine: Engine, params: dict) -> dict:
     """A seeded, evenly spread subsample of a cloud for display."""
@@ -85,6 +109,12 @@ def cloud_view(engine: Engine, params: dict) -> dict:
 
         normals = cloud.normals if index is None else cloud.normals[index]
         rgb = encode_normals(unit(survey.active.frame_normals(normals)))
+    elif colour == "uncertainty":
+        unc = survey.labels.provenance(dense=which == "dense")[1] \
+            if _has_labels(survey, which, cloud.n_points) else None
+        if unc is None:
+            unc = np.full(cloud.n_points, np.nan, np.float16)
+        rgb = uncertainty_colours(unc if index is None else unc[index])
     else:
         rgb = cloud.rgb if (index is None or cloud.rgb is None) else cloud.rgb[index]
     return {"cloud": which, "n_points": cloud.n_points, "shown": len(xyz),

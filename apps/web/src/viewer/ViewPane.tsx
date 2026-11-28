@@ -47,6 +47,13 @@ export function ViewPane() {
   const canPaint = selection !== null && (project?.schema.length ?? 0) > 0;
   const canDelete = selection !== null && selection.cloud === "sparse";
   const canNormals = view.representation === "dense" && Boolean(project?.normals);
+  const canUnsure = view.representation !== "mesh";
+  const colourShown: api.CloudColour =
+    view.colourBy === "normals" && canNormals
+      ? "normals"
+      : view.colourBy === "uncertainty" && canUnsure
+        ? "uncertainty"
+        : "photo";
 
   const apply = async () => {
     if (!selection) return;
@@ -152,7 +159,7 @@ export function ViewPane() {
         <Section title="Colour">
           <Radios<api.CloudColour>
             name="colour-by"
-            value={view.colourBy === "normals" && canNormals ? "normals" : "photo"}
+            value={colourShown}
             onChange={(colourBy) => set({ colourBy })}
             options={[
               { value: "photo", label: "Photo colours" },
@@ -161,12 +168,18 @@ export function ViewPane() {
                 label: "Normals (false colour)",
                 disabled: !canNormals,
               },
+              {
+                value: "uncertainty",
+                label: "Uncertainty",
+                disabled: !canUnsure,
+              },
             ]}
           />
           <p className="mb-2 text-fg-faint">
             {canNormals
               ? "Normals: red east, green north, blue up."
-              : "Normals: the dense cloud only."}
+              : "Normals: the dense cloud only."}{" "}
+            Uncertainty: blue sure, red unsure, grey unknown; from the photos' votes.
           </p>
           <Slider
             label="Blend from photo colours to labels"
@@ -177,7 +190,13 @@ export function ViewPane() {
             onChange={(blend) => set({ blend })}
           />
           <div className="flex justify-between text-fg-faint">
-            <span>{view.colourBy === "normals" && canNormals ? "Normals" : "RGB"}</span>
+            <span>
+              {colourShown === "normals"
+                ? "Normals"
+                : colourShown === "uncertainty"
+                  ? "Uncertainty"
+                  : "RGB"}
+            </span>
             <span>Labels</span>
           </div>
         </Section>
