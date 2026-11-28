@@ -9,17 +9,21 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { currentSurvey, imageInfo, imageMask, saveMask } from "../engine/api";
 import { useApp } from "../state/app";
+import type { Marks } from "./raster";
 
 export interface MaskEditor {
   /** The photo's size, once known. */
   size: { w: number; h: number } | null;
   /** The working mask; null while there is none (nothing yet painted or loaded). */
   mask: RefObject<Int32Array | null>;
+  /** Where each pixel's label came from, as shown; and where strokes went since the last save. */
+  marks: RefObject<Marks | null>;
   /** Bumped whenever the whole mask changed under the overlay: repaint it all. */
   rev: number;
   /** True from the first move of a stroke until it is handed to `save`. */
   stroking: RefObject<boolean>;
-  /** The working mask, made all unlabelled at the photo's size if there is none. */
+  /** The working mask, made all unlabelled at the photo's size if there is none
+   * (and its marks with it). */
   ensure: () => Int32Array | null;
   /** Save `mask` as one edit, after any earlier one; resolves when the Engine has it. */
   save: (mask: Int32Array) => Promise<void>;
@@ -34,6 +38,7 @@ export function useMask(name: string | null): MaskEditor {
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   const [rev, setRev] = useState(0);
   const mask = useRef<Int32Array | null>(null);
+  const marks = useRef<Marks | null>(null);
   const stroking = useRef(false);
   const pending = useRef(0);
   const queue = useRef<Promise<void>>(Promise.resolve());
@@ -49,6 +54,7 @@ export function useMask(name: string | null): MaskEditor {
       seq.current++;
       loaded.current = null;
       mask.current = null;
+      marks.current = null;
       setSize(null);
       setRev((r) => r + 1);
       return;
@@ -59,6 +65,7 @@ export function useMask(name: string | null): MaskEditor {
     loaded.current = name;
     if (switched) {
       mask.current = null;
+      marks.current = null;
       setSize(null);
       setRev((r) => r + 1);
     }
@@ -71,6 +78,10 @@ export function useMask(name: string | null): MaskEditor {
         // Stale, or edited since the request: what is here is newer.
         if (mine !== seq.current || stroking.current || pending.current > 0) return;
         mask.current = m.mask;
+        const n = m.mask ? m.width * m.height : 0;
+        marks.current = m.mask
+          ? { touched: new Uint8Array(n), sources: m.sources ?? new Uint8Array(n).fill(2) }
+          : null;
         setSize(m.mask ? { w: m.width, h: m.height } : { w: info.width, h: info.height });
         setRev((r) => r + 1);
       } catch (e) {
@@ -84,6 +95,7 @@ export function useMask(name: string | null): MaskEditor {
     const s = sizeRef.current;
     if (!s) return null;
     mask.current = new Int32Array(s.w * s.h).fill(-1);
+    marks.current = { touched: new Uint8Array(s.w * s.h), sources: new Uint8Array(s.w * s.h) };
     return mask.current;
   }, []);
 
@@ -93,11 +105,14 @@ export function useMask(name: string | null): MaskEditor {
       if (!name || !s) return Promise.resolve();
       // A copy: the next stroke edits the working mask while this one is written.
       const copy = m.slice();
+      // The strokes since the last save go with it; the next ones start afresh.
+      const touched = marks.current?.touched.slice();
+      marks.current?.touched.fill(0);
       const survey = currentSurvey();
       pending.current++;
       const run = queue.current.then(async () => {
         try {
-          await saveMask(name, copy, s.w, s.h, survey);
+          await saveMask(name, copy, s.w, s.h, survey, touched);
         } catch (e) {
           fail(e);
         } finally {
@@ -112,6 +127,17 @@ export function useMask(name: string | null): MaskEditor {
 
   const replace = useCallback(
     (m: Int32Array) => {
+      // An import: what it changed counts as strokes.
+      const before = mask.current;
+      const mk = marks.current;
+      if (mk) {
+        for (let i = 0; i < m.length; i++) {
+          if (!before || m[i] !== before[i]) {
+            mk.touched[i] = 1;
+            mk.sources[i] = (m[i] as number) < 0 ? 0 : 2;
+          }
+        }
+      }
       mask.current = m;
       setRev((r) => r + 1);
       return save(m);
@@ -121,5 +147,5 @@ export function useMask(name: string | null): MaskEditor {
 
   const settled = useCallback(() => queue.current, []);
 
-  return { size, mask, rev, stroking, ensure, save, replace, settled };
+  return { size, mask, marks, rev, stroking, ensure, save, replace, settled };
 }

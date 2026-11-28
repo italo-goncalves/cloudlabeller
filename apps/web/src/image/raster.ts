@@ -16,6 +16,35 @@ export interface Rect {
 
 export type Point = [number, number];
 
+/** Where a pixel's label came from (ADR-0006), as the Engine codes it. */
+export const SOURCE = { none: 0, hand: 2, cloud: 3, predicted: 4 } as const;
+
+/** The class to paint with to accept what a pixel shows as hand-drawn. */
+export const KEEP = -2;
+
+/**
+ * What a stroke leaves besides the mask: `touched` is 1 where it went (the
+ * Engine keeps those pixels as the user's), `sources` is the source shown.
+ */
+export interface Marks {
+  touched: Uint8Array;
+  sources: Uint8Array;
+}
+
+/** Paint one pixel: a class (−1 erases), or {@link KEEP} to accept a label shown. */
+function paintPixel(mask: Int32Array, i: number, classId: number, marks?: Marks): boolean {
+  if (classId === KEEP) {
+    if ((mask[i] as number) < 0) return false;
+  } else {
+    mask[i] = classId;
+  }
+  if (marks) {
+    marks.touched[i] = 1;
+    marks.sources[i] = classId === -1 ? SOURCE.none : SOURCE.hand;
+  }
+  return true;
+}
+
 export function unionRect(a: Rect | null, b: Rect | null): Rect | null {
   if (!a) return b;
   if (!b) return a;
@@ -38,6 +67,7 @@ export function fillPolygon(
   h: number,
   polygon: readonly Point[],
   classId: number,
+  marks?: Marks,
 ): Rect | null {
   const n = polygon.length;
   if (n < 3 || w <= 0 || h <= 0) return null;
@@ -67,7 +97,8 @@ export function fillPolygon(
       const xa = Math.max(0, Math.ceil((crossings[k] as number) - 0.5));
       const xb = Math.min(w, Math.ceil((crossings[k + 1] as number) - 0.5));
       if (xb <= xa) continue;
-      mask.fill(classId, y * w + xa, y * w + xb);
+      if (classId !== KEEP && !marks) mask.fill(classId, y * w + xa, y * w + xb);
+      else for (let i = y * w + xa; i < y * w + xb; i++) paintPixel(mask, i, classId, marks);
       rect = unionRect(rect, { x0: xa, y0: y, x1: xb, y1: y + 1 });
     }
   }
@@ -83,6 +114,7 @@ export function stampDisc(
   cy: number,
   radius: number,
   classId: number,
+  marks?: Marks,
 ): Rect | null {
   const r = Math.max(radius, 0);
   const x0 = Math.max(0, Math.floor(cx - r));
@@ -98,8 +130,7 @@ export function stampDisc(
     for (let x = x0; x < x1; x++) {
       const dx = x + 0.5 - cx;
       if (dx * dx + dy * dy <= r2 || (x === px && y === py)) {
-        mask[y * w + x] = classId;
-        touched = true;
+        if (paintPixel(mask, y * w + x, classId, marks)) touched = true;
       }
     }
   }
@@ -115,6 +146,7 @@ export function strokeLine(
   to: Point,
   radius: number,
   classId: number,
+  marks?: Marks,
 ): Rect | null {
   const length = Math.hypot(to[0] - from[0], to[1] - from[1]);
   const spacing = Math.max(radius / 2, 0.5);
@@ -124,7 +156,7 @@ export function strokeLine(
     const t = i / steps;
     const x = from[0] + (to[0] - from[0]) * t;
     const y = from[1] + (to[1] - from[1]) * t;
-    rect = unionRect(rect, stampDisc(mask, w, h, x, y, radius, classId));
+    rect = unionRect(rect, stampDisc(mask, w, h, x, y, radius, classId, marks));
   }
   return rect;
 }
@@ -165,10 +197,29 @@ export function maskFromPixels(
   return out;
 }
 
+/** The colours of the sources, when the overlay shows them instead of the classes. */
+export const SOURCE_COLOURS: Record<number, [number, number, number]> = {
+  [SOURCE.hand]: [63, 185, 80],
+  [SOURCE.cloud]: [88, 166, 255],
+  [SOURCE.predicted]: [255, 166, 87],
+};
+
 /**
- * Colour a mask into `out` (RGBA, opaque; the display opacity is the canvas's).
+ * How opaque a pixel of a source is drawn: hand-drawn solid, from the cloud
+ * lighter, predicted hatched (diagonal stripes), so the source shows at a glance.
+ */
+export function sourceAlpha(source: number, x: number, y: number): number {
+  if (source === SOURCE.cloud) return 170;
+  if (source === SOURCE.predicted) return ((x + y) >> 2) & 1 ? 150 : 55;
+  return 255;
+}
+
+/**
+ * Colour a mask into `out` (RGBA; the display opacity is the canvas's).
  * Unlabelled (−1) and ids without a colour are transparent. `rect` limits the
- * work to the pixels that changed.
+ * work to the pixels that changed. With `sources`, each pixel's opacity says
+ * where its label came from ({@link sourceAlpha}), and with `bySource` its
+ * colour does too ({@link SOURCE_COLOURS}) instead of its class.
  */
 export function maskToRgba(
   mask: Int32Array,
@@ -177,6 +228,8 @@ export function maskToRgba(
   colours: Map<number, [number, number, number]>,
   out: Uint8ClampedArray,
   rect?: Rect,
+  sources?: Uint8Array | null,
+  bySource = false,
 ): void {
   const x0 = rect ? Math.max(0, rect.x0) : 0;
   const x1 = rect ? Math.min(w, rect.x1) : w;
@@ -193,11 +246,13 @@ export function maskToRgba(
         last = id < 0 ? undefined : colours.get(id);
       }
       const o = i * 4;
-      if (last) {
-        out[o] = last[0];
-        out[o + 1] = last[1];
-        out[o + 2] = last[2];
-        out[o + 3] = 255;
+      const source = sources ? (sources[i] as number) : SOURCE.hand;
+      const colour = last && bySource ? (SOURCE_COLOURS[source] ?? last) : last;
+      if (colour) {
+        out[o] = colour[0];
+        out[o + 1] = colour[1];
+        out[o + 2] = colour[2];
+        out[o + 3] = sources ? sourceAlpha(source, x, y) : 255;
       } else {
         out[o] = out[o + 1] = out[o + 2] = out[o + 3] = 0;
       }

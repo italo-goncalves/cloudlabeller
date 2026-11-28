@@ -367,7 +367,8 @@ def test_inbound_arrays_are_checked(pipe, tmp_path):
 def test_save_mask_is_undoable_and_persisted(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})
-    assert pipe.call("image.mask", {"survey": "s1", "name": "a.png"}) == {"source": None, "mask": None}
+    assert pipe.call("image.mask", {"survey": "s1", "name": "a.png"}) == {
+        "source": None, "mask": None, "sources": None}
 
     mask = np.full((H, W), -1, np.int32)
     mask[:, : W // 2] = 0
@@ -464,6 +465,36 @@ def test_painting_over_cloud_labels_keeps_only_the_strokes(pipe, tmp_path):
     assert shown["source"] == "user"
     composed = get_array(root, shown["mask"])
     assert np.array_equal(composed[~stroke], overlay[~stroke])   # still shown under the strokes
+
+
+def test_touched_pixels_become_hand_drawn_whatever_their_class(pipe, tmp_path):
+    """ADR-0006: painting the class a pixel already shows (or accepting the
+    prediction there) makes it hand-drawn; erasing shows what is under."""
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    overlay = _cloud_labels_b(pipe, root)
+    labelled = np.argwhere(overlay != -1)
+    (r, c) = labelled[0]
+    touched = np.zeros((H, W), np.uint8)
+    touched[r, c] = 1                                # accepted as shown
+    pipe.call("image.save_mask", {"survey": "s1", "name": "b.png",
+                                  "mask": put_array(root, "b", overlay),
+                                  "touched": put_array(root, "t", touched)})
+    stored = Project.open(root).survey("s1").labels.image_masks["b.png"]
+    assert stored[r, c] == overlay[r, c] and (stored != -1).sum() == 1
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
+    sources = get_array(root, shown["sources"])
+    assert sources.dtype == np.uint8 and sources[r, c] == 2          # hand-drawn
+    assert set(np.unique(sources[overlay != -1])) <= {2, 3}          # the rest from the cloud
+
+    erased = overlay.copy()
+    erased[r, c] = -1
+    pipe.call("image.save_mask", {"survey": "s1", "name": "b.png",
+                                  "mask": put_array(root, "b", erased),
+                                  "touched": put_array(root, "t", touched)})
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
+    assert get_array(root, shown["mask"])[r, c] == overlay[r, c]     # the cloud's again
+    assert get_array(root, shown["sources"])[r, c] == 3
 
 
 def test_images_to_cloud_leaves_predictions_out_unless_asked(pipe, tmp_path):

@@ -2,9 +2,11 @@
 // Copyright (C) 2026 Ítalo Gomes Gonçalves
 
 // The Image pane: a photo with its mask over it, and the tools to label it
-// (polygon, brush, eraser), as the 0.2.x Qt `ui/image_view.py` did, and the
-// GCP tool, which places the chosen GCP's Mark on the photo. The pixel
-// work is in `raster.ts`, the mask's life in `useMask`, the view in `useViewport`.
+// (polygon, brush, eraser), as the 0.2.x Qt `ui/image_view.py` did, the
+// Accept brush, which keeps what a pixel shows as the user's own label
+// (ADR-0006), and the GCP tool, which places the chosen GCP's Mark on the
+// photo. The pixel work is in `raster.ts`, the mask's life in `useMask`, the
+// view in `useViewport`.
 
 import { cn } from "@geokit/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,6 +27,7 @@ import { pickMaskPixels } from "./importMask";
 import {
   fillPolygon,
   imageToScreen,
+  KEEP,
   maskFromPixels,
   type Point,
   type Rect,
@@ -42,6 +45,7 @@ const TOOLS: { tool: ImageTool; label: string }[] = [
   { tool: "polygon", label: "Polygon (D)" },
   { tool: "brush", label: "Brush (B)" },
   { tool: "eraser", label: "Eraser (E)" },
+  { tool: "accept", label: "Accept (A)" },
   { tool: "gcp", label: "GCP (G)" },
 ];
 
@@ -143,7 +147,9 @@ export function ImageView() {
   }, [name, gcpVersion, project?.survey]);
   const editor = useMask(name);
   const { size } = editor;
-  const overlay = useOverlay(editor, schema);
+  // the overlay coloured by where its labels came from, not by class
+  const [bySource, setBySource] = useState(false);
+  const overlay = useOverlay(editor, schema, bySource);
   const viewport = useViewport(size, name);
   const { view } = viewport;
 
@@ -158,13 +164,21 @@ export function ImageView() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: these are the triggers
   useEffect(() => setPolygon([]), [name, tool]);
 
-  const paintClass = tool === "eraser" ? -1 : activeClass;
+  const brushing = tool === "brush" || tool === "eraser" || tool === "accept";
+  const paintClass = tool === "eraser" ? -1 : tool === "accept" ? KEEP : activeClass;
 
   const finishPolygon = useCallback(() => {
     if (!size || polygon.length < 3) return;
     const mask = editor.ensure();
     if (!mask) return;
-    const rect = fillPolygon(mask, size.w, size.h, polygon, activeClass);
+    const rect = fillPolygon(
+      mask,
+      size.w,
+      size.h,
+      polygon,
+      activeClass,
+      editor.marks.current ?? undefined,
+    );
     setPolygon([]);
     if (!rect) return;
     overlay.paint(rect);
@@ -206,11 +220,12 @@ export function ImageView() {
     if (tool === "polygon") {
       if (e.button === 0) setPolygon((p) => [...p, clamp(here)]);
       else if (e.button === 2) setPolygon((p) => p.slice(0, -1));
-    } else if ((tool === "brush" || tool === "eraser") && e.button === 0) {
+    } else if (brushing && e.button === 0) {
       const mask = editor.ensure();
       if (!mask) return;
       editor.stroking.current = true;
-      const dirty = stampDisc(mask, size.w, size.h, here[0], here[1], radius, paintClass);
+      const marks = editor.marks.current ?? undefined;
+      const dirty = stampDisc(mask, size.w, size.h, here[0], here[1], radius, paintClass, marks);
       overlay.paint(dirty);
       drag.current = { kind: "stroke", last: here, mask, classId: paintClass, dirty };
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -227,7 +242,8 @@ export function ImageView() {
       d.last = at;
     } else if (size) {
       const here = viewport.toImage(e.clientX, e.clientY);
-      const rect = strokeLine(d.mask, size.w, size.h, d.last, here, radius, d.classId);
+      const marks = editor.marks.current ?? undefined;
+      const rect = strokeLine(d.mask, size.w, size.h, d.last, here, radius, d.classId, marks);
       overlay.paint(rect);
       d.dirty = unionRect(d.dirty, rect);
       d.last = here;
@@ -261,6 +277,10 @@ export function ImageView() {
       case "e":
       case "E":
         toggle("eraser");
+        break;
+      case "a":
+      case "A":
+        toggle("accept");
         break;
       case "g":
       case "G":
@@ -378,6 +398,15 @@ export function ImageView() {
           />
         </span>
         <span className="ml-auto flex items-center gap-1">
+          <Button
+            kind={bySource ? "primary" : "plain"}
+            aria-pressed={bySource}
+            disabled={!ready}
+            title="Colour the labels by where they came from: green hand-drawn, blue from the cloud, orange predicted. Only hand-drawn and cloud labels train the model."
+            onClick={() => setBySource((v) => !v)}
+          >
+            Sources
+          </Button>
           <Button
             kind={showNormals && canNormals ? "primary" : "plain"}
             aria-pressed={showNormals && canNormals}
@@ -557,15 +586,15 @@ export function ImageView() {
               </g>
             );
           })}
-          {hover && (tool === "brush" || tool === "eraser") && (
+          {hover && brushing && (
             <circle
               cx={hover[0]}
               cy={hover[1]}
               r={Math.max(radius * view.scale, 1)}
               fill="none"
-              stroke={tool === "eraser" ? "white" : classColour}
+              stroke={tool === "eraser" ? "white" : tool === "accept" ? "#3fb950" : classColour}
               strokeWidth={2}
-              strokeDasharray={tool === "eraser" ? "4 3" : undefined}
+              strokeDasharray={tool === "brush" ? undefined : "4 3"}
             />
           )}
         </svg>

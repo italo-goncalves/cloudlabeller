@@ -217,7 +217,7 @@ Survey has its own history.
 `{survey}` → `{changed: {modality: "cloud"|"image", image} | null}`
 
 ### `image.mask`
-`{survey, name}` → `{source, mask}`. The overlay for a photo: the user's
+`{survey, name}` → `{source, mask, sources}`. The overlay for a photo: the user's
 own labels, over the labelled cloud's projection, over the U-Net's
 prediction, so the better source wins at each pixel (ADR-0006).
 
@@ -227,16 +227,23 @@ prediction, so the better source wins at each pixel (ADR-0006).
 - `mask` is an Array file of shape `[H, W]`, or null, in the narrowest of
   `int8`, `int16` and `int32` that holds its ids (`int8` for up to 127
   classes: a 20-megapixel mask is then 20 MB, not 80).
+- `sources` is a `uint8` Array file `[H, W]`, or null: which source shows at
+  each pixel, coded as `cloud.sources` does (0 none, 2 hand-drawn, 3 from
+  the cloud, 4 predicted).
 
 Problem: `image.not_found`.
 
 ### `image.save_mask`
-`{survey, name, mask}` → `{changed_pixels, status}`. Stores the mask the user
-painted, as one undoable edit, and marks the photo `user`. The window sends
-the whole mask, seeded from the overlay `image.mask` showed; only the pixels
-that differ from that overlay (the user's strokes) are kept, so the cloud's
-and the U-Net's labels under them don't become hand-drawn (ADR-0006).
-Nothing is stored when a photo without a mask gets no stroke. `mask` is an inbound
+`{survey, name, mask, touched?}` → `{changed_pixels, status}`. Stores the mask
+the user painted, as one undoable edit, and marks the photo `user`. The
+window sends the whole mask, seeded from the overlay `image.mask` showed,
+and `touched`, a `uint8` Array file `[H, W]` that is nonzero where its
+strokes went. Only those pixels are kept as the user's (ADR-0006), whatever
+their class: painting the class a pixel shows, or accepting the prediction,
+makes it hand-drawn, and erasing shows what is under the user's labels
+again. Without `touched`, the strokes are the pixels that differ from the
+overlay. The cloud's and the U-Net's labels are never copied in as
+hand-drawn. Nothing is stored when a photo without a mask gets no stroke. `mask` is an inbound
 `int8`, `int16` or `int32` Array file of the photo's size (the window sends
 the narrowest). Problems: `image.not_found`,
 `image.mask_shape`, `image.mask_values`.

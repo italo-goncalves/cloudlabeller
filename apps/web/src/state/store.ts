@@ -11,7 +11,7 @@ import type { CloudColour, CloudName, ProjectState } from "../engine/api";
 export type Representation = "sparse" | "dense" | "mesh";
 /** How thinned the cloud is on screen (see `detail.ts`'s `VIEW_DETAIL`). */
 export type ViewDetail = "low" | "medium" | "high" | "full";
-export type ImageTool = "pan" | "polygon" | "brush" | "eraser" | "gcp";
+export type ImageTool = "pan" | "polygon" | "brush" | "eraser" | "accept" | "gcp";
 
 export interface ViewSettings {
   representation: Representation;

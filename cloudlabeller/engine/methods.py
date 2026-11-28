@@ -332,7 +332,7 @@ def _composed(user, below):
 def image_mask(engine: Engine, params: dict) -> dict:
     """The mask to show over a photo: the user's own labels, over the
     cloud's projection, over the U-Net's prediction (ADR-0006). ``source``
-    is the best one present."""
+    is the best one present; ``sources`` says, per pixel, which one shows."""
     survey = _survey(engine, params)
     record = _image(survey, params)
     name = record.name
@@ -347,12 +347,18 @@ def image_mask(engine: Engine, params: dict) -> dict:
         source = "ml"
     mask = _composed(user, below)
     if mask is None:
-        return {"source": None, "mask": None}
+        return {"source": None, "mask": None, "sources": None}
     if source is None:
         source = "user"
+    if below_source is None or below_source.shape != mask.shape:
+        below_source = np.zeros(mask.shape, np.uint8)
+    sources = below_source.copy()
+    if user is not None and user.shape == mask.shape:
+        sources[user != UNLABELLED_ID] = src.HAND
+    root, key = engine.project.root, f"{survey.id}/{name}"
     return {"source": source,
-            "mask": arrays.write(engine.project.root, f"mask/{survey.id}/{name}",
-                                 narrow(mask))}
+            "mask": arrays.write(root, f"mask/{key}", narrow(mask)),
+            "sources": arrays.write(root, f"sources/{key}", sources)}
 
 
 @method("image.save_mask")
@@ -360,9 +366,13 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     """Store the mask the user painted on a photo (one undoable edit).
 
     The window sends the whole mask, seeded from the overlay ``image.mask``
-    showed. Only the user's strokes are kept: the pixels that differ from
-    that overlay (ADR-0006). The cloud's projection and the U-Net's
-    prediction under them are not copied in as hand-drawn labels.
+    showed, and ``touched``: the pixels its strokes went over. Only those
+    are kept as the user's (ADR-0006), whatever their class, so painting the
+    class a pixel already shows, or accepting a prediction, makes it
+    hand-drawn, and erasing shows what is under the user's labels again.
+    Without ``touched``, the strokes are the pixels that differ from that
+    overlay. The cloud's projection and the U-Net's prediction are never
+    copied in as hand-drawn labels.
     """
     survey = _survey(engine, params)
     record = _image(survey, params)
@@ -382,15 +392,25 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
                       n_classes=n_classes)
     labels = survey.labels
     user = labels.image_masks.get(name)
-    below = _below(engine, survey, name)[0]
-    shown = _composed(user, below)
-    if shown is None or shown.shape != new.shape:
+    touched = None
+    if params.get("touched") is not None:
+        tref = require(params, "touched", dict)
+        if tref.get("dtype") != "uint8":
+            raise InvalidParams("touched is a uint8 Array file", param="touched")
+        touched = arrays.read(project.root, tref, ndim=2) != 0
+        if touched.shape != (h, w):
+            raise Problem("image.mask_shape", "The mask is not the photo's size.",
+                          expected=[h, w], got=list(touched.shape))
+    if touched is None:
+        below = _below(engine, survey, name)[0]
+        shown = _composed(user, below)
+        touched = None if shown is None or shown.shape != new.shape else new != shown
+    if touched is None:
         mine = new
     else:
-        strokes = new != shown                        # what the user changed
         mine = (user.copy() if user is not None
                 else np.full((h, w), UNLABELLED_ID, dtype=np.int32))
-        mine[strokes] = new[strokes]
+        mine[touched] = new[touched]
     if user is None:
         if not (mine != UNLABELLED_ID).any():
             return {"changed_pixels": 0, "status": labels.status_of(name)}

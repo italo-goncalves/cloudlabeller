@@ -360,38 +360,52 @@ export interface Mask {
   source: "user" | "ml" | "auto" | null;
   /** H × W class ids (−1 unlabelled), row-major; null when there is none. */
   mask: Int32Array | null;
+  /** H × W: where each pixel's label came from (`SOURCE` in image/raster). */
+  sources: Uint8Array | null;
   width: number;
   height: number;
 }
 
 export async function imageMask(name: string): Promise<Mask> {
-  const r = await engineCall<{ source: Mask["source"]; mask: ArrayRef | null }>("image.mask", {
-    ...sv(),
-    name,
-  });
-  if (!r.mask) return { source: r.source, mask: null, width: 0, height: 0 };
+  const r = await engineCall<{
+    source: Mask["source"];
+    mask: ArrayRef | null;
+    sources?: ArrayRef | null;
+  }>("image.mask", { ...sv(), name });
+  if (!r.mask) return { source: r.source, mask: null, sources: null, width: 0, height: 0 };
   const [h, w] = r.mask.shape as [number, number];
-  return { source: r.source, mask: widen(await load(r.mask)), width: w, height: h };
+  const [mask, sources] = await Promise.all([
+    load(r.mask),
+    r.sources ? load(r.sources) : Promise.resolve(null),
+  ]);
+  return {
+    source: r.source,
+    mask: widen(mask),
+    sources: sources ? new Uint8Array(sources.buffer, sources.byteOffset, sources.length) : null,
+    width: w,
+    height: h,
+  };
 }
 
 /** Store a photo's mask; `survey` is the one it was painted in (default:
  * the current one), so a save queued before a switch lands where it belongs.
- * The Engine keeps only the pixels that differ from the overlay it showed:
- * the user's strokes. */
+ * The Engine keeps as the user's only the pixels `touched` marks (the
+ * strokes), whatever their class; without it, those that differ from the
+ * overlay it showed. */
 export async function saveMask(
   name: string,
   mask: Int32Array,
   width: number,
   height: number,
   survey: string = currentSurvey(),
+  touched?: Uint8Array,
 ) {
   const { data, dtype } = narrow(mask);
   const ref = await writeArray(fresh("mask"), data, dtype, [height, width]);
-  return engineCall<{ changed_pixels: number; status: Status }>("image.save_mask", {
-    survey,
-    name,
-    mask: ref,
-  });
+  const params: Record<string, unknown> = { survey, name, mask: ref };
+  if (touched)
+    params.touched = await writeArray(fresh("touched"), touched, "uint8", [height, width]);
+  return engineCall<{ changed_pixels: number; status: Status }>("image.save_mask", params);
 }
 
 /** How unsure the prediction is per pixel (0..1), at the prediction's size; null: none. */

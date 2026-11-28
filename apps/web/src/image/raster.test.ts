@@ -6,10 +6,15 @@ import {
   fillPolygon,
   fitView,
   imageToScreen,
+  KEEP,
+  type Marks,
   maskFromPixels,
   maskToRgba,
   parseColour,
+  SOURCE,
+  SOURCE_COLOURS,
   screenToImage,
+  sourceAlpha,
   stampDisc,
   strokeLine,
   wheelFactor,
@@ -251,6 +256,74 @@ describe("maskToRgba", () => {
   it("parses schema colours", () => {
     expect(parseColour("#10ff80")).toEqual([16, 255, 128]);
     expect(parseColour("nope")).toEqual([255, 255, 255]);
+  });
+});
+
+describe("strokes and sources (ADR-0006)", () => {
+  const marksFor = (n: number, source: number): Marks => ({
+    touched: new Uint8Array(n),
+    sources: new Uint8Array(n).fill(source),
+  });
+
+  it("marks what a stroke touched as hand-drawn, even in the class shown", () => {
+    const m = Int32Array.from([1, 1, 1, 1]);
+    const marks = marksFor(4, SOURCE.cloud);
+    stampDisc(m, 2, 2, 0.5, 0.5, 0, 1, marks);
+    expect(Array.from(m)).toEqual([1, 1, 1, 1]);
+    expect(Array.from(marks.touched)).toEqual([1, 0, 0, 0]);
+    expect(Array.from(marks.sources)).toEqual([
+      SOURCE.hand,
+      SOURCE.cloud,
+      SOURCE.cloud,
+      SOURCE.cloud,
+    ]);
+  });
+
+  it("accepts the labels shown without changing them, and skips unlabelled pixels", () => {
+    const m = Int32Array.from([3, -1, 2, 2]);
+    const marks = marksFor(4, SOURCE.predicted);
+    marks.sources[1] = SOURCE.none;
+    fillPolygon(
+      m,
+      2,
+      2,
+      [
+        [0, 0],
+        [2, 0],
+        [2, 2],
+        [0, 2],
+      ],
+      KEEP,
+      marks,
+    );
+    expect(Array.from(m)).toEqual([3, -1, 2, 2]);
+    expect(Array.from(marks.touched)).toEqual([1, 0, 1, 1]);
+    expect(Array.from(marks.sources)).toEqual([SOURCE.hand, SOURCE.none, SOURCE.hand, SOURCE.hand]);
+  });
+
+  it("erasing leaves no source, so the label under it shows again after saving", () => {
+    const m = Int32Array.from([0, 0]);
+    const marks = marksFor(2, SOURCE.hand);
+    strokeLine(m, 2, 1, [0.5, 0.5], [0.5, 0.5], 0, -1, marks);
+    expect(Array.from(m)).toEqual([-1, 0]);
+    expect(Array.from(marks.touched)).toEqual([1, 0]);
+    expect(marks.sources[0]).toBe(SOURCE.none);
+  });
+
+  it("draws each source at its own opacity, or in its own colour", () => {
+    const colours = new Map<number, [number, number, number]>([[0, [255, 0, 0]]]);
+    const out = new Uint8ClampedArray(12);
+    const sources = Uint8Array.from([SOURCE.hand, SOURCE.cloud, SOURCE.predicted]);
+    maskToRgba(Int32Array.from([0, 0, 0]), 3, 1, colours, out, undefined, sources);
+    expect([out[3], out[7], out[11]]).toEqual([255, 170, sourceAlpha(SOURCE.predicted, 2, 0)]);
+    maskToRgba(Int32Array.from([0, 0, 0]), 3, 1, colours, out, undefined, sources, true);
+    expect(Array.from(out.slice(4, 7))).toEqual(SOURCE_COLOURS[SOURCE.cloud]);
+  });
+
+  it("hatches predictions", () => {
+    const a = sourceAlpha(SOURCE.predicted, 0, 0);
+    const b = sourceAlpha(SOURCE.predicted, 4, 0);
+    expect(a).not.toBe(b);
   });
 });
 
