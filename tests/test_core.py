@@ -636,6 +636,36 @@ def test_visibility_index_caches_and_matches(tmp_path, monkeypatch):
     assert calls["n"] == 3
 
 
+def test_the_sparse_and_dense_clouds_keep_their_visibility_side_by_side(tmp_path, monkeypatch):
+    """Regression: each store deleted the photo's other entries, so a
+    transfer's sparse pass threw away every dense entry and its dense pass
+    rebuilt them at 12 s a photo (hours for FIDA's 1,400 photos)."""
+    import os
+
+    import cloudlabeller.transfer.visibility as vismod
+    from cloudlabeller.transfer.visibility import KEEP_PER_PHOTO, VisibilityIndex
+
+    sparse, cam = _vis_scene()
+    dense = PointCloud(xyz=np.repeat(sparse.xyz, 2, axis=0) * 1.0001)
+    calls = []
+    real = vismod.visible_point_pixels
+    monkeypatch.setattr(vismod, "visible_point_pixels",
+                        lambda c, *a, **k: calls.append(c.n_points) or real(c, *a, **k))
+    for _ in range(2):                                   # two transfers: sparse, then dense
+        index = VisibilityIndex(tmp_path / "pmap")       # a new Engine: from disk
+        index.get("a.jpg", sparse, cam)
+        index.get("a.jpg", dense, cam)
+    assert calls == [sparse.n_points, dense.n_points]    # the second transfer computed nothing
+    assert len(list((tmp_path / "pmap").glob("a.jpg.*.npz"))) == 2
+
+    for k in range(KEEP_PER_PHOTO + 1):                  # more clouds: the oldest go
+        moved = PointCloud(xyz=sparse.xyz + 0.1 * (k + 1))
+        index.get("a.jpg", moved, cam)
+        for f in (tmp_path / "pmap").glob("a.jpg.*.npz"):
+            os.utime(f, (f.stat().st_mtime - 1, f.stat().st_mtime - 1))   # older than the next
+    assert len(list((tmp_path / "pmap").glob("a.jpg.*.npz"))) == KEEP_PER_PHOTO
+
+
 def test_transfer_with_visibility_matches_without(tmp_path):
     from pathlib import Path
 

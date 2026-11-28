@@ -77,6 +77,11 @@ def camera_fingerprint(camera: Camera) -> str:
         text=f"{camera.model}|{camera.width}x{camera.height}")
 
 
+#: Entries kept per photo on disk, one per cloud (sparse, dense, and one more,
+#: e.g. another Reconstruction's): the oldest beyond these goes.
+KEEP_PER_PHOTO = 3
+
+
 class VisibilityIndex:
     """Per-camera (visible point indices, pixel coords) cache for one project."""
 
@@ -126,9 +131,14 @@ class VisibilityIndex:
         idx, pix = entry
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
-            for stale in self.dir.glob(f"{name}.*.npz"):   # older-cloud entries
-                if stale != path:
-                    stale.unlink(missing_ok=True)
+            # Other clouds' entries for this photo: keep the newest few. A
+            # transfer votes on the sparse cloud and then the dense one; when
+            # each store deleted every other entry, the sparse pass threw away
+            # all the dense ones (12 s a photo to rebuild: hours for FIDA).
+            others = sorted((f for f in self.dir.glob(f"{name}.*.npz") if f != path),
+                            key=lambda f: f.stat().st_mtime, reverse=True)
+            for stale in others[KEEP_PER_PHOTO - 1:]:
+                stale.unlink(missing_ok=True)
             np.savez(path, idx=idx.astype(np.uint32),
                      pix=pix.astype(np.uint16),            # dims < 65536
                      cfp=np.str_(cfp), xfp=np.str_(xfp))
