@@ -18,6 +18,7 @@ import {
   marksPhoto,
   type PhotoMarks,
   propagate,
+  removeCopied,
 } from "../engine/api";
 import { useGcps } from "../panes/GcpPanel";
 import { useApp } from "../state/app";
@@ -58,7 +59,7 @@ function typing(target: EventTarget | null): boolean {
 }
 
 export function ImageView() {
-  const { state, dispatch, long, fail, tell } = useApp();
+  const { state, dispatch, long, fail, tell, choose } = useApp();
   const { selected: name, tool, brushSize, overlayOpacity, activeClass, project } = state;
   const schema = project?.schema ?? [];
   const row = project?.images.find((i) => i.name === name);
@@ -342,6 +343,35 @@ export function ImageView() {
     }
   };
 
+  // Masks saved before ADR-0006 hold copies of the overlay as hand-drawn labels.
+  const cleanCopied = async () => {
+    if (!name) return;
+    try {
+      await editor.settled();
+      const r = await removeCopied(name, false);
+      if (r.copied === 0) {
+        tell(
+          "Remove copied labels",
+          "None of your labels on this photo copy the cloud's or the model's.",
+        );
+        return;
+      }
+      const pct = Math.round((100 * r.copied) / Math.max(r.labelled, 1));
+      const answer = await choose(
+        "Remove copied labels",
+        `${r.copied.toLocaleString()} of your ${r.labelled.toLocaleString()} labelled pixels on this photo (${pct}%) ` +
+          "are the same as the cloud's or the model's labels under them: an older save copied them in. " +
+          "Removing them keeps them shown, as from the cloud or predicted, so they no longer count as yours " +
+          "for training. You can undo it. Turn on Sources to see which are which.",
+        ["Remove them", "Keep them"],
+      );
+      if (answer !== "Remove them") return;
+      await removeCopied(name, true);
+    } catch (e) {
+      fail(e, "Remove copied labels failed");
+    }
+  };
+
   const spread = async () => {
     if (!name) return;
     try {
@@ -433,6 +463,13 @@ export function ImageView() {
           </Button>
           <Button disabled={!ready} onClick={importMask}>
             Import Mask…
+          </Button>
+          <Button
+            disabled={!ready || !row?.user_mask}
+            title="Find your labels on this photo that only copy the cloud's or the model's (saved before 0.4.0), and remove them"
+            onClick={() => void cleanCopied()}
+          >
+            Remove Copied…
           </Button>
           <Button disabled={!ready} onClick={spread}>
             Propagate →

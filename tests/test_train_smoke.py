@@ -168,7 +168,8 @@ def test_train_and_predict_cli_subprocess(tmp_path):
     assert manifest["best_epoch"] == first                 # the resumed run's only epoch
 
     out = run("cloudlabeller.ml.predict_cli", "--model", "cli smoke", "--surveys", "s1")
-    assert [(p["survey"], p["name"]) for p in out["predicted"]] == [("s1", "c.jpg")]
+    # every photo, the painted ones too: a prediction only fills their gaps (ADR-0006)
+    assert sorted(p["name"] for p in out["predicted"]) == ["a.jpg", "b.jpg", "c.jpg"]
     with np.load(proj.survey("s1").predictions_dir / "c.jpg.npz") as pred:
         assert pred["labels"].shape == (32, 48)         # the photo / shrink
         assert set(np.unique(pred["labels"])) <= {0, 1}

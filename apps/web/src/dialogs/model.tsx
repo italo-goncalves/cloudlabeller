@@ -493,7 +493,8 @@ export function PredictDialog() {
       }
     >
       <p className="mb-3 text-fg-muted">
-        The model labels every photo you haven't labelled yourself.
+        The model predicts every photo. Its labels fill only the gaps your labels and the cloud's
+        leave, and nothing trains on them.
       </p>
       <SurveyPicker value={surveys} onChange={setSurveys} />
       {manifests === null ? (

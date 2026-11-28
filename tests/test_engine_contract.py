@@ -577,21 +577,71 @@ def test_uncertainty_shows_in_photos_and_on_the_cloud(pipe, tmp_path):
     assert ramp[3].tolist() == list(UNKNOWN_GREY)
 
 
-def test_predict_leaves_cloud_labelled_photos_alone(pipe, tmp_path):
-    """ADR-0006: predicting a photo labelled from the cloud hid its projection."""
+def test_predictions_only_fill_the_gaps_better_labels_leave(pipe, tmp_path):
+    """ADR-0006: Predict runs on every photo, but a prediction never hides the
+    user's labels or the cloud's, and a cloud-made photo stays cloud-made."""
     root = make_project(tmp_path / "p.clproj")
     _fake_model(root)
     pipe.call("project.open", {"root": str(root)})
-    _cloud_labels_b(pipe, root)                      # a.png user, b.png auto
-    with pytest.raises(RpcError) as err:
-        pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
-    assert err.value.data["code"] == "job.predict.nothing"
-    from cloudlabeller.ml.predict_cli import PROTECTED
+    overlay = _cloud_labels_b(pipe, root)            # a.png user, b.png auto
+    plan = pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
+    assert plan["args"] == [str(root), "--model", "m1"]
+    before = {i["name"]: i["uncertainty"]
+              for i in pipe.call("project.state")["surveys"][0]["images"]}
 
-    assert set(PROTECTED) == {"user", "auto"}
+    survey_dir = root / "surveys" / "s1" / "predictions"
+    survey_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("a.png", "b.png"):                  # what predict_cli would write
+        np.savez(survey_dir / f"{name}.npz", labels=np.zeros((H, W), np.int16),
+                 uncertainty=np.full((H, W), 0.9, np.float16))
+    predicted = [{"survey": "s1", "name": n, "uncertainty": 0.9} for n in ("a.png", "b.png")]
+    pipe.call("jobs.finish", {"plan": plan["plan"], "exit": 0,
+                              "results": {"RESULT": json.dumps({"predicted": predicted})}})
+    rows = {i["name"]: i for i in pipe.call("project.state")["surveys"][0]["images"]}
+    assert rows["a.png"]["status"] == "user" and rows["b.png"]["status"] == "auto"
+    assert rows["b.png"]["uncertainty"] == before["b.png"]         # the cloud's mean stays
+
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
+    mask = get_array(root, shown["mask"])
+    sources = get_array(root, shown["sources"])
+    reached = overlay != -1
+    assert np.array_equal(mask[reached], overlay[reached])          # the cloud's, untouched
+    assert (sources[reached] == 3).all()
+    assert (mask[~reached] == 0).all() and (sources[~reached] == 4).all()   # gaps predicted
+    pipe.drained("request.progress")
 
 
-# -- transfers -----------------------------------------------------------------------
+def test_remove_copied_labels_counts_then_removes_them(pipe, tmp_path):
+    """Masks saved before ADR-0006 copied the overlay in as hand-drawn."""
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    overlay = _cloud_labels_b(pipe, root)
+    # an old save: the whole overlay, plus one real stroke, stored as the user's
+    proj_mask = overlay.copy()
+    r, c = np.argwhere(overlay != -1)[0]
+    proj_mask[r, c] = 1 - overlay[r, c]
+    pipe.call("project.close")
+    survey = Project.open(root).survey("s1")
+    survey.labels.image_masks["b.png"] = proj_mask
+    survey.labels.mark_user_labeled("b.png")
+    survey.save_mask("b.png")
+    survey.save_manifest()
+    pipe.call("project.open", {"root": str(root)})
+
+    labelled = int((proj_mask != -1).sum())
+    out = pipe.call("image.remove_copied", {"survey": "s1", "name": "b.png"})
+    assert out == {"labelled": labelled, "copied": labelled - 1, "removed": 0}
+    out = pipe.call("image.remove_copied", {"survey": "s1", "name": "b.png", "apply": True})
+    assert out["removed"] == labelled - 1
+    stored = Project.open(root).survey("s1").labels.image_masks["b.png"]
+    assert (stored != -1).sum() == 1 and stored[r, c] == proj_mask[r, c]   # the stroke stays
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
+    assert np.array_equal(get_array(root, shown["mask"]), proj_mask)        # still all shown
+    pipe.call("labels.undo", {"survey": "s1"})
+    again = pipe.call("image.remove_copied", {"survey": "s1", "name": "b.png"})
+    assert again["copied"] == labelled - 1
+    pipe.drained("request.progress")
+
 def test_images_to_cloud_then_cloud_to_images(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")
     pipe.call("project.open", {"root": str(root)})

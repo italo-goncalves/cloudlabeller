@@ -431,6 +431,36 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
     return {"changed_pixels": int(changed.size), "status": labels.status_of(name)}
 
 
+@method("image.remove_copied")
+def image_remove_copied(engine: Engine, params: dict) -> dict:
+    """The user's labels on a photo that equal the cloud's or the U-Net's
+    under them: before ADR-0006 a save copied the whole overlay in as
+    hand-drawn. Counts them; with ``apply``, removes them as one undoable
+    edit, so they show again as from the cloud or predicted."""
+    survey = _survey(engine, params)
+    record = _image(survey, params)
+    name = record.name
+    apply = optional(params, "apply", bool, False)
+    labels = survey.labels
+    user = labels.image_masks.get(name)
+    if user is None:
+        return {"labelled": 0, "copied": 0, "removed": 0}
+    below = _below(engine, survey, name)[0]
+    mine = user != UNLABELLED_ID
+    copied = (mine & (below == user) if below is not None and below.shape == user.shape
+              else np.zeros(user.shape, bool))
+    out = {"labelled": int(mine.sum()), "copied": int(copied.sum()), "removed": 0}
+    if apply and copied.any():
+        labels.paint_image(name, np.flatnonzero(copied.reshape(-1)), UNLABELLED_ID)
+        survey.save_mask(name)
+        kept = engine.cache.get("overlay_below")
+        engine.changed("labels", survey=survey.id, images=[name])
+        if kept is not None and kept[0] == (survey.id, name):
+            engine.cache["overlay_below"] = kept
+        out["removed"] = out["copied"]
+    return out
+
+
 #: The longest side of the Uncertainty sent for a photo (it is shown, not edited).
 UNCERTAINTY_SIDE = 2048
 

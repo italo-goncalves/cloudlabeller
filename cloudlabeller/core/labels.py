@@ -235,8 +235,9 @@ class LabelStore:
 
     def mark_ml_labeled(self, name: str) -> None:
         """Image was labelled by a U-Net prediction (stored under
-        ml/predictions/), unless the user has already drawn on it."""
-        if self.image_status.get(name) != "user":
+        predictions/), unless it had labels from a better source: the user's,
+        or the cloud's (ADR-0006: a prediction only fills their gaps)."""
+        if self.image_status.get(name) not in ("user", "auto"):
             self.image_status[name] = "ml"
 
     def status_of(self, name: str) -> str:

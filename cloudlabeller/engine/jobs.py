@@ -580,7 +580,7 @@ def _apply_train(engine, project, results, plan):
 
 
 @kind("predict", "cloudlabeller.ml.predict_cli", "ml",
-      "Predict masks for every photo not labelled by the user or from the cloud")
+      "Predict every photo, filling the gaps its better labels leave")
 def _prepare_predict(engine, project, options):
     from cloudlabeller.ml.model_store import list_models
 
@@ -605,13 +605,8 @@ def _prepare_predict(engine, project, options):
                       "The model was trained with a different number of classes.",
                       model=model, model_classes=manifest.get("n_classes"),
                       project_classes=n_classes)
-    from cloudlabeller.ml.predict_cli import PROTECTED
-
-    if not any(s.labels.status_of(r.name) not in PROTECTED
-               for s in (project.survey(sid) for sid in surveys)
-               for r in s.dataset.images):
-        raise Problem("job.predict.nothing",
-                      "Every photo is labelled already, by you or from the cloud.")
+    if not any(project.survey(sid).dataset.images for sid in surveys):
+        raise Problem("job.predict.nothing", "These Surveys have no photos.")
     project.save_manifest()                        # the child reads statuses from disk
     args = [str(project.root), "--model", model]
     if surveys != list(project.surveys):
@@ -625,14 +620,15 @@ def _apply_predict(engine, project, results, plan):
     by_survey: dict[str, list[str]] = {}
     for item in predicted:
         if isinstance(item, dict) and item.get("survey") in project.surveys:
-            by_survey.setdefault(item["survey"], []).append(item.get("name"))
-            unsure = project.surveys[item["survey"]].settings.setdefault("uncertainty", {})
-            if item.get("uncertainty") is not None:
-                unsure[item["name"]] = float(item["uncertainty"])
-    for sid, names in by_survey.items():
-        survey = project.survey(sid)
-        for name in names:
+            survey = project.survey(item["survey"])
+            name = item.get("name")
+            by_survey.setdefault(item["survey"], []).append(name)
             survey.labels.mark_ml_labeled(name)
+            # A photo labelled by the user or from the cloud keeps its own
+            # labels' mean; the prediction only fills their gaps (ADR-0006).
+            if survey.labels.status_of(name) == "ml" and item.get("uncertainty") is not None:
+                unsure = survey.settings.setdefault("uncertainty", {})
+                unsure[name] = float(item["uncertainty"])
     project.save_manifest()
     for sid, names in by_survey.items():
         engine.changed("status", survey=sid, images=names)

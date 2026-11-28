@@ -248,6 +248,15 @@ hand-drawn. Nothing is stored when a photo without a mask gets no stroke. `mask`
 the narrowest). Problems: `image.not_found`,
 `image.mask_shape`, `image.mask_values`.
 
+### `image.remove_copied`
+`{survey, name, apply?: false}` → `{labelled, copied, removed}`. Before
+ADR-0006 a save copied the whole overlay into the user's mask, so labels
+that came from the cloud or the U-Net became hand-drawn. `labelled` is the
+user's labelled pixels on the photo, `copied` those equal to the label the
+cloud's projection or the prediction has there. With `apply`, the copied
+ones are removed as one undoable edit (`removed`), and show again as from
+the cloud or predicted. Problem: `image.not_found`.
+
 ### `image.info`
 `{survey, name}` → `{path, width, height}`. `path` is the photo's file, relative to
 the Project root with `/` separators. The size is the solved camera's, else
@@ -679,7 +688,7 @@ kinds marked ‡ work on one Survey and need the option `survey`:
 | `mvs` ‡ | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
 | `mesh` ‡ | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
 | `train` | ml | yes | `name`, `steps` (batches, default 50000: the epochs are as many as that takes, rounded up), `patience` (stop after this many epochs without a better validation loss, default 10; 0 never stops early), `batch_size`, `val_fraction`, `augment_rolls`, `include_auto` (the photos labelled from the cloud, at half weight, without the pixels that came from predictions), `weight_by_uncertainty` (with `include_auto`: each of those pixels also weighs 1 − its Uncertainty), `resume`, `surveys` (default: every Survey; their photos are pooled, cut into Tiles, and validated on whole hand-drawn photos held out) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch`, `job.train.legacy_model`, `job.train.no_normals` (`params.surveys`: those without a dense cloud), `survey.not_found` |
-| `predict` | ml | yes | `model`, `surveys` (default: every Survey; the photos labelled neither by the user nor from the cloud; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `job.predict.no_normals`, `survey.not_found` |
+| `predict` | ml | yes | `model`, `surveys` (default: every Survey; every photo is predicted, and the prediction only fills the gaps the user's and the cloud's labels leave, ADR-0006; a photo without labels becomes `ml`; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `job.predict.no_normals`, `survey.not_found` |
 | `geoid` | download | no | `epsg` | |
 | `colmap` | download | no | `variant` (`cuda` or `cpu`) | `job.colmap.unsupported` |
 

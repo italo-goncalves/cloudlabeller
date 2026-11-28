@@ -27,9 +27,11 @@ Usage::
 
     python -m cloudlabeller.ml.predict_cli PROJECT_ROOT --model NAME
 
-Predicts every image whose status is neither 'user' nor 'auto', writing masks
-at model resolution into ``project/ml/predictions/``. Statuses are NOT written
-here — the parent owns the manifest and marks images 'ml' on success. Emits
+Predicts every image, writing masks at model resolution into each Survey's
+``predictions/``. A prediction only fills the gaps that better sources leave
+(ADR-0006): the overlay composes the user's labels over the cloud's over it,
+and nothing trains on it. Statuses are NOT written here — the parent owns
+the manifest and marks unlabelled images 'ml' on success. Emits
 ``PROGRESS <frac> <msg>`` lines; prints ``RESULT <json>`` with the predicted
 names on success.
 """
@@ -44,9 +46,6 @@ from cloudlabeller.logging_setup import setup_logging
 from cloudlabeller.workers.result import print_result
 
 log = logging.getLogger("cloudlabeller.ml")
-
-#: Statuses Predict leaves alone: labelled by the user, or from the cloud.
-PROTECTED = ("user", "auto")
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -99,11 +98,9 @@ def main(argv: list[str]) -> int:
             log.error("no Survey %s in the project", sid)
             return 2
         survey = proj.survey(sid)
-        # Neither the user's photos nor the ones labelled from the cloud: a
-        # prediction must not hide labels that came from a better source
-        # (ADR-0006).
-        names = [r.name for r in survey.dataset.images
-                 if survey.labels.status_of(r.name) not in PROTECTED]
+        # Every photo: a prediction fills only what better sources leave
+        # unlabelled, so it can't hide them (ADR-0006).
+        names = [r.name for r in survey.dataset.images]
         if spec.normals:
             # Experimental: a model trained on normals predicts only the photos
             # the dense cloud's normals reach.

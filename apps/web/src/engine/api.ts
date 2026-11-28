@@ -601,6 +601,15 @@ export const imagesToCloud = (includeAuto: boolean, includePredictions: boolean,
   );
 export const cloudToImages = (ticket: string) =>
   engineCall<{ cloud: CloudName; auto_labelled: number }>("transfer.cloud_to_images", sv(), ticket);
+/** The user's labels on a photo equal to the cloud's or the model's under them
+ * (copied in by saves before ADR-0006); `apply` removes them, as one undoable edit. */
+export const removeCopied = (name: string, apply: boolean) =>
+  engineCall<{ labelled: number; copied: number; removed: number }>("image.remove_copied", {
+    ...sv(),
+    name,
+    apply,
+  });
+
 export const propagate = (name: string, ticket: string) =>
   engineCall<{ cloud: CloudName; points: number; auto_labelled: number }>(
     "transfer.propagate",
