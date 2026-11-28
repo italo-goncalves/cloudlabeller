@@ -143,7 +143,8 @@ both Surveys predicts a held-out third one.
 2. **Label sources**
    ([ADR-0006](adr/0006-labels-keep-their-source-and-predictions-only-fill-gaps.md)):
    every label keeps its source (hand-drawn, from the cloud, predicted), and
-   predictions only fill gaps. In order:
+   predictions only fill gaps. Built on `dev` (2026-11-28), all five steps;
+   it waits for the same end-to-end test as 0.4.0. In order:
    1. **Voting by source, with an Uncertainty per point.**
       - `images_to_cloud` takes votes by source, best first, extending its
         current two passes to three.

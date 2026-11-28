@@ -169,15 +169,36 @@ This is the heart of the app. hylite already models exactly what we need:
   **visibility / depth buffer**, and the **pixel ↔ point index map**, handling
   occlusion.
 
+### Label sources (ADR-0006)
+Every label has a **source**, ranked: hand-drawn (painted on a photo, or on
+the cloud: *painted*), from the cloud (projected from points whose labels
+came from hand-drawn sources), predicted (the U-Net's, directly or through
+the cloud). The codes are in `core/sources.py`. Each cloud keeps a source and
+an **Uncertainty** per point beside its labels (`labels/<cloud>.source.npy`,
+`.uncertainty.npy`); a photo's layers stay apart (its Mask holds only the
+user's strokes, the cloud's projection is rendered, the prediction is
+stored) and are composed per pixel, best source first, when shown. The
+network learns only from hand-drawn labels and those from the cloud.
+
 ### Image → Cloud
 For each labelled image, build a `HyScene`; for every visible point, sample the
-label of the pixel it projects into; accumulate votes across all images and
-assign the **majority class** per point.
+label of the pixel it projects into; accumulate votes and assign the
+**majority class** per point (`transfer/project_to_cloud.vote`). Votes are
+taken **per source, best first**: a point any hand-drawn pixel reaches is
+decided by hand-drawn votes alone, and worse sources only fill what better
+ones didn't reach. Projected labels don't vote on the cloud they came from,
+and a point painted on the cloud is never changed. The point's Uncertainty
+is the normalised entropy of the deciding votes' class shares, smoothed by
+a Dirichlet prior (α = 1/K), with the evidence counted as **independent
+views**: cameras in the same direction cell (64 cells, about 25°) as seen
+from the point count once.
 
 ### Cloud → Image
 Given cloud labels, project each visible point into an image and **splat** its
-class id to the covered pixel(s), producing a per-image mask. Used both to
-visualise cloud labels on photos and to **seed/clean U-Net training masks**.
+class id to the covered pixel(s), producing a per-image mask, with each
+pixel's source and Uncertainty (`cloud_layers_to_image`). Used both to
+visualise cloud labels on photos and to **seed U-Net training masks**,
+without the pixels that came from predictions.
 
 ### Cloud ↔ Mesh
 Labels transfer by nearest-vertex / barycentric mapping (PyVista/`trimesh`
@@ -222,8 +243,12 @@ carrier.
    validation loss and stops early after a patience of epochs without a
    better one. Predictions go to each Survey's `predictions/` as `.npz`
    (classes and Uncertainty at the photo's size over the shrink factor).
-7. Predicted masks can be **transferred back to the cloud** (§6), closing the
-   loop: label a few → train → predict all → fuse into 3D.
+7. Every photo is predicted, but a prediction only **fills the gaps** the
+   user's and the cloud's labels leave. Predictions can vote on the cloud
+   when asked (§6), as the worst source; nothing trains on them, directly or
+   through the cloud, and validation holds out hand-drawn photos only
+   (ADR-0006). The loop: label a few → train → predict all → check the
+   Uncertainty → paint or accept where it is high.
 
 Long-running ML/SfM work runs as Jobs: separate processes the Tauri core
 starts, with progress and Stop, so the window stays fluid.
