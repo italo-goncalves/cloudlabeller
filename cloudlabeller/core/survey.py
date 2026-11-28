@@ -49,7 +49,14 @@ from pathlib import Path
 import numpy as np
 
 from cloudlabeller.core.dataset import Dataset
-from cloudlabeller.core.labels import LabelStore, load_label_array, save_label_array
+from cloudlabeller.core.labels import (
+    SLOT_FILES,
+    LabelStore,
+    load_label_array,
+    read_label_files,
+    save_label_array,
+    write_label_files,
+)
 from cloudlabeller.core.reconstruction import SLOTS, Reconstruction, now_iso
 
 SURVEY_FILE = "survey.json"
@@ -188,13 +195,13 @@ class Survey:
                 child.alignment = parent.alignment
                 child.marks = {g: list(x) for g, x in parent.marks.items()}
                 child.save_keep(parent.load_keep())
-            files = {"sfm": "sparse.npy", "mvs": "dense.npy"}
             self.save()                              # the parent's labels, as they are
             for s in shared:
-                src = parent.labels_dir / files.get(s, "")
-                if s in files and src.exists():
-                    child.labels_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(src, child.labels_dir / files[s])
+                for fname in SLOT_FILES.get(s, ()):
+                    src = parent.labels_dir / fname
+                    if src.exists():
+                        child.labels_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(src, child.labels_dir / fname)
         child.save()
         self.activate(child.id, save=False)
         return child
@@ -212,12 +219,7 @@ class Survey:
         lb.cloud_labels = lb.dense_cloud_labels = lb.mesh_labels = None
         lb._undo_stack.clear()
         lb._redo_stack.clear()
-        rec = self.active
-        for attr, fname in (("cloud_labels", "sparse.npy"),
-                            ("dense_cloud_labels", "dense.npy"),
-                            ("mesh_labels", "mesh.npy")):
-            if (rec.labels_dir / fname).exists():
-                setattr(lb, attr, load_label_array(rec.labels_dir / fname))
+        read_label_files(lb, self.active.labels_dir)
         self.load_products()
         self.save_manifest()
 
@@ -262,6 +264,7 @@ class Survey:
             else:
                 lb = self.labels
                 lb.cloud_labels = lb.dense_cloud_labels = lb.mesh_labels = None
+                lb.cloud_source = lb.cloud_uncertainty = lb.dense_source = lb.dense_uncertainty = None
                 self.load_products()
         self.save_manifest()
         return freed
@@ -378,56 +381,90 @@ class Survey:
     # -- auto (derived) masks -------------------------------------------------------
     # Auto masks are derived data: rendered from the cloud labels on demand
     # instead of stored for every photo (a 21 Mpx int32 mask is ~84 MB).
-    def auto_mask_source(self):
-        """The labelled cloud auto masks are rendered from: dense first, else
-        sparse. Returns (cloud, labels) or None if nothing is labelled."""
+    def _auto_cloud(self):
+        """``(cloud, labels, dense)`` of the labelled cloud auto masks are
+        rendered from: dense first, else sparse; None if nothing is labelled."""
         ds, lb = self.dataset, self.labels
         if (ds.dense_cloud is not None and lb.dense_cloud_labels is not None
                 and len(lb.dense_cloud_labels) == ds.dense_cloud.n_points
                 and (lb.dense_cloud_labels != -1).any()):
-            return ds.dense_cloud, lb.dense_cloud_labels
+            return ds.dense_cloud, lb.dense_cloud_labels, True
         if (ds.cloud is not None and lb.cloud_labels is not None
                 and (lb.cloud_labels != -1).any()):
-            return ds.cloud, lb.cloud_labels
+            return ds.cloud, lb.cloud_labels, False
         return None
+
+    def auto_mask_source(self):
+        """The labelled cloud auto masks are rendered from: dense first, else
+        sparse. Returns (cloud, labels) or None if nothing is labelled."""
+        found = self._auto_cloud()
+        return None if found is None else found[:2]
+
+    def cloud_layers(self, name: str):
+        """``name``'s labels projected from the labelled cloud, with each
+        pixel's source and Uncertainty (``cloud_layers_to_image``), or None."""
+        found = self._auto_cloud()
+        record = self.dataset.image_by_name(name)
+        if found is None or record is None or record.camera is None:
+            return None
+        from cloudlabeller.transfer.project_to_image import cloud_layers_to_image
+
+        cloud, labels, dense = found
+        source, unc = self.labels.provenance(dense)
+        return cloud_layers_to_image(cloud, labels, source, unc, record.camera,
+                                     name=name, visibility=self.visibility_index())
+
+    def prediction_layers(self, name: str):
+        """``name``'s prediction at the photo's size, with its source
+        (``PREDICTED``) and Uncertainty per pixel, or None."""
+        from cloudlabeller.core import sources as src
+
+        pred = self.prediction_mask(name)
+        if pred is None:
+            return None
+        h, w = pred.shape
+        unc = self.prediction_uncertainty(name)
+        if unc is None:
+            unc = np.full((h, w), np.nan, np.float16)
+        else:
+            rows = np.minimum(np.arange(h) * unc.shape[0] // h, unc.shape[0] - 1)
+            cols = np.minimum(np.arange(w) * unc.shape[1] // w, unc.shape[1] - 1)
+            unc = unc[rows[:, None], cols[None, :]].astype(np.float16)
+        source = np.where(pred != -1, np.uint8(src.PREDICTED), np.uint8(src.NONE))
+        return pred, source.astype(np.uint8), unc
+
+    def render_auto_layers(self, name: str):
+        """``name``'s auto mask with its sources and Uncertainty: its U-Net
+        prediction when its status is 'ml', else projected from the cloud
+        (or None)."""
+        if self.labels.status_of(name) == "ml":
+            layers = self.prediction_layers(name)
+            if layers is not None:
+                return layers
+        return self.cloud_layers(name)
 
     def render_auto_mask(self, name: str):
         """``name``'s auto mask: its U-Net prediction when its status is
         'ml', else projected from the cloud (or None)."""
-        if self.labels.status_of(name) == "ml":
-            pred = self.prediction_mask(name)
-            if pred is not None:
-                return pred
-        source = self.auto_mask_source()
-        record = self.dataset.image_by_name(name)
-        if source is None or record is None or record.camera is None:
-            return None
-        from cloudlabeller.transfer import cloud_to_image  # lazy: heavy deps
-
-        return cloud_to_image(source[0], source[1], record.camera,
-                              name=name, visibility=self.visibility_index())
+        layers = self.render_auto_layers(name)
+        return None if layers is None else layers[0]
 
     def overlay_below(self, name: str):
         """What shows under ``name``'s Mask: the cloud's projection where it
         reaches, else the U-Net's prediction (ADR-0006: the better source
-        wins per pixel). Returns ``(mask, source)``, with ``source`` 'auto'
-        when the cloud labels any pixel, else 'ml', or ``(None, None)``."""
-        pred = self.prediction_mask(name)
-        proj = None
-        source = self.auto_mask_source()
-        record = self.dataset.image_by_name(name)
-        if source is not None and record is not None and record.camera is not None:
-            from cloudlabeller.transfer import cloud_to_image  # lazy: heavy deps
-
-            proj = cloud_to_image(source[0], source[1], record.camera,
-                                  name=name, visibility=self.visibility_index())
-        if proj is not None and (proj != -1).any():
-            if pred is not None and pred.shape == proj.shape:
-                proj = np.where(proj != -1, proj, pred)
-            return proj, "auto"
+        wins per pixel). Returns ``(mask, source, uncertainty)`` per pixel
+        (``core.sources`` codes), or ``(None, None, None)``."""
+        proj = self.cloud_layers(name)
+        pred = self.prediction_layers(name)
+        if proj is not None and (proj[0] != -1).any():
+            if pred is not None and pred[0].shape == proj[0].shape:
+                gap = proj[0] == -1
+                for a, b in zip(proj, pred):
+                    a[gap] = b[gap]
+            return proj
         if pred is not None:
-            return pred, "ml"
-        return None, None
+            return pred
+        return None, None, None
 
     def normal_map(self, name: str, frame: str = "camera"):
         """``name``'s normal map from the dense cloud (``transfer.normal_map``):
@@ -618,12 +655,7 @@ class Survey:
         lb = self.labels
         rec = self.active
         if rec is not None:
-            d = rec.labels_dir
-            for attr, fname in (("cloud_labels", "sparse.npy"),
-                                ("dense_cloud_labels", "dense.npy"),
-                                ("mesh_labels", "mesh.npy")):
-                if (d / fname).exists():
-                    setattr(lb, attr, load_label_array(d / fname))
+            read_label_files(lb, rec.labels_dir)
         if self.masks_dir.exists():
             for f in self.masks_dir.glob("*.npy"):
                 if lb.status_of(f.stem) == "auto":
@@ -672,13 +704,7 @@ class Survey:
             return
         rec = self.active
         if rec is not None:
-            rec.labels_dir.mkdir(parents=True, exist_ok=True)
-            for attr, fname in (("cloud_labels", "sparse.npy"),
-                                ("dense_cloud_labels", "dense.npy"),
-                                ("mesh_labels", "mesh.npy")):
-                arr = getattr(lb, attr)
-                if arr is not None:
-                    save_label_array(rec.labels_dir / fname, arr)
+            write_label_files(lb, rec.labels_dir)
         for name in lb.image_masks:
             self.save_mask(name)
 

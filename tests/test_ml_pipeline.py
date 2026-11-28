@@ -274,6 +274,7 @@ class TestPriorityVoting:
 
         cloud = PointCloud(xyz=np.zeros((3, 3), np.float32))
         cam = mock.MagicMock()
+        cam.position = np.array([0.0, 0.0, 5.0])      # views are counted by direction
         dataset = Dataset(images=[ImageRecord(i, Path(n), cam) for i, n
                                   in enumerate(["u.jpg", "a1.jpg", "a2.jpg"])])
         user = np.zeros((2, 2), np.int32)              # class 0 everywhere

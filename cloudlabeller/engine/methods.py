@@ -43,6 +43,7 @@ from pathlib import Path
 
 import numpy as np
 
+from cloudlabeller.core import sources as src
 from cloudlabeller.core.label_schema import UNLABELLED_ID
 from cloudlabeller.core.labels import narrow
 from cloudlabeller.engine import arrays
@@ -312,10 +313,10 @@ def _below(engine: Engine, survey, name: str):
     key = (survey.id, name)
     kept = engine.cache.get("overlay_below")
     if kept is not None and kept[0] == key:
-        return kept[1], kept[2]
-    mask, source = survey.overlay_below(name)
-    engine.cache["overlay_below"] = (key, mask, source)
-    return mask, source
+        return kept[1]
+    layers = survey.overlay_below(name)
+    engine.cache["overlay_below"] = (key, layers)
+    return layers
 
 
 def _composed(user, below):
@@ -336,9 +337,14 @@ def image_mask(engine: Engine, params: dict) -> dict:
     record = _image(survey, params)
     name = record.name
     user = survey.labels.image_masks.get(name)
-    below, source = _below(engine, survey, name)
+    below, below_source, _ = _below(engine, survey, name)
+    source = None
     if user is not None and (user != UNLABELLED_ID).any():
         source = "user"
+    elif below_source is not None and (below_source == src.CLOUD).any():
+        source = "auto"
+    elif below_source is not None and (below_source == src.PREDICTED).any():
+        source = "ml"
     mask = _composed(user, below)
     if mask is None:
         return {"source": None, "mask": None}
@@ -376,7 +382,7 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
                       n_classes=n_classes)
     labels = survey.labels
     user = labels.image_masks.get(name)
-    below, _ = _below(engine, survey, name)
+    below = _below(engine, survey, name)[0]
     shown = _composed(user, below)
     if shown is None or shown.shape != new.shape:
         mine = new
@@ -481,6 +487,21 @@ def cloud_labels(engine: Engine, params: dict) -> dict:
     return {"cloud": which,
             "labels": arrays.write(engine.project.root, f"cloud/{survey.id}/{which}/labels",
                                    narrow(labels))}
+
+
+@method("cloud.sources")
+def cloud_sources(engine: Engine, params: dict) -> dict:
+    """Where each point's label came from and how sure it is (ADR-0006)."""
+    survey = _survey(engine, params)
+    which = _which(params)
+    cloud = _cloud(survey, which)
+    _cloud_labels(survey, which, cloud.n_points)
+    source, unc = survey.labels.provenance(dense=which == "dense")
+    base = f"cloud/{survey.id}/{which}"
+    return {"cloud": which,
+            "source": arrays.write(engine.project.root, f"{base}/source", source),
+            "uncertainty": arrays.write(engine.project.root, f"{base}/uncertainty",
+                                        unc.astype(np.float32))}
 
 
 @method("cloud.paint")
@@ -604,8 +625,7 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
     trains on (ADR-0006). The result is merged: points no photo reached keep
     their labels.
     """
-    from cloudlabeller.transfer import images_to_cloud
-    from cloudlabeller.transfer.project_to_cloud import MaskSource
+    from cloudlabeller.transfer.project_to_cloud import VotePass, vote
 
     survey = _survey(engine, params)
     ds, labels = survey.dataset, survey.labels
@@ -615,47 +635,62 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
     include_predictions = optional(params, "include_predictions", bool, False)
     masks = dict(labels.image_masks)
     n_classes = len(engine.project.schema.classes)
-    n_user = sum(1 for m in masks.values() if (m != UNLABELLED_ID).any())
-    auto_names = [r.name for r in ds.solved_images()
-                  if r.name not in masks and labels.status_of(r.name) in ("auto", "ml")]
-    auto_names = [n for n in auto_names
-                  if (include_auto if labels.status_of(n) == "auto" else include_predictions)]
-    if not auto_names and n_user == 0:
+    user_names = [n for n, m in masks.items() if (m != UNLABELLED_ID).any()]
+    solved = [r.name for r in ds.solved_images() if r.name not in masks]
+    auto_names = [n for n in solved if labels.status_of(n) == "auto"] if include_auto else []
+    ml_names = [n for n in solved if labels.status_of(n) == "ml"] if include_predictions else []
+    if not auto_names and not ml_names and not user_names:
         raise Problem("transfer.no_labelled_images", "No photo is labelled yet.")
-    pure_auto = [n for n in auto_names if labels.status_of(n) == "auto"]
-    ml_names = [n for n in auto_names if labels.status_of(n) == "ml"]
     sparse, dense = ds.cloud, ds.dense_cloud
     vis = survey.visibility_index()
-    hard = set(masks)
+    found = survey._auto_cloud()
+    projected_from = None if found is None else ("dense" if found[2] else "sparse")
+
+    def only(layers, code):
+        """A layered mask's labels of one source (None: none of them)."""
+        if layers is None:
+            return None
+        mask = layers[0].copy()
+        mask[layers[1] != code] = UNLABELLED_ID
+        return mask
 
     def work(progress):
-        selected = auto_names
-        if pure_auto:
+        covering = auto_names
+        if auto_names:
             adj = survey.image_adjacency()
             if adj is not None:
                 from cloudlabeller.photogrammetry.adjacency import select_covering
 
-                selected = ml_names + select_covering(pure_auto, adj)
-        source = MaskSource(masks, selected, survey.render_auto_mask)
-        progress(0.0, f"Transferring labels from {n_user + len(selected)} images")
-        out = {"images": n_user + len(selected)}
-        out["sparse"] = images_to_cloud(
-            sparse, ds, source, n_classes,
-            lambda f, m="": progress(0.02 + 0.46 * f, ""), visibility=vis,
-            priority_names=hard)
-        if dense is not None:
-            out["dense"] = images_to_cloud(
-                dense, ds, source, n_classes,
-                lambda f, m="": progress(0.5 + 0.48 * f, ""), visibility=vis,
-                priority_names=hard)
+                covering = select_covering(auto_names, adj)
+        n_images = len(user_names) + len(covering) + len(ml_names)
+        progress(0.0, f"Transferring labels from {n_images} images")
+        out = {"images": n_images}
+        targets = [("sparse", sparse)] + ([("dense", dense)] if dense is not None else [])
+        for t, (kind, cloud) in enumerate(targets):
+            # A projection doesn't vote on the cloud it came from (ADR-0006).
+            projected = covering if kind != projected_from else []
+            passes = [
+                VotePass(src.HAND, user_names, masks.get),
+                VotePass(src.CLOUD, projected,
+                         lambda n: only(survey.cloud_layers(n), src.CLOUD)),
+                VotePass(src.PREDICTED, ml_names + (projected if include_predictions else []),
+                         lambda n: (only(survey.render_auto_layers(n), src.PREDICTED))),
+            ]
+            share = 0.96 / len(targets)
+            out[kind] = vote(cloud, ds, passes, n_classes,
+                             lambda f, m="", t=t, share=share: progress(0.02 + share * (t + f), ""),
+                             visibility=vis)
         progress(1.0, "Images → cloud complete")
         return out
 
     def finish(out):
-        result = {"images": out["images"],
-                  "sparse": labels.merge_cloud_labels(out["sparse"])}
-        if "dense" in out:
-            result["dense"] = labels.merge_cloud_labels(out["dense"], dense=True)
+        result = {"images": out["images"]}
+        for kind in ("sparse", "dense"):
+            if kind in out:
+                v = out[kind]
+                result[kind] = labels.merge_cloud_labels(v.labels, dense=kind == "dense",
+                                                         source=v.source,
+                                                         uncertainty=v.uncertainty)
         engine.dirty = True
         engine.changed("labels", survey=survey.id)
         sync_mesh_labels(engine, survey)
@@ -706,7 +741,8 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
     """Spread one photo's labels, through the cloud, to the photos that see
     the same surface. Merged into the cloud labels; nothing is erased."""
     from cloudlabeller.core.dataset import Dataset
-    from cloudlabeller.transfer import cloud_to_image, images_to_cloud
+    from cloudlabeller.transfer import cloud_to_image
+    from cloudlabeller.transfer.project_to_cloud import VotePass, vote
 
     survey = _survey(engine, params)
     record = _image(survey, params)
@@ -732,18 +768,21 @@ def transfer_propagate(engine: Engine, params: dict) -> Deferred:
         progress(0.0, f"Finding images overlapping {name}")
         overlap = survey.overlapping_images(name)
         cand = targets if overlap is None else [t for t in targets if t[0] in overlap]
-        temp = images_to_cloud(cloud, Dataset(images=[record]), {name: mask},
-                               n_classes, visibility=vis)
+        votes = vote(cloud, Dataset(images=[record]),
+                     [VotePass(src.HAND, [name], {name: mask}.get)], n_classes, visibility=vis)
+        temp = votes.labels
         progress(0.15, f"{int((temp != UNLABELLED_ID).sum()):,} cloud points labelled")
         counts = {}
         for i, (nm, cam) in enumerate(cand, 1):
             m = cloud_to_image(cloud, temp, cam, name=nm, visibility=vis)
             counts[nm] = int((m != UNLABELLED_ID).sum())
             progress(0.15 + 0.85 * i / max(len(cand), 1), f"{nm}: {counts[nm]:,} px")
-        return {"labels": temp, "counts": counts}
+        return {"votes": votes, "counts": counts}
 
     def finish(out):
-        n = labels.merge_cloud_labels(out["labels"], dense=(kind == "dense"))
+        v = out["votes"]
+        n = labels.merge_cloud_labels(v.labels, dense=(kind == "dense"), source=v.source,
+                                      uncertainty=v.uncertainty)
         marked = _mark_auto(survey, out["counts"], PROPAGATE_MIN_PX)
         if n:
             engine.dirty = True

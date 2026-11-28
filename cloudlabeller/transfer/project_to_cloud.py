@@ -18,15 +18,23 @@
 # Commercial licensing: this program is also available under a separate
 # commercial license from the author — see README.md.
 
-"""Image labels -> cloud labels by majority vote across all labelled images."""
+"""Image labels -> cloud labels by majority vote across all labelled images.
+
+Votes are taken per source, best first (ADR-0006, :mod:`cloudlabeller.core.sources`):
+a point any hand-drawn pixel reaches is decided by hand-drawn votes alone,
+and worse sources only fill the points better ones didn't reach. Each point
+gets the source that decided it and an Uncertainty from those votes.
+"""
 
 from __future__ import annotations
 
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, Sequence
 
 import numpy as np
 
 from cloudlabeller.core.dataset import Dataset, PointCloud
+from cloudlabeller.core import sources as src
 from cloudlabeller.core.label_schema import UNLABELLED_ID
 from cloudlabeller.transfer import projection as hb
 
@@ -57,6 +65,90 @@ class MaskSource:
         return mask
 
 
+@dataclass
+class Votes:
+    """What voting gives a cloud: per point, a label (−1 none), the source
+    that decided it (:mod:`cloudlabeller.core.sources`) and its Uncertainty
+    (NaN where unlabelled)."""
+
+    labels: np.ndarray        # (N,) int32
+    source: np.ndarray        # (N,) uint8
+    uncertainty: np.ndarray   # (N,) float16
+
+
+@dataclass
+class VotePass:
+    """One source's votes: the photos that cast them, and how to get each
+    photo's mask of that source's pixels (None: nothing to cast)."""
+
+    source: int
+    names: Sequence[str]
+    mask: Callable[[str], "np.ndarray | None"]
+
+
+def vote(
+    cloud: PointCloud,
+    dataset: Dataset,
+    passes: Sequence[VotePass],
+    n_classes: int,
+    progress: ProgressFn = lambda f, m="": None,
+    visibility=None,          # optional transfer.visibility.VisibilityIndex
+) -> Votes:
+    """Vote the photos' labels onto ``cloud``, one source per pass, best
+    first. A point that got any vote in a pass is decided by that pass: its
+    label is the winning Class, its source the pass's, and its Uncertainty
+    comes from that pass's votes and the number of directions they came
+    from (:func:`cloudlabeller.core.sources.vote_uncertainty`). Later passes
+    only label points no earlier pass reached.
+
+    Each photo's mask is fetched once per pass that lists it, so a lazy
+    renderer renders it once per pass.
+    """
+    n = cloud.n_points
+    k = max(n_classes, 1)
+    labels = np.full(n, UNLABELLED_ID, np.int32)
+    source = np.zeros(n, np.uint8)
+    uncertainty = np.full(n, np.nan, np.float16)
+    records = {r.name: r for r in dataset.solved_images() if r.camera is not None}
+    work = [(p, [records[nm] for nm in p.names if nm in records]) for p in passes]
+    total = max(sum(len(rs) for _, rs in work), 1)
+    votes = np.zeros((n, k), np.int32)        # reused between passes
+    views = np.zeros(n, np.uint64)
+    done = 0
+    for p, recs in work:
+        votes[:] = 0
+        views[:] = 0
+        used = 0
+        for record in recs:
+            done += 1
+            mask = p.mask(record.name)
+            if mask is None or not (mask != UNLABELLED_ID).any():
+                progress(done / total, "")
+                continue
+            used += 1
+            if visibility is not None:
+                pt_idx, pix = visibility.get(record.name, cloud, record.camera)
+            else:
+                pt_idx, pix = hb.visible_point_pixels(cloud, record.camera)
+            if pt_idx.size:
+                h, w = mask.shape
+                cols = np.clip(pix[:, 0], 0, w - 1)
+                rows = np.clip(pix[:, 1], 0, h - 1)
+                sampled = mask[rows, cols]
+                keep = (sampled != UNLABELLED_ID) & (labels[pt_idx] == UNLABELLED_ID)
+                idx = pt_idx[keep]
+                np.add.at(votes, (idx, sampled[keep]), 1)
+                views[idx] |= src.view_bits(cloud.xyz[idx], record.camera.position)
+            progress(done / total, f"images → cloud ({record.name}, {used} projected)")
+        reached = np.flatnonzero(votes.any(axis=1))
+        if reached.size:
+            labels[reached] = votes[reached].argmax(axis=1)
+            source[reached] = p.source
+            uncertainty[reached] = src.vote_uncertainty(votes[reached],
+                                                        src.popcount(views[reached]))
+    return Votes(labels, source, uncertainty)
+
+
 def images_to_cloud(
     cloud: PointCloud,
     dataset: Dataset,
@@ -76,59 +168,13 @@ def images_to_cloud(
     any point receiving at least one vote from them is decided by those votes
     alone — otherwise one hand-labelled image would be outvoted ("drowned out")
     by a crowd of auto/ML-labelled neighbours. The remaining images only label
-    points the hard data doesn't reach.
-
-    Each image's mask is fetched from ``image_masks`` exactly once, so a lazy
-    :class:`MaskSource` renders every auto mask a single time per call.
+    points the hard data doesn't reach. (:func:`vote` with one pass per
+    source, keeping only the labels.)
     """
-    n = cloud.n_points
-    votes = np.zeros((n, max(n_classes, 1)), dtype=np.int32)
     priority_names = priority_names or set()
-
-    candidates = [r for r in dataset.solved_images() if r.camera is not None]
-    # Two tiers: hard (priority) images first, the rest after; the votes buffer
-    # is reused between tiers to avoid a second (N, n_classes) allocation.
-    tiers = ([r for r in candidates if r.name in priority_names],
-             [r for r in candidates if r.name not in priority_names])
-    total = max(len(candidates), 1)
-
-    def tally() -> np.ndarray:
-        out = np.full(n, UNLABELLED_ID, dtype=np.int32)
-        voted = votes.sum(axis=1) > 0
-        out[voted] = votes[voted].argmax(axis=1)
-        return out
-
-    done = 0
-    n_used = 0
-    labels: np.ndarray | None = None      # hard-tier result, if any
-    for tier_i, records in enumerate(tiers):
-        for record in records:
-            done += 1
-            mask = image_masks.get(record.name)
-            if mask is None or not (mask != UNLABELLED_ID).any():
-                progress(done / total, "")
-                continue
-            n_used += 1
-            if visibility is not None:
-                pt_idx, pix = visibility.get(record.name, cloud, record.camera)
-            else:
-                pt_idx, pix = hb.visible_point_pixels(cloud, record.camera)
-            if pt_idx.size:
-                h, w = mask.shape
-                cols = np.clip(pix[:, 0], 0, w - 1)
-                rows = np.clip(pix[:, 1], 0, h - 1)
-                sampled = mask[rows, cols]
-                keep = sampled != UNLABELLED_ID
-                np.add.at(votes, (pt_idx[keep], sampled[keep]), 1)
-            progress(done / total,
-                     f"images → cloud ({record.name}, {n_used} projected)")
-        if tier_i == 0 and priority_names:
-            labels = tally()              # hard results, decided by hard votes only
-            votes[:] = 0                  # reuse the buffer for the soft tier
-
-    soft = tally()
-    if labels is None:
-        return soft
-    unset = labels == UNLABELLED_ID
-    labels[unset] = soft[unset]           # soft labels only fill hard gaps
-    return labels
+    names = [r.name for r in dataset.solved_images() if r.camera is not None]
+    passes = [VotePass(src.HAND, [nm for nm in names if nm in priority_names],
+                       image_masks.get),
+              VotePass(src.CLOUD, [nm for nm in names if nm not in priority_names],
+                       image_masks.get)]
+    return vote(cloud, dataset, passes, n_classes, progress, visibility).labels

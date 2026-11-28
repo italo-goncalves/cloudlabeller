@@ -484,6 +484,35 @@ def test_images_to_cloud_leaves_predictions_out_unless_asked(pipe, tmp_path):
     pipe.drained("request.progress")                 # the pipe is shared between tests
 
 
+def test_cloud_sources_say_where_labels_came_from(pipe, tmp_path):
+    """ADR-0006: hand-drawn votes decide a point; a stroke on the cloud is
+    painted, with no doubt; a projection doesn't vote on its own cloud."""
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    _cloud_labels_b(pipe, root)                      # a.png -> cloud -> b.png
+    out = pipe.call("cloud.sources", {"survey": "s1"})
+    source = get_array(root, out["source"])
+    unc = get_array(root, out["uncertainty"])
+    labels = get_array(root, pipe.call("cloud.labels", {"survey": "s1"})["labels"])
+    assert source.dtype == np.uint8 and len(source) == len(labels)
+    assert set(np.unique(source[labels != -1])) == {2}           # hand-drawn
+    assert ((unc[labels != -1] > 0) & (unc[labels != -1] <= 1)).all()
+    assert np.isnan(unc[labels == -1]).all()
+
+    # b.png's labels came from this sparse cloud: voting again with it adds nothing.
+    again = pipe.call("transfer.images_to_cloud", {"survey": "s1", "include_auto": True})
+    assert again["images"] == 2
+    after = get_array(root, pipe.call("cloud.sources", {"survey": "s1"})["source"])
+    assert np.array_equal(after, source)
+
+    idx = put_array(root, "idx", np.array([0, 1], np.int32))
+    pipe.call("cloud.paint", {"survey": "s1", "cloud": "sparse", "class_id": 1, "indices": idx})
+    out = pipe.call("cloud.sources", {"survey": "s1"})
+    assert get_array(root, out["source"])[:2].tolist() == [1, 1]
+    assert get_array(root, out["uncertainty"])[:2].tolist() == [0.0, 0.0]
+    pipe.drained("request.progress")
+
+
 def test_predict_leaves_cloud_labelled_photos_alone(pipe, tmp_path):
     """ADR-0006: predicting a photo labelled from the cloud hid its projection."""
     root = make_project(tmp_path / "p.clproj")

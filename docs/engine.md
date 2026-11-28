@@ -271,6 +271,16 @@ Problem: `cloud.none`.
 `{survey, cloud?}` → `{cloud, labels}`. `labels` is an Array file `[N]`, narrowed
 as `image.mask`'s is.
 
+### `cloud.sources`
+`{survey, cloud?}` → `{cloud, source, uncertainty}`. Where each point's label
+came from and how sure it is (ADR-0006). `source` is a `uint8` Array file
+`[N]`: 0 none, 1 painted on the cloud, 2 hand-drawn (decided by photos the
+user painted), 3 from the cloud (decided by projected labels), 4 predicted.
+`uncertainty` is a `float32` Array file `[N]`, 0 (sure) to 1, from the votes
+that decided the point: their disagreement and how many independent views
+they came from. It is 0 where painted, and NaN where unlabelled or unknown
+(labels from before sources were kept).
+
 ### `cloud.paint`
 `{survey, cloud?, indices, class_id}` → `{painted}`. Gives the chosen points one
 class (`-1` erases), as one undoable edit. `indices` is an inbound `int32`
@@ -375,7 +385,12 @@ A long request. Votes the photos' labels onto the sparse cloud and the dense
 one, with user-drawn masks outranking automatic ones. `include_auto` adds
 the cloud-projected photos that cover the surface; `include_predictions`
 adds the U-Net's predictions, left out by default so the network's output
-doesn't come back to it as training data (ADR-0006).
+doesn't come back to it as training data (ADR-0006). Votes are taken per
+source, best first: hand-drawn, then from the cloud, then predicted; a
+point any better source reaches is decided by it alone. Projected labels
+don't vote on the cloud they came from. Each point keeps the source that
+decided it and an Uncertainty from those votes, counted by independent
+views (`cloud.sources`); a point painted on the cloud is never changed.
 The votes are merged into the existing labels, so points no photo reached
 keep theirs. Returns the number of points updated. Problems:
 `transfer.no_cloud`, `transfer.no_labelled_images`.

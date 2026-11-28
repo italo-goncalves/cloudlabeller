@@ -184,23 +184,34 @@ def _geometry(survey, rec):
         dense = load_cloud_npz(mvs / "dense.npz").xyz
 
     def labels(name, n):
-        f = rec.labels_dir / name
+        """``(labels, source, uncertainty)`` of one cloud, or None."""
+        from cloudlabeller.core import sources as src
+
+        f = rec.labels_dir / f"{name}.npy"
         if n is None or not f.exists():
             return None
         arr = load_label_array(f)
-        return arr if len(arr) == n else None
-    return {"sparse": (sparse, labels("sparse.npy", None if sparse is None else len(sparse))),
-            "dense": (dense, labels("dense.npy", None if dense is None else len(dense)))}
+        if len(arr) != n:
+            return None
+        source, unc = src.legacy(arr)
+        for path, into in ((rec.labels_dir / f"{name}.source.npy", "source"),
+                           (rec.labels_dir / f"{name}.uncertainty.npy", "unc")):
+            if path.exists():
+                extra = np.load(path)
+                if len(extra) == n:
+                    source, unc = (extra, unc) if into == "source" else (source, extra)
+        return arr, source, unc
+    return {"sparse": (sparse, labels("sparse", None if sparse is None else len(sparse))),
+            "dense": (dense, labels("dense", None if dense is None else len(dense)))}
 
 
-def nearest_labels(source_xyz: np.ndarray, source_labels: np.ndarray,
-                   target_xyz: np.ndarray) -> np.ndarray:
-    """Each target point takes the label of the nearest labelled source
-    point, when that point is within three times the source's typical
-    spacing; others stay unlabelled."""
+def nearest_labelled(source_xyz: np.ndarray, source_labels: np.ndarray,
+                     target_xyz: np.ndarray) -> np.ndarray:
+    """For each target point, the index of the nearest labelled source point
+    within three times the source's typical spacing, else −1."""
     from scipy.spatial import cKDTree
 
-    out = np.full(len(target_xyz), UNLABELLED_ID, np.int32)
+    out = np.full(len(target_xyz), -1, np.int64)
     have = source_labels != UNLABELLED_ID
     if not have.any() or not len(target_xyz):
         return out
@@ -212,7 +223,7 @@ def nearest_labels(source_xyz: np.ndarray, source_labels: np.ndarray,
     dist, idx = tree.query(np.asarray(target_xyz, np.float64), k=1,
                            distance_upper_bound=max(3.0 * spacing, 1e-9))
     hit = np.isfinite(dist)
-    out[hit] = source_labels[have][idx[hit]]
+    out[hit] = np.flatnonzero(have)[idx[hit]]
     return out
 
 
@@ -241,19 +252,30 @@ def transfer_reconstruction(engine: Engine, params: dict) -> Deferred:
         progress(0.0, "Reading the other Reconstruction")
         geo = _geometry(survey, source)
         out = {}
+        from cloudlabeller.core import sources as src
+
         for i, (kind, cloud) in enumerate(targets.items()):
-            src_xyz, src_labels = geo[kind]
+            src_xyz, layers = geo[kind]
             if cloud is None:
                 continue
-            if src_labels is None or not (src_labels != UNLABELLED_ID).any():
+            if layers is None or not (layers[0] != UNLABELLED_ID).any():
                 # no labels of that kind there: fall back to its other cloud
-                other = geo["dense" if kind == "sparse" else "sparse"]
-                src_xyz, src_labels = other
-            if src_xyz is None or src_labels is None:
+                src_xyz, layers = geo["dense" if kind == "sparse" else "sparse"]
+            if src_xyz is None or layers is None:
                 continue
             a = src_xyz if same_frame else source.frame_points(src_xyz)
             b = cloud.xyz if same_frame else target.frame_points(cloud.xyz)
-            out[kind] = nearest_labels(a, src_labels, b)
+            idx = nearest_labelled(a, layers[0], b)
+            hit = idx >= 0
+            labels = np.full(len(b), UNLABELLED_ID, np.int32)
+            labels[hit] = layers[0][idx[hit]]
+            # The sources come along; a stroke there isn't one here.
+            kinds = np.zeros(len(b), np.uint8)
+            kinds[hit] = layers[1][idx[hit]]
+            kinds[kinds == src.PAINTED] = src.HAND
+            unc = np.full(len(b), np.nan, np.float16)
+            unc[hit] = layers[2][idx[hit]]
+            out[kind] = (labels, kinds, unc)
             progress(0.5 + 0.5 * i, f"{kind} cloud done")
         return out
 
@@ -263,9 +285,10 @@ def transfer_reconstruction(engine: Engine, params: dict) -> Deferred:
         if not out:
             raise Problem("transfer.cloud_unlabelled", "That Reconstruction has no labels.")
         lb = survey.labels
-        result = {"sparse": lb.merge_cloud_labels(out["sparse"]) if "sparse" in out else 0}
-        if "dense" in out:
-            result["dense"] = lb.merge_cloud_labels(out["dense"], dense=True)
+        result = {"sparse": 0}
+        for kind, (labels, kinds, unc) in out.items():
+            result[kind] = lb.merge_cloud_labels(labels, dense=kind == "dense", source=kinds,
+                                                 uncertainty=unc)
         engine.dirty = True
         engine.changed("labels", survey=survey.id)
         sync_mesh_labels(engine, survey)

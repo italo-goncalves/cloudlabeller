@@ -63,3 +63,51 @@ def cloud_to_image(
             cc = np.clip(cols + dx, 0, w - 1)
             mask[rr, cc] = classes
     return mask
+
+
+def cloud_layers_to_image(
+    cloud: PointCloud,
+    cloud_labels: np.ndarray,
+    point_source: np.ndarray,
+    point_uncertainty: np.ndarray,
+    camera: Camera,
+    splat_radius: int = 2,
+    name: str | None = None,
+    visibility=None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """:func:`cloud_to_image`, with each pixel's source and Uncertainty.
+
+    Returns ``(mask, source, uncertainty)``, each ``(H, W)``: the labels as
+    int32; the pixel source as uint8 (``CLOUD`` where the point's label was
+    hand-drawn, ``PREDICTED`` where it came from predictions, ``NONE``
+    unlabelled; :func:`cloudlabeller.core.sources.projected`); the points'
+    Uncertainty as float16 (NaN unlabelled or unknown). Every array takes the
+    same point at each pixel.
+    """
+    from cloudlabeller.core import sources as src
+
+    h, w = int(camera.height), int(camera.width)
+    mask = np.full((h, w), UNLABELLED_ID, dtype=np.int32)
+    source = np.zeros((h, w), np.uint8)
+    unc = np.full((h, w), np.nan, np.float16)
+    if visibility is not None and name is not None:
+        pt_idx, pix = visibility.get(name, cloud, camera)
+    else:
+        pt_idx, pix = hb.visible_point_pixels(cloud, camera)
+    if pt_idx.size == 0:
+        return mask, source, unc
+    classes = cloud_labels[pt_idx]
+    keep = classes != UNLABELLED_ID
+    idx = pt_idx[keep]
+    cols, rows, classes = pix[keep, 0], pix[keep, 1], classes[keep]
+    kinds = src.projected(point_source[idx])
+    doubt = np.asarray(point_uncertainty[idx], np.float16)
+    r = max(splat_radius, 0)
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            rr = np.clip(rows + dy, 0, h - 1)
+            cc = np.clip(cols + dx, 0, w - 1)
+            mask[rr, cc] = classes
+            source[rr, cc] = kinds
+            unc[rr, cc] = doubt
+    return mask, source, unc
