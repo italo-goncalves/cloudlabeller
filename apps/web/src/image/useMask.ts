@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ítalo Gomes Gonçalves
 
-// The photo's mask as the pane edits it: loaded from the Engine (an auto or
-// ml overlay stands in until the user edits), changed in place while a stroke
-// is under way, and saved whole, one undoable edit at a time.
+// The photo's mask as the pane edits it: loaded from the Engine (the user's
+// labels over the cloud's and the model's), changed in place while a stroke
+// is under way, and saved whole, one undoable edit at a time. The Engine
+// keeps only what differs from what it showed: the user's strokes.
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { currentSurvey, imageInfo, imageMask, saveMask } from "../engine/api";

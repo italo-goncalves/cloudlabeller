@@ -139,6 +139,7 @@ class Engine:
         Survey the change is in (absent: Project-wide); ``images`` names its
         photos whose masks or status changed.
         """
+        self.cache.pop("overlay_below", None)      # labels under a photo's Mask may have moved
         params: dict = {"parts": sorted(set(parts))}
         if survey is not None:
             params["survey"] = survey

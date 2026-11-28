@@ -375,7 +375,9 @@ export async function imageMask(name: string): Promise<Mask> {
 }
 
 /** Store a photo's mask; `survey` is the one it was painted in (default:
- * the current one), so a save queued before a switch lands where it belongs. */
+ * the current one), so a save queued before a switch lands where it belongs.
+ * The Engine keeps only the pixels that differ from the overlay it showed:
+ * the user's strokes. */
 export async function saveMask(
   name: string,
   mask: Int32Array,
@@ -576,10 +578,10 @@ export const cameras = () =>
 
 // -- transfers ----------------------------------------------------------------
 
-export const imagesToCloud = (includeAuto: boolean, ticket: string) =>
+export const imagesToCloud = (includeAuto: boolean, includePredictions: boolean, ticket: string) =>
   engineCall<{ images: number; sparse: number; dense?: number }>(
     "transfer.images_to_cloud",
-    { ...sv(), include_auto: includeAuto },
+    { ...sv(), include_auto: includeAuto, include_predictions: includePredictions },
     ticket,
   );
 export const cloudToImages = (ticket: string) =>

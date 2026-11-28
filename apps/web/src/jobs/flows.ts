@@ -162,12 +162,13 @@ export async function pipeline(app: App, options: PipelineOptions) {
   }
 }
 
-/** Images → Cloud, asking whether automatic labels count too. */
+/** Images → Cloud, asking whether labels from the cloud and the model count too. */
 export async function imagesToCloud(app: App) {
   const images = app.state.project?.images ?? [];
   const user = images.filter((i) => i.status === "user").length;
-  const auto = images.filter((i) => i.status === "auto" || i.status === "ml").length;
-  if (user + auto === 0) {
+  const auto = images.filter((i) => i.status === "auto").length;
+  const ml = images.filter((i) => i.status === "ml").length;
+  if (user + auto + ml === 0) {
     app.tell(
       "Nothing to transfer",
       "No photo has labels yet. Paint some, or project the cloud's labels onto the photos first.",
@@ -175,17 +176,26 @@ export async function imagesToCloud(app: App) {
     return;
   }
   let includeAuto = false;
-  if (auto > 0) {
+  let includePredictions = false;
+  if (auto + ml > 0) {
+    const options = ["Mine only"];
+    if (auto > 0) options.push("Include from the cloud");
+    if (ml > 0) options.push("Include predictions too");
     const answer = await app.choose(
       "Images → Cloud",
-      `${user} photos are labelled by you and ${auto} automatically (from the cloud or the model). Your labels always outrank automatic ones. Include the automatic ones?`,
-      ["Mine only", "Include automatic"],
+      `${user} photos are labelled by you, ${auto} from the cloud and ${ml} by the model. ` +
+        "Your labels always outrank the others. Predictions are left out unless you ask: " +
+        "labels the cloud gets from them would come back to the model as training data.",
+      options,
     );
     if (!answer) return;
-    includeAuto = answer === "Include automatic";
+    includeAuto = answer !== "Mine only";
+    includePredictions = answer === "Include predictions too";
   }
   try {
-    const r = await app.long("Images → Cloud", (t) => api.imagesToCloud(includeAuto, t));
+    const r = await app.long("Images → Cloud", (t) =>
+      api.imagesToCloud(includeAuto, includePredictions, t),
+    );
     app.dispatch({
       type: "log",
       text: `Images → Cloud: ${r.images} photos voted; ${r.sparse} sparse${r.dense !== undefined ? ` and ${r.dense} dense` : ""} points updated`,

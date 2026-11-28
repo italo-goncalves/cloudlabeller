@@ -305,21 +305,45 @@ def _image_size(record) -> tuple[int, int]:
         return int(im.size[1]), int(im.size[0])
 
 
+def _below(engine: Engine, survey, name: str):
+    """What shows under a photo's Mask (``Survey.overlay_below``), kept for
+    the last photo asked: ``image.save_mask`` compares against what the
+    window was shown. ``Engine.changed`` drops it."""
+    key = (survey.id, name)
+    kept = engine.cache.get("overlay_below")
+    if kept is not None and kept[0] == key:
+        return kept[1], kept[2]
+    mask, source = survey.overlay_below(name)
+    engine.cache["overlay_below"] = (key, mask, source)
+    return mask, source
+
+
+def _composed(user, below):
+    """The user's Mask over what shows under it (either may be None)."""
+    if user is None:
+        return below
+    if below is None or below.shape != user.shape:
+        return user
+    return np.where(user != UNLABELLED_ID, user, below)
+
+
 @method("image.mask")
 def image_mask(engine: Engine, params: dict) -> dict:
-    """The mask to show over a photo: the user's own, else the U-Net's
-    prediction or the cloud's projection (``source`` says which)."""
+    """The mask to show over a photo: the user's own labels, over the
+    cloud's projection, over the U-Net's prediction (ADR-0006). ``source``
+    is the best one present."""
     survey = _survey(engine, params)
     record = _image(survey, params)
     name = record.name
-    mask = survey.labels.image_masks.get(name)
-    source = "user" if mask is not None else None
-    if mask is None:
-        mask = survey.render_auto_mask(name)
-        if mask is not None:
-            source = "ml" if survey.labels.status_of(name) == "ml" else "auto"
+    user = survey.labels.image_masks.get(name)
+    below, source = _below(engine, survey, name)
+    if user is not None and (user != UNLABELLED_ID).any():
+        source = "user"
+    mask = _composed(user, below)
     if mask is None:
         return {"source": None, "mask": None}
+    if source is None:
+        source = "user"
     return {"source": source,
             "mask": arrays.write(engine.project.root, f"mask/{survey.id}/{name}",
                                  narrow(mask))}
@@ -329,8 +353,10 @@ def image_mask(engine: Engine, params: dict) -> dict:
 def image_save_mask(engine: Engine, params: dict) -> dict:
     """Store the mask the user painted on a photo (one undoable edit).
 
-    The window sends the whole mask, already seeded from whatever overlay it
-    showed; only the pixels that differ are recorded for undo.
+    The window sends the whole mask, seeded from the overlay ``image.mask``
+    showed. Only the user's strokes are kept: the pixels that differ from
+    that overlay (ADR-0006). The cloud's projection and the U-Net's
+    prediction under them are not copied in as hand-drawn labels.
     """
     survey = _survey(engine, params)
     record = _image(survey, params)
@@ -349,16 +375,31 @@ def image_save_mask(engine: Engine, params: dict) -> dict:
         raise Problem("image.mask_values", "The mask holds ids outside the schema.",
                       n_classes=n_classes)
     labels = survey.labels
-    if name not in labels.image_masks:
+    user = labels.image_masks.get(name)
+    below, _ = _below(engine, survey, name)
+    shown = _composed(user, below)
+    if shown is None or shown.shape != new.shape:
+        mine = new
+    else:
+        strokes = new != shown                        # what the user changed
+        mine = (user.copy() if user is not None
+                else np.full((h, w), UNLABELLED_ID, dtype=np.int32))
+        mine[strokes] = new[strokes]
+    if user is None:
+        if not (mine != UNLABELLED_ID).any():
+            return {"changed_pixels": 0, "status": labels.status_of(name)}
         labels.init_image(name, h, w)
     old = labels.image_masks[name]
-    changed = np.flatnonzero(old.reshape(-1) != new.reshape(-1))
+    changed = np.flatnonzero(old.reshape(-1) != mine.reshape(-1))
     if changed.size:
-        labels.paint_image(name, changed, new.reshape(-1)[changed])
+        labels.paint_image(name, changed, mine.reshape(-1)[changed])
     labels.mark_user_labeled(name)
     survey.save_mask(name)
     survey.save_manifest()
+    kept = engine.cache.get("overlay_below")
     engine.changed("labels", "status", survey=survey.id, images=[name])
+    if kept is not None and kept[0] == (survey.id, name):
+        engine.cache["overlay_below"] = kept         # the user's Mask isn't part of it
     return {"changed_pixels": int(changed.size), "status": labels.status_of(name)}
 
 
@@ -557,8 +598,10 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
     """Vote the photos' labels onto the sparse cloud and the dense one.
 
     User-drawn masks outrank auto ones. With ``include_auto`` (default true)
-    the U-Net's predictions vote too, and the cloud-projected photos that
-    cover the surface. The result is merged: points no photo reached keep
+    the cloud-projected photos that cover the surface vote too. The U-Net's
+    predictions vote only with ``include_predictions`` (default false), so
+    the network's output doesn't come back as cloud-made labels it then
+    trains on (ADR-0006). The result is merged: points no photo reached keep
     their labels.
     """
     from cloudlabeller.transfer import images_to_cloud
@@ -569,13 +612,14 @@ def transfer_images_to_cloud(engine: Engine, params: dict) -> Deferred:
     if ds.cloud is None:
         raise Problem("transfer.no_cloud", "Run SfM first.")
     include_auto = optional(params, "include_auto", bool, True)
+    include_predictions = optional(params, "include_predictions", bool, False)
     masks = dict(labels.image_masks)
     n_classes = len(engine.project.schema.classes)
     n_user = sum(1 for m in masks.values() if (m != UNLABELLED_ID).any())
     auto_names = [r.name for r in ds.solved_images()
                   if r.name not in masks and labels.status_of(r.name) in ("auto", "ml")]
-    if not include_auto:
-        auto_names = []
+    auto_names = [n for n in auto_names
+                  if (include_auto if labels.status_of(n) == "auto" else include_predictions)]
     if not auto_names and n_user == 0:
         raise Problem("transfer.no_labelled_images", "No photo is labelled yet.")
     pure_auto = [n for n in auto_names if labels.status_of(n) == "auto"]

@@ -427,6 +427,77 @@ def test_lasso_paint_undo_and_save_on_close(pipe, tmp_path):
     assert not (root / ".arrays").exists()                 # emptied on close
 
 
+def _cloud_labels_b(pipe, root):
+    """a.png painted half 0, half 1; the cloud labelled from it; b.png then
+    labelled from the cloud (status auto). Returns b.png's overlay."""
+    mask = np.zeros((H, W), np.int32)
+    mask[:, W // 2:] = 1
+    pipe.call("image.save_mask", {"survey": "s1", "name": "a.png", "mask": put_array(root, "a", mask)})
+    pipe.call("transfer.images_to_cloud", {"survey": "s1"})
+    pipe.call("transfer.cloud_to_images", {"survey": "s1"})
+    pipe.drained("request.progress")                 # the pipe is shared between tests
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
+    assert shown["source"] == "auto"
+    return get_array(root, shown["mask"]).astype(np.int32)
+
+
+def test_painting_over_cloud_labels_keeps_only_the_strokes(pipe, tmp_path):
+    """ADR-0006: a few strokes on a photo labelled from the cloud must not turn
+    the whole projected overlay into hand-drawn labels."""
+    root = make_project(tmp_path / "p.clproj")
+    pipe.call("project.open", {"root": str(root)})
+    overlay = _cloud_labels_b(pipe, root)
+    labelled = overlay != -1
+    assert labelled.sum() > 50
+
+    edited = overlay.copy()                          # what the editor sends back
+    stroke = np.zeros((H, W), bool)
+    stroke[:4, :4] = True                            # one small stroke of class 0
+    edited[stroke] = 0
+    pipe.call("image.save_mask", {"survey": "s1", "name": "b.png", "mask": put_array(root, "b", edited)})
+
+    stored = Project.open(root).survey("s1").labels.image_masks["b.png"]
+    changed = stroke & (overlay != 0)
+    assert (stored[changed] == 0).all()
+    assert (stored[~stroke] == -1).all()             # the overlay was not copied in
+    shown = pipe.call("image.mask", {"survey": "s1", "name": "b.png"})
+    assert shown["source"] == "user"
+    composed = get_array(root, shown["mask"])
+    assert np.array_equal(composed[~stroke], overlay[~stroke])   # still shown under the strokes
+
+
+def test_images_to_cloud_leaves_predictions_out_unless_asked(pipe, tmp_path):
+    """ADR-0006: a prediction voting on the cloud would come back as cloud-made
+    labels that the network trains on."""
+    root = make_project(tmp_path / "p.clproj")
+    proj = Project.open(root)
+    survey = proj.survey("s1")
+    np.savez(survey.predictions_dir / "b.png.npz", labels=np.ones((H, W), np.int32))
+    survey.labels.mark_ml_labeled("b.png")
+    survey.save_manifest()
+    pipe.call("project.open", {"root": str(root)})
+    with pytest.raises(RpcError) as err:
+        pipe.call("transfer.images_to_cloud", {"survey": "s1"})
+    assert err.value.data["code"] == "transfer.no_labelled_images"
+    out = pipe.call("transfer.images_to_cloud", {"survey": "s1", "include_predictions": True})
+    assert out["images"] == 1 and out["sparse"] > 0
+    pipe.drained("request.progress")                 # the pipe is shared between tests
+
+
+def test_predict_leaves_cloud_labelled_photos_alone(pipe, tmp_path):
+    """ADR-0006: predicting a photo labelled from the cloud hid its projection."""
+    root = make_project(tmp_path / "p.clproj")
+    _fake_model(root)
+    pipe.call("project.open", {"root": str(root)})
+    _cloud_labels_b(pipe, root)                      # a.png user, b.png auto
+    with pytest.raises(RpcError) as err:
+        pipe.call("jobs.plan", {"kind": "predict", "options": {"model": "m1"}})
+    assert err.value.data["code"] == "job.predict.nothing"
+    from cloudlabeller.ml.predict_cli import PROTECTED
+
+    assert set(PROTECTED) == {"user", "auto"}
+
+
 # -- transfers -----------------------------------------------------------------------
 def test_images_to_cloud_then_cloud_to_images(pipe, tmp_path):
     root = make_project(tmp_path / "p.clproj")

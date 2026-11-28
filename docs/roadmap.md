@@ -43,6 +43,20 @@ Steps, in order (step 4 can run beside 2 and 3):
    0.3.0 models are listed as needing retraining.
 5. **Docs and the release.** Docs and version 0.4.0 done; the release
    waits for the end-to-end test below.
+6. **Stop predictions leaking into training** (the first step of
+   [ADR-0006](adr/0006-labels-keep-their-source-and-predictions-only-fill-gaps.md),
+   before the release, since 0.4.0 would otherwise train on its own output).
+   Built: the overlay shows the user's labels over the cloud's over the
+   model's, and a save keeps only what differs from it. A stroke of the class
+   a pixel already shows doesn't make it hand-drawn yet (step 2 of Label
+   sources, below).
+   - Predict skips Photos labelled from the cloud, so it no longer hides
+     their projection.
+   - Images → cloud leaves predictions out unless asked.
+   - Saving a painted Photo keeps only the pixels the user's strokes touched
+     and the ones that were already hand-drawn, not the overlay it started
+     from.
+   - A regression test for each.
 
 - **Surveys.**
   - A 0.3.0 Project opens as a single Survey without asking.
@@ -126,7 +140,57 @@ both Surveys predicts a held-out third one.
      point.
 
    *Why here:* everything here needs Surveys aligned into one Project frame.
-2. **The ML track**, which can run alongside 0.4.0 and 0.5.0 because it
+2. **Label sources**
+   ([ADR-0006](adr/0006-labels-keep-their-source-and-predictions-only-fill-gaps.md)):
+   every label keeps its source (hand-drawn, from the cloud, predicted), and
+   predictions only fill gaps. In order:
+   1. **Voting by source, with an Uncertainty per point.**
+      - `images_to_cloud` takes votes by source, best first, extending its
+        current two passes to three.
+      - While voting it keeps a 64-bit set of direction cells per point,
+        the cameras' directions as seen from it, so the number of
+        independent views is its popcount.
+      - It returns the labels, a source per point (`uint8`) and an
+        Uncertainty per point (`float16`); the vote counts are dropped.
+      - The source and Uncertainty are stored beside each cloud's labels in
+        the Reconstruction (`labels/dense.source.npy`,
+        `labels/dense.uncertainty.npy`, the same for the sparse cloud).
+      - Cloud paint sets the source to hand-drawn and the Uncertainty to 0.
+      - Projected labels don't vote on the cloud they came from.
+      - Tests: the table of worked cases in the ADR, the views counted once
+        per cell, a better source never overruled by a worse one.
+   2. **Composed labels per pixel.**
+      - Cloud → images projects the source and the Uncertainty along with
+        the labels.
+      - `image.mask` returns the composed labels and a source per pixel.
+      - `image.save_mask` takes only the user's strokes, as a mask with −1
+        where nothing was painted.
+      - The mask editor keeps a touched-pixel map, and gets an "Accept the
+        prediction" fill.
+      - `docs/engine.md` and `tests/test_engine_contract.py` change in the
+        same commit.
+   3. **Showing sources and Uncertainty.**
+      - The Image view shows the source by opacity (solid hand-drawn, lighter
+        from the cloud, hatched predicted) and with a "Show source" toggle.
+      - The 3D view and the Image view get "Colour by Uncertainty".
+      - The Dataset pane shows each Photo's sources and its mean
+        Uncertainty.
+   4. **Training by source.**
+      - Per-pixel weights travel with each Tile: hand-drawn 1, from the
+        cloud 0.5 or (1 − Uncertainty) as an option, predicted 0.
+      - Validation scores hand-drawn pixels only.
+      - The weights go through `dataset_builder`, `tile_dataset` and the
+        trainer; the LOCKED `ml/unet.py` is untouched.
+   5. **Predictions fill the gaps.**
+      - Predict runs on every Photo, hand-drawn ones included.
+      - Masks saved before this change get the per-Photo "Remove copied
+        labels" action, with a preview.
+
+   *Why here:* it fixes what the network learns from, so the ML track's
+   losses and diagnostics are measured against honest validation. It can
+   run beside 0.5.0, which touches the meshes and the alignment rather than
+   the labels.
+3. **The ML track**, which can run alongside 0.4.0 and 0.5.0 because it
    leaves the data model alone.
    - Losses in a new, unlocked `ml/losses.py`: weighted cross-entropy (with
      inverse-frequency class weights), focal, soft Dice or Tversky, and
@@ -141,7 +205,7 @@ both Surveys predicts a held-out third one.
 
    *Why here:* the Survey diagnostics and the held-out Survey need 0.4.0.
    The losses don't.
-3. **Georeferencing Tier 3: the full treatment.**
+4. **Georeferencing Tier 3: the full treatment.**
    - Bundle adjustment constrained by GCPs (may need pycolmap work).
    - DJI RTK/PPK coordinates, weighted by each photo's accuracy.
    - Orthophoto export.

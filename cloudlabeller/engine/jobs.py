@@ -578,7 +578,7 @@ def _apply_train(engine, project, results, plan):
 
 
 @kind("predict", "cloudlabeller.ml.predict_cli", "ml",
-      "Predict masks for every photo the user hasn't labelled")
+      "Predict masks for every photo not labelled by the user or from the cloud")
 def _prepare_predict(engine, project, options):
     from cloudlabeller.ml.model_store import list_models
 
@@ -603,10 +603,13 @@ def _prepare_predict(engine, project, options):
                       "The model was trained with a different number of classes.",
                       model=model, model_classes=manifest.get("n_classes"),
                       project_classes=n_classes)
-    if not any(s.labels.status_of(r.name) != "user"
+    from cloudlabeller.ml.predict_cli import PROTECTED
+
+    if not any(s.labels.status_of(r.name) not in PROTECTED
                for s in (project.survey(sid) for sid in surveys)
                for r in s.dataset.images):
-        raise Problem("job.predict.nothing", "All images are user-labelled.")
+        raise Problem("job.predict.nothing",
+                      "Every photo is labelled already, by you or from the cloud.")
     project.save_manifest()                        # the child reads statuses from disk
     args = [str(project.root), "--model", model]
     if surveys != list(project.surveys):

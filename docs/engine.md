@@ -217,11 +217,13 @@ Survey has its own history.
 `{survey}` → `{changed: {modality: "cloud"|"image", image} | null}`
 
 ### `image.mask`
-`{survey, name}` → `{source, mask}`. The overlay for a photo:
+`{survey, name}` → `{source, mask}`. The overlay for a photo: the user's
+own labels, over the labelled cloud's projection, over the U-Net's
+prediction, so the better source wins at each pixel (ADR-0006).
 
-- `source` is `user` (the user's own mask), `ml` (the U-Net's prediction,
-  at the photo's size) or `auto` (projected from the labelled cloud), or
-  null when there is nothing to show.
+- `source` is the best one present: `user` (the user's own mask), `auto`
+  (projected from the labelled cloud) or `ml` (the U-Net's prediction, at
+  the photo's size), or null when there is nothing to show.
 - `mask` is an Array file of shape `[H, W]`, or null, in the narrowest of
   `int8`, `int16` and `int32` that holds its ids (`int8` for up to 127
   classes: a 20-megapixel mask is then 20 MB, not 80).
@@ -231,7 +233,10 @@ Problem: `image.not_found`.
 ### `image.save_mask`
 `{survey, name, mask}` → `{changed_pixels, status}`. Stores the mask the user
 painted, as one undoable edit, and marks the photo `user`. The window sends
-the whole mask, seeded from the overlay it showed. `mask` is an inbound
+the whole mask, seeded from the overlay `image.mask` showed; only the pixels
+that differ from that overlay (the user's strokes) are kept, so the cloud's
+and the U-Net's labels under them don't become hand-drawn (ADR-0006).
+Nothing is stored when a photo without a mask gets no stroke. `mask` is an inbound
 `int8`, `int16` or `int32` Array file of the photo's size (the window sends
 the narrowest). Problems: `image.not_found`,
 `image.mask_shape`, `image.mask_values`.
@@ -365,10 +370,12 @@ match the point spacing. `machine_ram_gb` is this machine's RAM, or null.
 Problem: `job.mesh.no_dense`.
 
 ### `transfer.images_to_cloud`
-`{survey, include_auto?: true}` → `{images, sparse, dense?}`. A long request.
-Votes the photos' labels onto the sparse cloud and the dense one, with
-user-drawn masks outranking automatic ones. `include_auto` adds the
-U-Net's predictions and the cloud-projected photos that cover the surface.
+`{survey, include_auto?: true, include_predictions?: false}` → `{images, sparse, dense?}`.
+A long request. Votes the photos' labels onto the sparse cloud and the dense
+one, with user-drawn masks outranking automatic ones. `include_auto` adds
+the cloud-projected photos that cover the surface; `include_predictions`
+adds the U-Net's predictions, left out by default so the network's output
+doesn't come back to it as training data (ADR-0006).
 The votes are merged into the existing labels, so points no photo reached
 keep theirs. Returns the number of points updated. Problems:
 `transfer.no_cloud`, `transfer.no_labelled_images`.
@@ -645,7 +652,7 @@ kinds marked ‡ work on one Survey and need the option `survey`:
 | `mvs` ‡ | reconstruction | yes | `max_image_size`, `quality` (`standard` or `draft`) | `job.no_reconstruction`, `job.mvs.no_colmap` |
 | `mesh` ‡ | reconstruction | no | `method` (`poisson` or `delaunay`), `depth`, `trim`, `point_weight` | `job.mesh.no_dense`, `job.mesh.no_delaunay` |
 | `train` | ml | yes | `name`, `steps` (batches, default 50000: the epochs are as many as that takes, rounded up), `patience` (stop after this many epochs without a better validation loss, default 10; 0 never stops early), `batch_size`, `val_fraction`, `augment_rolls`, `include_auto`, `resume`, `surveys` (default: every Survey; their photos are pooled, cut into Tiles, and validated on whole photos held out) | `job.train.no_classes`, `job.train.no_images`, `job.train.bad_spec`, `job.train.class_mismatch`, `job.train.legacy_model`, `job.train.no_normals` (`params.surveys`: those without a dense cloud), `survey.not_found` |
-| `predict` | ml | yes | `model`, `surveys` (default: every Survey; the photos not user-labelled; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `job.predict.no_normals`, `survey.not_found` |
+| `predict` | ml | yes | `model`, `surveys` (default: every Survey; the photos labelled neither by the user nor from the cloud; its result is `{predicted: [{survey, name, uncertainty}]}`, `uncertainty` the mean) | `job.predict.no_model`, `job.predict.class_mismatch`, `job.predict.nothing`, `job.predict.legacy_model`, `job.predict.no_normals`, `survey.not_found` |
 | `geoid` | download | no | `epsg` | |
 | `colmap` | download | no | `variant` (`cuda` or `cpu`) | `job.colmap.unsupported` |
 

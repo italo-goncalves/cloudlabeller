@@ -76,6 +76,15 @@ Survey can use it; a Reconstruction's cloud and mesh labels belong to the
 Reconstruction.
 _Avoid_: annotation, segmentation
 
+**Source**:
+Where a label came from, ranked from most to least reliable: hand-drawn
+(painted by the user on a Photo or on the cloud), from the cloud (projected
+from points whose labels came from hand-drawn sources), or predicted (the
+network's own output, directly or through the cloud). At each pixel or
+point the best source wins. The network learns from the first two, never
+from predictions.
+_Avoid_: tier, quality, status (a Photo's summary, not a label's origin)
+
 **Tile**:
 A fixed-size square of photo pixels the network trains and predicts on, cut
 from a Photo on an overlapping grid and shrunk by the model's factor before
@@ -92,8 +101,10 @@ experimental option.
 _Avoid_: normal image, slope map
 
 **Uncertainty**:
-How unsure a prediction is at each pixel of a Photo (the entropy of its
-Class probabilities), kept with the Photo's prediction.
+How unsure a label is, from 0 (sure) to 1. For a prediction, at each pixel,
+it is the entropy of the Class probabilities. For a cloud point, it comes
+from the Photos' votes: high when they disagree or when the point was seen
+from few independent directions, however many Photos saw it.
 _Avoid_: confidence (its opposite), error
 
 ## Comparing Surveys

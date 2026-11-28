@@ -407,6 +407,28 @@ class Survey:
         return cloud_to_image(source[0], source[1], record.camera,
                               name=name, visibility=self.visibility_index())
 
+    def overlay_below(self, name: str):
+        """What shows under ``name``'s Mask: the cloud's projection where it
+        reaches, else the U-Net's prediction (ADR-0006: the better source
+        wins per pixel). Returns ``(mask, source)``, with ``source`` 'auto'
+        when the cloud labels any pixel, else 'ml', or ``(None, None)``."""
+        pred = self.prediction_mask(name)
+        proj = None
+        source = self.auto_mask_source()
+        record = self.dataset.image_by_name(name)
+        if source is not None and record is not None and record.camera is not None:
+            from cloudlabeller.transfer import cloud_to_image  # lazy: heavy deps
+
+            proj = cloud_to_image(source[0], source[1], record.camera,
+                                  name=name, visibility=self.visibility_index())
+        if proj is not None and (proj != -1).any():
+            if pred is not None and pred.shape == proj.shape:
+                proj = np.where(proj != -1, proj, pred)
+            return proj, "auto"
+        if pred is not None:
+            return pred, "ml"
+        return None, None
+
     def normal_map(self, name: str, frame: str = "camera"):
         """``name``'s normal map from the dense cloud (``transfer.normal_map``):
         (H, W, 3) uint8 in the ``camera`` frame (what the U-Net takes) or the
