@@ -43,6 +43,9 @@ class Sample:
     image: np.ndarray          # (H, W, C), uint8 for Tiles
     mask: np.ndarray           # (H, W) class ids (int16 for Tiles), -1 unlabelled
     weight: float = 1.0        # e.g. down-weight projection-derived masks
+    #: Per-pixel weights (H, W) as uint8, 255 = 1, multiplied by ``weight``;
+    #: None: every pixel weighs 1 (ADR-0006: by the label's Uncertainty).
+    pixel_weights: np.ndarray | None = None
 
 
 class TrainingSet:
@@ -51,11 +54,15 @@ class TrainingSet:
     def __init__(self, samples: list[Sample]) -> None:
         self.samples = samples
 
-    def split(self, val_fraction: float = 0.2, seed: int = 0) -> tuple["TrainingSet", "TrainingSet"]:
+    def split(self, val_fraction: float = 0.2, seed: int = 0,
+              among: "set[str] | None" = None) -> tuple["TrainingSet", "TrainingSet"]:
         """Random (train, validation) split by photo — seeded, so re-runs are
         stable. The Tiles of one photo (``name#row,col``) stay together, so
-        validation never sees a photo training saw."""
-        photos = sorted({photo_of(s.name) for s in self.samples})
+        validation never sees a photo training saw. With ``among``, only
+        those photos may be held out (ADR-0006: the hand-drawn ones, so
+        validation scores the user's labels only); the rest always train."""
+        photos = sorted({photo_of(s.name) for s in self.samples
+                         if among is None or photo_of(s.name) in among})
         rng = np.random.default_rng(seed)
         order = [photos[i] for i in rng.permutation(len(photos))]
         cut = int(len(order) * (1 - val_fraction))
@@ -148,7 +155,7 @@ def build_training_set(
 def build_tile_set(
     labelled_image_names: list[str],
     image_loader,                       # name -> (H, W, C)
-    mask_loader,                        # name -> (H, W) int32 (user + projected)
+    mask_loader,                        # name -> (H, W) int32, or (mask, pixel weights)
     spec,                               # ModelSpec: tile_size, overlap, shrink, min_labelled
     projected_weight: float = 0.5,
     projected_names: set[str] | None = None,
@@ -158,6 +165,9 @@ def build_tile_set(
     per Tile with enough labels, named ``photo#row,col``. ``progress(done,
     total)`` is called after each photo: rendering a photo's mask from the
     cloud can take seconds the first time.
+
+    ``mask_loader`` may give ``(mask, weights)``: per-pixel weights in 0..1
+    (float, NaN taken as 1), cut and shrunk with the Tiles.
 
     Tiles are uint8 images and int16 masks; nothing is augmented here."""
     from cloudlabeller.ml.tiles import cut
@@ -169,11 +179,16 @@ def build_tile_set(
         image, mask = image_loader(name), mask_loader(name)
         if progress is not None:
             progress(k + 1, total)
+        weights = None
+        if isinstance(mask, tuple):
+            mask, weights = mask
         if mask is None or image is None:          # no image: no normals for it
             continue
         weight = projected_weight if name in projected_names else 1.0
-        for (i, j), timg, tmask in cut(image, mask, int(spec.tile_size), float(spec.overlap),
-                                       int(spec.shrink), float(spec.min_labelled)):
+        for item in cut(image, mask, int(spec.tile_size), float(spec.overlap),
+                        int(spec.shrink), float(spec.min_labelled), weights=weights):
+            (i, j), timg, tmask = item[:3]
             samples.append(Sample(name=f"{name}#{i},{j}", image=timg, mask=tmask,
-                                  weight=weight))
+                                  weight=weight,
+                                  pixel_weights=item[3] if len(item) > 3 else None))
     return TrainingSet(samples)

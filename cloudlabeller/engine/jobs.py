@@ -564,6 +564,8 @@ def _prepare_train(engine, project, options):
             "--stop-file", str(stop_file)]
     if _opt(options, "include_auto", bool, False):
         args.append("--include-auto")
+        if _opt(options, "weight_by_uncertainty", bool, False):
+            args.append("--weight-by-uncertainty")
     if resume:
         args.append("--resume")
     if surveys != list(project.surveys):

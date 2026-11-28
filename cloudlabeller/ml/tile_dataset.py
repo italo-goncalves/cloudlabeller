@@ -56,8 +56,11 @@ def n_batches(n_tiles: int, augment_rolls: int, batch_size: int) -> int:
     return -(-n_tiles * windows(augment_rolls) // max(1, batch_size))
 
 
-def augment(image, mask, window, rolls: int, log_gamma):
+def augment(image, mask, window, rolls: int, log_gamma, weights=None):
     """Window ``window`` (0 .. 2*rolls-1) of a Tile's mirror strip.
+
+    Per-pixel ``weights`` (H, W), when given, move with the mask and come
+    back third: ``(x, y, w)``.
 
     ``image`` (H, W, C) float32 in [0, 1], ``mask`` (H, W); TF tensors or
     arrays. The window is shifted by ``(window + 1) * (W // rolls)`` pixels
@@ -81,15 +84,21 @@ def augment(image, mask, window, rolls: int, log_gamma):
     y = tf.roll(strip_y, shift, axis=1)[:, :width]
     gamma = tf.exp(tf.cast(log_gamma, x.dtype))
     if extra:
-        return tf.concat([tf.pow(x[..., :3], gamma), x[..., 3:]], axis=-1), y
-    return tf.pow(x, gamma), y
+        x = tf.concat([tf.pow(x[..., :3], gamma), x[..., 3:]], axis=-1)
+    else:
+        x = tf.pow(x, gamma)
+    if weights is None:
+        return x, y
+    strip_w = tf.concat([weights, tf.reverse(weights, axis=[1])], axis=1)
+    return x, y, tf.roll(strip_w, shift, axis=1)[:, :width]
 
 
 def make_dataset(ts: TrainingSet, batch_size: int, augment_rolls: int = 0, *,
                  shuffle: bool = True, seed: int | None = None):
     """``ts`` as a ``tf.data.Dataset`` of ``(x, y, w)`` batches: x (B, H, W, C)
     float32 in [0, 1], y (B, H, W) int32 (-1 unlabelled, ignored by the loss),
-    w (B, 1, 1) float32 per-sample weights.
+    w (B, 1, 1) float32 per-sample weights, or (B, H, W) per-pixel ones when
+    any sample has them (``Sample.pixel_weights`` times its weight).
 
     The weights carry two singleton axes because Keras multiplies them against
     the per-PIXEL loss map (B, H, W): a flat (B,) vector fails to broadcast for
@@ -105,6 +114,8 @@ def make_dataset(ts: TrainingSet, batch_size: int, augment_rolls: int = 0, *,
         raise ValueError("no samples to train on")
     h, w, c = samples[0].image.shape
     per = windows(augment_rolls)
+    per_pixel = any(s.pixel_weights is not None for s in samples)
+    ones = np.full((h, w), 255, np.uint8)
     total = len(samples) * per
     rng = np.random.default_rng(seed)
 
@@ -113,7 +124,11 @@ def make_dataset(ts: TrainingSet, batch_size: int, augment_rolls: int = 0, *,
         for k in order:
             i, r = divmod(int(k), per)
             s = samples[i]
-            yield s.image, s.mask, np.float32(s.weight), np.int32(r)
+            if per_pixel:
+                pw = s.pixel_weights if s.pixel_weights is not None else ones
+                yield s.image, s.mask, np.float32(s.weight), np.int32(r), pw
+            else:
+                yield s.image, s.mask, np.float32(s.weight), np.int32(r)
 
     image_dtype = tf.as_dtype(samples[0].image.dtype)
     mask_dtype = tf.as_dtype(samples[0].mask.dtype)
@@ -122,18 +137,24 @@ def make_dataset(ts: TrainingSet, batch_size: int, augment_rolls: int = 0, *,
         tf.TensorSpec((h, w), mask_dtype),
         tf.TensorSpec((), tf.float32),
         tf.TensorSpec((), tf.int32),
-    ))
+    ) + ((tf.TensorSpec((h, w), tf.uint8),) if per_pixel else ()))
 
     def to_float(image):
         x = tf.cast(image, tf.float32)
         return x / 255.0 if image_dtype == tf.uint8 else x
 
-    def prepare(image, mask, weight, window):
+    def prepare(image, mask, weight, window, pixel_weights=None):
         x, y = to_float(image), tf.cast(mask, tf.int32)
+        pw = None if pixel_weights is None else tf.cast(pixel_weights, tf.float32) / 255.0
         if augment_rolls > 0:
             log_gamma = tf.random.uniform((), -GAMMA_LOG, GAMMA_LOG)
-            x, y = augment(x, y, window, augment_rolls, log_gamma)
-        return x, y, tf.reshape(weight, (1, 1))
+            if pw is None:
+                x, y = augment(x, y, window, augment_rolls, log_gamma)
+            else:
+                x, y, pw = augment(x, y, window, augment_rolls, log_gamma, pw)
+        if pw is None:
+            return x, y, tf.reshape(weight, (1, 1))
+        return x, y, pw * weight
 
     ds = (ds.map(prepare, num_parallel_calls=tf.data.AUTOTUNE, deterministic=not shuffle)
           .batch(batch_size)

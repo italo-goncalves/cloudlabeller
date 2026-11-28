@@ -129,10 +129,12 @@ def to_uint8(image: np.ndarray) -> np.ndarray:
 
 
 def cut(image: np.ndarray, mask: np.ndarray, tile: int, overlap: float, shrink: int,
-        min_labelled: float) -> list[tuple[tuple[int, int], np.ndarray, np.ndarray]]:
+        min_labelled: float, weights: np.ndarray | None = None) -> list[tuple]:
     """The training Tiles of one photo: ``((row, col), image, mask)``, each
     shrunk to the network's size, skipping Tiles less than ``min_labelled``
-    labelled. The padding is unlabelled.
+    labelled. The padding is unlabelled. With per-pixel ``weights`` (0..1,
+    NaN taken as 1) each Tile also gets its weights, shrunk by area and
+    stored as uint8 (255 = 1): ``((row, col), image, mask, weights)``.
 
     Each Tile owns its memory (uint8 image, int16 mask): a view into the
     padded photo would keep the whole photo alive for as long as one of its
@@ -140,6 +142,10 @@ def cut(image: np.ndarray, mask: np.ndarray, tile: int, overlap: float, shrink: 
     grid = grid_for(image.shape[0], image.shape[1], tile, overlap)
     img = pad(to_uint8(image), grid, 0)
     msk = pad(np.asarray(mask, np.int32), grid, UNLABELLED_ID)
+    wts = None
+    if weights is not None:
+        w = np.nan_to_num(np.asarray(weights, np.float32), nan=1.0)
+        wts = pad(np.rint(np.clip(w, 0.0, 1.0) * 255).astype(np.uint8), grid, 0)
     out = []
     for i, j, y, x in grid.origins():
         m = msk[y:y + tile, x:x + tile]
@@ -149,7 +155,11 @@ def cut(image: np.ndarray, mask: np.ndarray, tile: int, overlap: float, shrink: 
         tmask = shrink_mask(m, shrink).astype(MASK_DTYPE)     # astype copies
         if timg.base is not None:
             timg = timg.copy()
-        out.append(((i, j), timg, tmask))
+        if wts is None:
+            out.append(((i, j), timg, tmask))
+        else:
+            twts = np.ascontiguousarray(shrink_image(wts[y:y + tile, x:x + tile], shrink))
+            out.append(((i, j), timg, tmask, twts.copy() if twts.base is not None else twts))
     return out
 
 

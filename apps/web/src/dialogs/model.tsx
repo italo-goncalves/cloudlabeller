@@ -242,6 +242,7 @@ export function TrainDialog() {
   const [val, setVal] = useState(0.2);
   const [rolls, setRolls] = useState(5);
   const [includeAuto, setIncludeAuto] = useState(false);
+  const [byUncertainty, setByUncertainty] = useState(false);
   const all = app.state.project?.surveys.map((s) => s.id) ?? [];
   const [surveys, setSurveys] = useState<string[]>(all);
   useEffect(() => {
@@ -278,6 +279,7 @@ export function TrainDialog() {
         val_fraction: val,
         augment_rolls: rolls,
         include_auto: includeAuto,
+        weight_by_uncertainty: includeAuto && byUncertainty,
         resume: Boolean(saved) && resume,
         ...(surveys.length < all.length ? { surveys } : {}),
       },
@@ -388,6 +390,13 @@ export function TrainDialog() {
       <Check checked={includeAuto} onChange={setIncludeAuto} disabled={auto === 0}>
         Include {auto} photos labelled from the cloud, at half weight
       </Check>
+      <Check checked={byUncertainty} onChange={setByUncertainty} disabled={!includeAuto}>
+        Weigh their labels by how sure the cloud is of them, too
+      </Check>
+      <p className="text-fg-faint">
+        The model never learns from predictions, its own or through the cloud, and it is validated
+        on photos you painted only.
+      </p>
       {problem && <p className="text-danger">{problem}</p>}
       <p className="text-fg-faint">
         The model saved is the epoch with the lowest validation loss (training loss when nothing is

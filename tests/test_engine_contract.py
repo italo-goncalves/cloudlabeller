@@ -676,6 +676,7 @@ def test_job_arguments_match_the_clis(tmp_path):
                "sfm": {"survey": "s1", "gpu": True},
                "georef": {"survey": "s1"}, "reproject": {"epsg": 32723, "orthometric": True},
                "train": {"name": "m1", "steps": 300, "patience": 4, "include_auto": True,
+                         "weight_by_uncertainty": True,
                          "resume": True,
                          "surveys": ["s1"]},
                "geoid": {"epsg": 31982}}
@@ -698,6 +699,7 @@ def test_job_arguments_match_the_clis(tmp_path):
     assert parsed["reproject"].epsg == 32723 and parsed["reproject"].orthometric
     assert parsed["train"].steps == 300 and parsed["train"].patience == 4
     assert parsed["train"].epochs is None and parsed["train"].include_auto
+    assert parsed["train"].weight_by_uncertainty
     assert parsed["train"].resume and parsed["train"].stop_file.endswith("train.stop")
     assert parsed["geoid"].epsg == 31982
     if "colmap" in parsed:

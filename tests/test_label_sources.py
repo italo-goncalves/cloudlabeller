@@ -209,3 +209,50 @@ def _camera_scene():
     cam = Camera(K=K, R=np.eye(3), t=np.zeros(3), width=64, height=64)
     xyz = np.array([[-0.2, 0.0, 5.0], [0.2, 0.0, 5.0], [0.0, 0.2, 5.0]], np.float32)
     return PointCloud(xyz=xyz), cam
+
+
+# -- training by source ---------------------------------------------------------------
+def test_tiles_carry_their_pixel_weights():
+    from cloudlabeller.ml.tiles import cut
+
+    image = np.zeros((8, 8, 3), np.uint8)
+    mask = np.zeros((8, 8), np.int32)
+    weights = np.full((8, 8), 0.5, np.float32)
+    weights[:, :4] = np.nan                          # unknown: weighs 1
+    tiles = cut(image, mask, 8, 0.0, 2, 0.0, weights=weights)
+    assert len(tiles) == 1 and len(tiles[0]) == 4
+    w = tiles[0][3]
+    assert w.dtype == np.uint8 and w.shape == (4, 4)
+    assert (w[:, :2] == 255).all() and (abs(w[:, 2:].astype(int) - 128) <= 1).all()
+    assert len(cut(image, mask, 8, 0.0, 2, 0.0)[0]) == 3          # without: as before
+
+
+def test_validation_holds_out_hand_drawn_photos_only():
+    from cloudlabeller.ml.dataset_builder import Sample, TrainingSet
+
+    names = ["s1/u1", "s1/u2", "s1/u3", "s1/a1", "s1/a2", "s1/a3"]
+    ts = TrainingSet([Sample(f"{n}#0,0", np.zeros((2, 2, 3), np.uint8),
+                             np.zeros((2, 2), np.int16)) for n in names])
+    for seed in range(5):
+        train, val = ts.split(0.5, seed=seed, among={"s1/u1", "s1/u2", "s1/u3"})
+        held = {s.name.split("#")[0] for s in val.samples}
+        assert held and held <= {"s1/u1", "s1/u2", "s1/u3"}
+        assert {"s1/a1", "s1/a2", "s1/a3"} <= {s.name.split("#")[0] for s in train.samples}
+
+
+def test_training_never_sees_labels_from_predictions():
+    from cloudlabeller.ml.train_cli import training_layers
+
+    mask = np.array([[0, 1], [2, -1]], np.int32)
+    source = np.array([[src.CLOUD, src.PREDICTED], [src.CLOUD, src.NONE]], np.uint8)
+    unc = np.array([[0.25, 0.5], [np.nan, np.nan]], np.float16)
+    survey = mock.MagicMock()
+    survey.render_auto_layers.return_value = (mask, source, unc)
+    out = training_layers(survey, "a.jpg", by_uncertainty=False)
+    assert out.tolist() == [[0, -1], [2, -1]]
+    assert mask[0, 1] == 1                           # the photo's own layers untouched
+    m, w = training_layers(survey, "a.jpg", by_uncertainty=True)
+    assert m.tolist() == [[0, -1], [2, -1]]
+    assert w[0, 0] == pytest.approx(0.75) and w[1, 0] == 1.0   # unknown weighs 1
+    survey.render_auto_layers.return_value = None
+    assert training_layers(survey, "a.jpg", by_uncertainty=True) is None

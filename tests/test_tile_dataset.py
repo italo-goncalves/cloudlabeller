@@ -129,3 +129,29 @@ def test_augmented_copies_are_never_held_in_memory():
         tracemalloc.stop()
     assert n == 300 * windows(rolls)
     assert peak < stacked / 10, (peak, stacked)
+
+
+def test_per_pixel_weights_ride_with_the_mask():
+    """ADR-0006: a cloud pixel's weight follows it through the mirror/slide
+    augmentation, times its sample's weight; samples without weights weigh 1."""
+    from cloudlabeller.ml.tile_dataset import make_dataset
+
+    rng = np.random.default_rng(5)
+    a = Sample("p0#0,0", rng.integers(0, 256, (8, 8, 3), dtype=np.uint8),
+               np.arange(64, dtype=np.int16).reshape(8, 8), 0.5,
+               pixel_weights=np.tile(np.arange(8, dtype=np.uint8) * 30, (8, 1)))
+    b = Sample("p1#0,0", rng.integers(0, 256, (8, 8, 3), dtype=np.uint8),
+               np.zeros((8, 8), np.int16), 1.0)
+    ds = make_dataset(TrainingSet([a, b]), batch_size=2, augment_rolls=2, shuffle=False)
+    seen = set()
+    for _, y, w in ds.as_numpy_iterator():
+        assert w.shape == y.shape
+        for yk, wk in zip(y.astype(int), w):
+            if yk.max() > 0:                         # sample a, some window
+                # each pixel kept its own weight: column c of the mask is c + 8 r
+                np.testing.assert_allclose(wk, 0.5 * ((yk % 8) * 30) / 255.0, atol=1e-6)
+                seen.add("a")
+            else:                                    # sample b: no weights, weighs 1
+                np.testing.assert_allclose(wk, 1.0)
+                seen.add("b")
+    assert seen == {"a", "b"}

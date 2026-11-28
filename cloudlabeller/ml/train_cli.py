@@ -31,9 +31,12 @@ Usage::
     python -m cloudlabeller.ml.train_cli PROJECT_ROOT --name unet
         [--steps 50000 | --epochs N] [--patience 10] [--batch-size 2]
         [--val-fraction 0.2] [--augment-rolls 5] [--include-auto]
-        [--stop-file PATH]
+        [--weight-by-uncertainty] [--stop-file PATH]
 
 Reads labels/statuses from the project on disk (the parent saves first).
+It learns only from hand-drawn labels and from labels the cloud got from
+them (ADR-0006): a cloud-made photo's pixels projected from predicted
+points are left out, and validation holds out hand-drawn photos only.
 Trains for ``--steps`` batches (as many epochs as that takes, rounded up),
 stops early after ``--patience`` epochs without a better validation loss,
 and saves the best epoch's weights. Emits ``PROGRESS <frac> <msg>`` lines;
@@ -67,6 +70,29 @@ def _history(manifest: dict | None, metrics: dict) -> dict:
             for k, vals in metrics.items()}
 
 
+def training_layers(survey, name: str, by_uncertainty: bool):
+    """A cloud-made photo's mask for training, and its per-pixel weights.
+
+    Pixels projected from predicted points are left out (the network never
+    learns from its own output, ADR-0006). With ``by_uncertainty`` each
+    pixel weighs 1 − its Uncertainty (unknown: 1); otherwise there are no
+    per-pixel weights. Returns the mask, ``(mask, weights)``, or None."""
+    from cloudlabeller.core import sources as src
+
+    layers = survey.render_auto_layers(name)
+    if layers is None:
+        return None
+    mask, source, unc = layers
+    mask = mask.copy()
+    mask[~src.trainable(source)] = -1
+    if not by_uncertainty:
+        return mask
+    import numpy as np
+
+    weights = 1.0 - unc.astype(np.float32)
+    return mask, np.where(np.isfinite(weights), weights, 1.0)
+
+
 def _parse(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="train_cli")
     p.add_argument("project_root")
@@ -84,6 +110,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--augment-rolls", type=int, default=5)
     p.add_argument("--include-auto", action="store_true",
                    help="add cloud-projected (auto) images at half weight")
+    p.add_argument("--weight-by-uncertainty", action="store_true",
+                   help="weigh each cloud-projected pixel by 1 - its Uncertainty as well")
     p.add_argument("--resume", action="store_true",
                    help="load the saved model of this name and train it for "
                         "more epochs (architecture/size come from its manifest)")
@@ -191,10 +219,13 @@ def main(argv: list[str]) -> int:
                   + (" that the dense cloud's normals reach" if spec.normals else ""))
         return 2
 
+    auto_keys = set(auto_names)
+
     def mask_loader(key):
         survey, name, _ = records[key]
-        mask = survey.labels.image_masks.get(name)
-        return mask if mask is not None else survey.render_auto_mask(name)
+        if key not in auto_keys:
+            return survey.labels.image_masks.get(name)
+        return training_layers(survey, name, args.weight_by_uncertainty)
 
     n = spec.net_size
     progress(0.01, f"Cutting {len(names)} photos into {spec.tile_size} px Tiles "
@@ -219,9 +250,12 @@ def main(argv: list[str]) -> int:
         log.error("no Tile is labelled enough to train on (at least %.0f%% of a Tile)",
                   100 * spec.min_labelled)
         return 2
-    train_set, val_set = (ts.split(args.val_fraction)
-                          if args.val_fraction > 0 and len(names) > 1
+    # Validation scores hand-drawn labels only (ADR-0006).
+    train_set, val_set = (ts.split(args.val_fraction, among=set(user_names))
+                          if args.val_fraction > 0 and len(names) > 1 and len(user_names) > 1
                           else (ts, None))
+    if val_set is not None and not val_set.samples:
+        val_set = None
 
     if args.resume:
         progress(0.01 + CUTTING, f"Loading model '{args.name}' to continue training…")
